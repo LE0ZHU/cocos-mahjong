@@ -48,6 +48,14 @@ const H_BUTTON = 58;
 // ---- 行内尺寸(行节点居中于卡片, 局部坐标) ----
 const ROW_W = CARD_W - 80;
 const ROW_HALF = ROW_W / 2;
+/** 四家手牌行的左右边界 —— "四家手牌"小标题与分隔线都对齐到这里, 不贴着卡片边框 */
+const ROW_LEFT = -ROW_HALF;
+const ROW_RIGHT = ROW_HALF;
+/** "四家手牌" 小标题 */
+const HEADER_TEXT = '四家手牌';
+const HEADER_FONT = 26;
+/** 小标题与分隔线之间的空隙 */
+const HEADER_LINE_GAP = 24;
 /** 座位名牌宽 / 中心 x / 字号 */
 const NAME_W = 140;
 const NAME_CX = -ROW_HALF + 86;
@@ -115,6 +123,20 @@ function fanColor(fan: number): Color {
     if (fan <= 4) return new Color(126, 192, 230, 255);
     if (fan <= 6) return new Color(244, 192, 100, 255);
     return new Color(236, 134, 90, 255);
+}
+
+/**
+ * 文本宽度估算: CJK/全角按字号, 数字/空格/中点按半角
+ *
+ * 用来给"同一行放两个 Label"或自适应宽度的地方(小标题、芯片)算所需宽度 ——
+ * 直接凭感觉给宽度会让 Label.Overflow.SHRINK 把字压扁。
+ */
+function textWidth(text: string, font: number): number {
+    let w = 0;
+    for (const ch of text) {
+        w += ch.codePointAt(0)! >= 0x2e80 ? font : font * 0.5;
+    }
+    return w;
 }
 
 /**
@@ -289,8 +311,11 @@ export class SettlementPanel extends Component {
         else this._label(card, '本局无人胡牌, 不计分', 26, TEXT_MUTED, 900, L.fanCY);
 
         // "四家手牌" 小标题 + 同高度的分隔线(同一行, 不叠高度)
-        this._label(card, '四家手牌', 26, TEXT_TITLE, 190, L.headerY, -CARD_W / 2 + 100, true);
-        this._divider(card, L.headerY, -CARD_W / 2 + 208, CARD_W / 2 - 40);
+        // 左对齐的 Label 文字从"节点 x - 宽度/2"开始, 所以 x 要加上半个宽度, 文字起点才落在行块左边界
+        const headerW = Math.ceil(textWidth(HEADER_TEXT, HEADER_FONT)) + 8;
+        this._label(card, HEADER_TEXT, HEADER_FONT, TEXT_TITLE, headerW, L.headerY,
+            ROW_LEFT + headerW / 2, true);
+        this._divider(card, L.headerY, ROW_LEFT + headerW + HEADER_LINE_GAP, ROW_RIGHT);
 
         // 四家手牌
         for (let i = 0; i < data.seats.length; i++) {
@@ -387,7 +412,7 @@ export class SettlementPanel extends Component {
 
     /** 单个芯片的宽度 */
     private _chipWidth(item: ChipItem): number {
-        return Math.max(76, item.label.length * 22 + 34);
+        return Math.max(76, Math.ceil(textWidth(item.label, 21)) + 34);
     }
 
     /** 一排芯片的总宽度 */
