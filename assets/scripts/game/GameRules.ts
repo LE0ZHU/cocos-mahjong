@@ -25,15 +25,24 @@ export interface GameRules {
     allowAddKan: boolean;
     /** 是否允许吃胡(点炮): 听牌时别人打出所听的牌,可以选择胡 */
     allowChiHu: boolean;
+    /** 是否允许抢杠胡: 别人补杠时可以抢那张牌胡 */
+    allowRobKan: boolean;
+    /** 是否允许一炮多响: 多家同时听同一张牌时可以一起胡 */
+    allowMultiRon: boolean;
+    /** 是否允许听牌宣言(立直): 亮明听牌后加 1 番, 但本局不能再吃/碰/杠 */
+    allowRiichi: boolean;
     /** AI 思考间隔(秒),由速度档位换算 */
     aiDelay: number;
 }
 
-/** 默认规则: 允许吃牌、允许续杠、允许吃胡、慢 AI 速度 */
+/** 默认规则: 允许吃牌、续杠、吃胡、抢杠、一炮多响、听牌宣言;慢 AI 速度 */
 export const DEFAULT_RULES: GameRules = {
     allowChi: true,
     allowAddKan: true,
     allowChiHu: true,
+    allowRobKan: true,
+    allowMultiRon: true,
+    allowRiichi: true,
     aiDelay: 0.9,
 };
 
@@ -74,6 +83,21 @@ class GameRulesStore {
         this._changed();
     }
 
+    setAllowRobKan(v: boolean): void {
+        this._rules.allowRobKan = !!v;
+        this._changed();
+    }
+
+    setAllowMultiRon(v: boolean): void {
+        this._rules.allowMultiRon = !!v;
+        this._changed();
+    }
+
+    setAllowRiichi(v: boolean): void {
+        this._rules.allowRiichi = !!v;
+        this._changed();
+    }
+
     setAiDelay(v: number): void {
         this._rules.aiDelay = clamp(v, 0.1, 2);
         this._changed();
@@ -96,6 +120,9 @@ class GameRulesStore {
         return r.allowChi === DEFAULT_RULES.allowChi
             && r.allowAddKan === DEFAULT_RULES.allowAddKan
             && r.allowChiHu === DEFAULT_RULES.allowChiHu
+            && r.allowRobKan === DEFAULT_RULES.allowRobKan
+            && r.allowMultiRon === DEFAULT_RULES.allowMultiRon
+            && r.allowRiichi === DEFAULT_RULES.allowRiichi
             && Math.abs(r.aiDelay - DEFAULT_RULES.aiDelay) < 1e-6;
     }
 
@@ -114,6 +141,9 @@ class GameRulesStore {
             if (typeof data.allowChi === 'boolean') this._rules.allowChi = data.allowChi;
             if (typeof data.allowAddKan === 'boolean') this._rules.allowAddKan = data.allowAddKan;
             if (typeof data.allowChiHu === 'boolean') this._rules.allowChiHu = data.allowChiHu;
+            if (typeof data.allowRobKan === 'boolean') this._rules.allowRobKan = data.allowRobKan;
+            if (typeof data.allowMultiRon === 'boolean') this._rules.allowMultiRon = data.allowMultiRon;
+            if (typeof data.allowRiichi === 'boolean') this._rules.allowRiichi = data.allowRiichi;
             if (typeof data.aiDelay === 'number') this._rules.aiDelay = clamp(data.aiDelay, 0.1, 2);
         } catch (e) {
             // 数据损坏/被禁用: 保持默认值即可,不阻断游戏

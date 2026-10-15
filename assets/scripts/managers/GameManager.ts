@@ -8,6 +8,9 @@ import { AIBrain } from '../game/AIBrain';
 import { HAND_SIZE, SUIT_CHARS, CN_NUMERALS } from '../core/TileDefine';
 import { GameRules, GAME_RULES } from '../game/GameRules';
 import { HuChecker } from '../core/HuChecker';
+import {
+    computeHu, HuResult, SeatResult, SettlementData, WinnerResult,
+} from '../core/HuScore';
 
 const { ccclass } = _decorator;
 
@@ -46,6 +49,50 @@ export interface MeldPromptRequest {
 }
 
 /**
+ * 一次胡牌结算的现场(内部用)
+ *
+ * 一炮多响时同一个入口会有多条: 每家各自收牌、各自算番型,
+ * 但分数都由"付分方"(点炮者/被抢杠者)一次付清。
+ */
+interface HuEntry {
+    /** 胡牌者座位 */
+    seat: number;
+    /** 胡牌时的完整手牌(含和牌张) */
+    hand: Tile[];
+    /** 副露 */
+    melds: Meld[];
+    /** 和的那张牌 */
+    winTile: Tile;
+    /** 是否自摸 */
+    isSelfDraw: boolean;
+    /** 是否杠后补摸胡 */
+    isAfterKan: boolean;
+    /** 是否摸到牌墙最后一张 */
+    isLastTile: boolean;
+    /** 是否抢杠胡 */
+    isRobKan: boolean;
+}
+
+/**
+ * 等待玩家决定"胡 / 过"的一次点炮(含一炮多响)
+ *
+ * AI 已经确定要胡的座位先记在 aiWinners 里, 玩家只决定自己要不要加入;
+ * 玩家点"过"时 AI 依然照胡(一炮多响), 全部放弃才继续走副露/下家摸牌。
+ */
+interface PendingRon {
+    /** 付分方座位(点炮者 / 被抢杠者) */
+    payerSeat: number;
+    /** 和的那张牌 */
+    tile: Tile;
+    /** AI 赢家座位 */
+    aiWinners: number[];
+    /** 是否抢杠 */
+    robKan: boolean;
+    /** 抢杠场景: 玩家点"过"后要继续执行的补杠动作(座位) */
+    resumeKanSeat: number;
+}
+
+/**
  * 全局游戏管理器 - 单例 Component
  *
  * 职责:
@@ -58,6 +105,16 @@ export interface MeldPromptRequest {
  *  - 出牌后检测他家能否吃/碰/杠: 玩家由 UI 弹出选择面板决定(吃/碰/杠或"过"继续摸牌),AI 自动决策
  *  - 副露者接着出牌(链式)
  *  - 任意方胡牌或牌墙摸空(流局) → GAME_OVER
+ *
+ * 胡牌与结算:
+ *  - 优先判吃胡: 同一张牌可以被多家同时胡(一炮多响), 玩家要逐个决定要不要胡
+ *  - 补杠时可被抢杠(抢杠胡优先于补杠, 抢杠成功则补杠不成立)
+ *  - 每次胡牌都算番型(清一色/对对胡/七对/十三幺/杠上开花/海底捞月/门清/立直/连庄…)并结算分数
+ *  - 结算数据通过 onSettle 交给 UI 弹出结算面板(番型列表 + 四家得失分 + 四家手牌)
+ *
+ * 听牌(立直):
+ *  - 手牌变化后自动检测听牌状态; 玩家可以主动点"听牌"按钮亮明(加 1 番),
+ *    亮明后本局不能再吃/碰/杠, 且出牌必须保持听牌; AI 听牌后自动亮明
  */
 @ccclass('GameManager')
 export class GameManager extends Component {
@@ -80,6 +137,13 @@ export class GameManager extends Component {
     private _pendingMeldCandidates: MeldCandidate[] = [];
     private _pendingMeldTile: Tile | null = null;
     private _pendingMeldFrom = -1;
+    /** 等待玩家决定要不要胡的一次点炮/抢杠 */
+    private _pendingRon: PendingRon | null = null;
+    // ---- 计分(跨局累计,返回主页面时清零) ----
+    /** 各家累计得分 */
+    private _scores: number[] = [0, 0, 0, 0];
+    /** 各家连庄次数(本局胡牌后 +1, 别人胡牌或未胡则清零) */
+    private _streaks: number[] = [0, 0, 0, 0];
 
     // ---- 常量 ----
     private readonly AI_COUNT = 3;
@@ -105,6 +169,14 @@ export class GameManager extends Component {
     onPlayerMeldChoice: ((request: MeldPromptRequest) => void) | null = null;
     /** 听牌提示(玩家): waitingTiles=听牌张 */
     onTenpai: ((waitingTiles: Tile[]) => void) | null = null;
+    /** 听牌状态变化: seat=座位, tenpai=当前是否听牌(UI 据此显示"听"标记) */
+    onTenpaiChanged: ((seat: number, tenpai: boolean) => void) | null = null;
+    /** 需要给玩家一句临时提示(如"已宣告听牌,不能这样出") */
+    onNotice: ((message: string) => void) | null = null;
+    /**
+     * 牌局结算数据(有人胡牌或流局都会给): UI 用它弹出独立结算面板
+     */
+    onSettle: ((data: SettlementData) => void) | null = null;
 
     onLoad(): void {
         if (GameManager._instance && GameManager._instance !== this) {
@@ -173,6 +245,9 @@ export class GameManager extends Component {
         this.cancelPendingMeld();
         this._canDiscard = false;
         this._phase = GamePhase.GAME_OVER;
+        // 返回主页面 = 一个会话结束, 累计分与连庄一起清零
+        this._scores = [0, 0, 0, 0];
+        this._streaks = [0, 0, 0, 0];
     }
 
     /**
@@ -187,21 +262,49 @@ export class GameManager extends Component {
         }
         const tile = this._wall.draw();
         if (!tile) return null;
+        // 摸走的是牌墙最后一张 → 摸牌自摸即"海底捞月"
+        const isLastTile = this._wall.remaining === 0;
 
         this._player.addDrawnTile(tile);
         this._playerDrawnTile = tile;
         this._canDiscard = true;
         this._fireHandChanged();
-        // 摸到与已碰牌相同的牌 → 可续杠
-        this._checkPlayerAddKan();
-        // 摸牌后检测胡牌
+        // 胡牌优先于续杠(杠上开花比补杠更值钱)
         if (HuChecker.isHu(this._player.hand, this._player.melds)) {
-            this._finishGame(0, '你胡了!');
+            this._settleSelfDraw(0, tile, false, isLastTile);
             return tile;
         }
-        // 听牌提示
-        this._checkPlayerTenpai();
+        // 摸到与已碰牌相同的牌 → 可续杠(已宣告听牌则不能再动副露)
+        if (!this._player.declaredTenpai) this._checkPlayerAddKan();
+        // 摸牌后检测听牌(刚摸的那张不算进听牌判定)
+        this._refreshTenpaiFlag(0, tile, true);
         return tile;
+    }
+
+    /**
+     * 自摸结算: 清掉"刚摸到"的状态, 走统一胡牌结算
+     * @param seat 胡牌座位
+     * @param tile 刚摸到的那张(胡的就是它)
+     * @param isAfterKan 是否杠后补摸(杠上开花)
+     * @param isLastTile 是否牌墙最后一张(海底捞月)
+     */
+    private _settleSelfDraw(seat: number, tile: Tile, isAfterKan: boolean, isLastTile: boolean): void {
+        const player = this._getPlayer(seat);
+        if (!player) return;
+        if (seat === 0) {
+            this._playerDrawnTile = null;
+            this._canDiscard = false;
+        }
+        this._finishWithHu([{
+            seat,
+            hand: [...player.hand],
+            melds: [...player.melds],
+            winTile: tile,
+            isSelfDraw: true,
+            isAfterKan,
+            isLastTile,
+            isRobKan: false,
+        }], -1);
     }
 
     // ==================== 续杠(碰 → 杠) ====================
@@ -239,12 +342,18 @@ export class GameManager extends Component {
     }
 
     /**
-     * 执行续杠: 把摸到的第4张补进已碰的面子 → 从牌墙补摸一张 → 继续出牌
+     * 执行补杠: 把摸到的第4张补进已碰的面子 → 从牌墙补摸一张 → 继续出牌
+     *
+     * 补杠前先给别家一次"抢杠胡"的机会(抢杠优先于补杠)。
      * @param tile 手里用来续杠的牌
+     * @param skipRobCheck true=玩家刚在抢杠面板点了"过",继续补杠,不再重复检测抢杠
      */
-    private _upgradeToKan(seat: number, tile: Tile): void {
+    private _upgradeToKan(seat: number, tile: Tile, skipRobCheck = false): void {
         const player = this._getPlayer(seat);
         if (!player) return;
+        // 抢杠: 别家可以抢这张牌胡,抢成功则补杠不成立
+        if (!skipRobCheck && this._rules.allowRobKan && this._tryRobKan(seat, tile)) return;
+
         const meld = this._findAddKanMeld(player, tile);
         if (!meld || !meld.upgradeToKan(tile)) return;
 
@@ -260,19 +369,27 @@ export class GameManager extends Component {
 
         // 补摸一张(简化: 直接从牌墙摸,非岭上牌);补摸后继续该玩家出牌
         const replacement = this._drawReplacement(seat);
+        if (!replacement) return; // 牌墙空已结算流局
+        // 补摸的这张就是杠上开花的机会
+        const isLastTile = !!this._wall && this._wall.remaining === 0;
+        if (HuChecker.isHu(player.hand, player.melds)) {
+            this._settleSelfDraw(seat, replacement, true, isLastTile);
+            return;
+        }
+        this._refreshTenpaiFlag(seat, seat === 0 ? replacement : null);
+        this._continueAfterKanDraw(seat);
+    }
+
+    /** 杠后补摸完成(未胡): 轮到该家出牌 */
+    private _continueAfterKanDraw(seat: number): void {
+        this._currentSeat = seat;
         if (seat === 0) {
-            if (replacement) {
-                this._canDiscard = true;
-                this._phase = GamePhase.PLAYER_TURN;
-                this._firePhaseChanged();
-                // 补摸的牌再检测一次胡牌
-                if (this._player && HuChecker.isHu(this._player.hand, this._player.melds)) {
-                    this._finishGame(0, '你胡了!(杠上开花)');
-                    return;
-                }
-            }
+            // 玩家杠后: 等玩家手动出牌
+            this._phase = GamePhase.PLAYER_TURN;
+            this._canDiscard = true;
+            this._firePhaseChanged();
         } else {
-            // AI: 稍作停顿后继续出牌
+            // AI 杠后: 延时自动出牌
             this._phase = GamePhase.AI_TURN;
             this._firePhaseChanged();
             this.scheduleOnce(() => this._aiDiscard(seat), this._rules.aiDelay);
@@ -314,38 +431,57 @@ export class GameManager extends Component {
         if (!this._canDiscard) return false;
         // 正在等玩家决定是否吃/碰/杠,不处理出牌
         if (this._awaitingPlayerMeld) return false;
-        const tile = this._player.removeTile(index);
+        const tile = this._player.hand[index];
         if (!tile) return false;
-        this._player.discards.push(tile);
+        // 立直锁: 宣告听牌后只能打"打完仍然听牌"的牌
+        if (this._player.declaredTenpai && !this._keepsTenpaiAfterDiscard(index)) {
+            this.onNotice?.('已宣告听牌,只能打出保持听牌的牌');
+            return false;
+        }
+        const discarded = this._player.removeTile(index);
+        if (!discarded) return false;
+        this._player.discards.push(discarded);
         this._playerDrawnTile = null;
         this._player.sortHand(); // 出牌后把摸到的牌并入理牌
         this._canDiscard = false;
         this._fireHandChanged();
         this._fireDiscardChanged();
-        this._afterDiscard(0, tile);
+        // 打完重新检测听牌(立直状态下仍然听牌, 状态不变)
+        this._refreshTenpaiFlag(0);
+        this._afterDiscard(0, discarded);
         return true;
+    }
+
+    /** 打出第 index 张后是否仍听牌(立直锁判定用) */
+    private _keepsTenpaiAfterDiscard(index: number): boolean {
+        const p = this._player;
+        if (!p) return false;
+        const rest = p.hand.filter((_, i) => i !== index);
+        return HuChecker.isTenpai(rest, p.melds).length > 0;
     }
 
     // ==================== 出牌后流程: 副露检测 / 下家摸牌 ====================
 
     /**
-     * 出牌后统一处理: 检测吃胡 → 检测副露 → 下家摸牌
+     * 出牌后统一处理: 检测吃胡(一炮多响) → 检测副露 → 下家摸牌
      *
      * 自己需要选择吃/碰/杠/吃胡时,流程在此暂停(等玩家点面板),
      * 由 resolvePlayerMeld 决定后再从这里继续往下家走。
+     *
+     * 胡牌判定排在流局判定之前: 牌墙摸空时打出的最后一张仍然可以被胡(点炮)。
      * @param discarder 出牌者座位(0-3)
      * @param tile 打出的牌
      */
     private _afterDiscard(discarder: number, tile: Tile): void {
         this._lastDiscard = tile;
-        // 流局: 牌墙空且无人胡
+        // 1) 吃胡(点炮)优先于吃/碰/杠, 且允许多家同时胡(一炮多响)
+        if (this._beginRon(discarder, tile, false, -1)) return;
+        // 2) 流局: 牌墙空且无人胡
         if (!this._wall || this._wall.remaining <= 0) {
             this._endByDraw();
             return;
         }
-        // 1) 吃胡(点炮)优先于吃/碰/杠: 玩家可选择胡别人打出的牌
-        if (this._checkPlayerRon(discarder, tile)) return;
-        // 2) 检测其他3家能否对该牌副露(按轮转顺序: 下家优先)
+        // 3) 检测其他3家能否对该牌副露(按轮转顺序: 下家优先)
         const meldResult = this._checkMelds(discarder, tile);
         if (meldResult) {
             this._doMeld(meldResult.seat, meldResult.candidate, tile, discarder);
@@ -353,9 +489,15 @@ export class GameManager extends Component {
         }
         // 玩家正在纠结吃/碰/杠: 回合挂起,等 resolvePlayerMeld 决定后再继续
         if (this._awaitingPlayerMeld) return;
-        // 无副露 → 下家(逆时针下一位)摸牌
+        this._continueToNextSeat(discarder);
+    }
+
+    /**
+     * 本轮无人胡之后继续推进: 下家(逆时针下一位)摸牌
+     * 玩家若因"过"而保留着刚摸到的牌(14 张待出),不能重复摸牌,直接回到他的回合。
+     */
+    private _continueToNextSeat(discarder: number): void {
         const nextSeat = NEXT_SEAT[discarder];
-        // 玩家若因"过"而保留着刚摸到的牌(14 张待出),不能重复摸牌,直接回到他的回合
         if (nextSeat === 0 && this._canResumePlayerTurn()) {
             this._phase = GamePhase.PLAYER_TURN;
             this._firePhaseChanged();
@@ -369,57 +511,132 @@ export class GameManager extends Component {
         return !!this._player && this._playerDrawnTile !== null && this._canDiscard;
     }
 
-    // ==================== 吃胡(点炮) ====================
+    // ==================== 吃胡(点炮) / 抢杠胡 / 一炮多响 ====================
 
     /**
-     * 检测玩家能否吃胡(点炮): 别人打出的牌凑成胡牌
-     *
-     * 规则 allowChiHu 关闭时直接跳过;玩家胡牌优先于吃/碰/杠。
-     * @returns true 表示已弹出选择(胡/过),调用方应暂停后续流程
+     * 收集除 fromSeat 之外所有能用 tile 胡牌的座位
+     * @returns 座位列表(按逆时针轮转顺序);空表示无人胡
      */
-    private _checkPlayerRon(discarder: number, tile: Tile): boolean {
-        if (!this._rules.allowChiHu) return false;
-        if (discarder === 0 || !this._player) return false;
-        const test = [...this._player.hand, tile];
-        if (!HuChecker.isHu(test, this._player.melds)) return false;
+    private _collectRonSeats(fromSeat: number, tile: Tile): number[] {
+        if (!this._rules.allowChiHu) return [];
+        const seats: number[] = [];
+        let seat = fromSeat;
+        for (let i = 0; i < 3; i++) {
+            seat = NEXT_SEAT[seat];
+            const player = this._getPlayer(seat);
+            if (!player) continue;
+            if (HuChecker.isHu([...player.hand, tile], player.melds)) seats.push(seat);
+        }
+        return seats;
+    }
 
-        // 复用同一个选择面板: [胡牌] + [过]
-        this._pendingMeldCandidates = [{ type: 'ron', handTiles: [] }];
-        this._pendingMeldTile = tile;
-        this._pendingMeldFrom = discarder;
-        this._awaitingPlayerMeld = true;
-        this.onPlayerMeldChoice?.({
-            kind: 'ron',
-            items: [{
-                label: '胡牌',
-                tilesText: tile.displayText,
-            }],
-        });
+    /**
+     * 开始一次吃胡判定: 玩家要决定要不要胡, AI 直接胡(一炮多响)
+     *
+     * @param payerSeat 付分方(点炮者 / 被抢杠者)
+     * @param tile 和的那张牌
+     * @param robKan 是否抢杠(抢杠时玩家点"过"要继续补杠,而不是往下走)
+     * @param resumeKanSeat 抢杠场景下, 玩家放弃后要继续补杠的座位(普通点炮传 -1)
+     * @returns true 表示已弹出选择或已结算,调用方应暂停后续流程
+     */
+    private _beginRon(payerSeat: number, tile: Tile, robKan: boolean, resumeKanSeat: number): boolean {
+        const huSeats = this._collectRonSeats(payerSeat, tile);
+        if (huSeats.length === 0) return false;
+        // 关闭一炮多响时只让轮转里最近的一家胡(下家优先)
+        const winners = this._rules.allowMultiRon ? huSeats : [huSeats[0]];
+        const aiWinners = winners.filter(s => s !== 0);
+
+        // 玩家能胡: 弹 [胡牌] + [过], 玩家决定期间 AI 的胡先记账
+        if (winners.indexOf(0) >= 0) {
+            this._pendingRon = { payerSeat, tile, aiWinners, robKan, resumeKanSeat };
+            this._pendingMeldCandidates = [{ type: 'ron', handTiles: [] }];
+            this._pendingMeldTile = tile;
+            this._pendingMeldFrom = payerSeat;
+            this._awaitingPlayerMeld = true;
+            this.onPlayerMeldChoice?.({
+                kind: 'ron',
+                items: [{
+                    label: '胡牌',
+                    tilesText: aiWinners.length > 0
+                        ? `${tile.displayText} · 一炮多响`
+                        : tile.displayText,
+                }],
+            });
+            return true;
+        }
+
+        // 玩家不在其中(或自己打出的牌): AI 直接胡
+        this._settleRon(payerSeat, tile, aiWinners, robKan);
         return true;
     }
 
-    /** 玩家选择吃胡: 把打出的牌收进手牌并结算 */
-    private _doPlayerRon(tile: Tile, fromSeat: number): void {
-        const player = this._player;
-        if (!player) return;
-        // 该牌从出牌者的弃牌河移到赢家手牌
-        const fromPlayer = this._getPlayer(fromSeat);
-        if (fromPlayer && fromPlayer.discards.length > 0) {
-            const last = fromPlayer.discards[fromPlayer.discards.length - 1];
-            if (last === tile) fromPlayer.discards.pop();
-        }
-        player.addTile(tile);
-        this._playerDrawnTile = null;
-        this._canDiscard = false;
-        this._fireHandChanged();
-        if (fromSeat === 0) this._fireDiscardChanged();
-        else this._fireAIDiscard(fromSeat - 1, tile);
-
-        const fromName = SEAT_NAMES[fromSeat];
-        console.log(`[吃胡] 你胡了 ${fromName} 打出的 ${tile.displayText}`);
-        this._finishGame(0, `你胡了!(${fromName}点炮)`);
+    /**
+     * 抢杠胡: 别人补杠时可以抢这张牌胡, 抢杠优先于补杠
+     * @param kanSeat 正在补杠的座位(同时也是付分方)
+     * @returns true 表示抢杠流程已启动(玩家要决定, 或已直接结算)
+     */
+    private _tryRobKan(kanSeat: number, tile: Tile): boolean {
+        // 该牌本来就在补杠者手里, 不需要走"从弃牌河取牌"
+        const huSeats = this._collectRonSeats(kanSeat, tile);
+        if (huSeats.length === 0) return false;
+        console.log(`[抢杠] ${SEAT_NAMES[kanSeat]} 补杠 ${tile.displayText}, ${huSeats.map(s => SEAT_NAMES[s]).join('、')} 可抢`);
+        return this._beginRon(kanSeat, tile, true, kanSeat);
     }
 
+    /**
+     * 吃胡结算: 每家赢家把和的牌收进手牌, 统一算番型并结算分数
+     * @param payerSeat 付分方座位(点炮者 / 被抢杠者)
+     * @param tile 和的那张牌
+     * @param winnerSeats 赢家座位列表(一炮多响时多家)
+     * @param robKan 是否抢杠胡
+     */
+    private _settleRon(payerSeat: number, tile: Tile, winnerSeats: number[], robKan: boolean): void {
+        if (this._phase === GamePhase.GAME_OVER) return;
+        // 点炮: 这张牌从出牌者弃牌河移走; 抢杠: 本来就在补杠者手里, 从手牌移走
+        if (robKan) {
+            this._getPlayer(payerSeat)?.removeTileRef(tile);
+        } else {
+            const fromPlayer = this._getPlayer(payerSeat);
+            if (fromPlayer && fromPlayer.discards.length > 0) {
+                const last = fromPlayer.discards[fromPlayer.discards.length - 1];
+                if (last === tile) fromPlayer.discards.pop();
+            }
+        }
+
+        const entries: HuEntry[] = [];
+        for (const seat of winnerSeats) {
+            const player = this._getPlayer(seat);
+            if (!player) continue;
+            // 每家都把这张牌收进手牌: 便于各家独立算番型, 结算面板四家手牌也能对齐显示
+            player.addTile(tile);
+            if (seat === 0) {
+                this._playerDrawnTile = null;
+                this._canDiscard = false;
+                this._fireHandChanged();
+            } else {
+                this._fireAIHandChanged(seat - 1);
+            }
+            entries.push({
+                seat,
+                hand: [...player.hand],
+                melds: [...player.melds],
+                winTile: tile,
+                isSelfDraw: false,
+                isAfterKan: false,
+                isLastTile: false,
+                isRobKan: robKan,
+            });
+            console.log(`[${robKan ? '抢杠胡' : '吃胡'}] ${SEAT_NAMES[seat]} 胡 ${SEAT_NAMES[payerSeat]} 的 ${tile.displayText}`);
+        }
+        // 刷新付分方(牌被取走: 点炮时牌河少一张, 抢杠时手牌少一张)
+        if (payerSeat === 0) this._fireHandChanged();
+        if (robKan && payerSeat !== 0) this._fireAIHandChanged(payerSeat - 1);
+        if (payerSeat === 0) this._fireDiscardChanged();
+        else this._fireAIDiscard(payerSeat - 1, tile);
+
+        if (entries.length === 0) return;
+        this._finishWithHu(entries, payerSeat);
+    }
 
     /**
      * 检测3家能否对打出的牌副露
@@ -441,6 +658,8 @@ export class GameManager extends Component {
         for (let offset = 1; offset <= 3; offset++) {
             seat = NEXT_SEAT[seat];
             if (seat === 0 && skipPlayer) continue;
+            // 玩家已宣告听牌(立直)后不能再吃/碰/杠
+            if (seat === 0 && this._player?.declaredTenpai) continue;
             const isNext = offset === 1; // 仅下家可吃
             // 规则可禁止吃牌(碰/杠不受影响)
             const canChi = isNext && this._rules.allowChi;
@@ -514,27 +733,42 @@ export class GameManager extends Component {
         const tile = this._pendingMeldTile;
         const fromSeat = this._pendingMeldFrom;
         const candidate = candidateIndex >= 0 ? this._pendingMeldCandidates[candidateIndex] : null;
+        const ron = this._pendingRon;
         this._awaitingPlayerMeld = false;
-        if (!tile) {
-            this._pendingMeldCandidates = [];
-            this._pendingMeldTile = null;
-            this._pendingMeldFrom = -1;
-            return;
-        }
-        // 吃胡: 选中即结算,不走副露流程
+        this._clearPendingChoice();
+        if (!tile) return;
+
+        // 吃胡/抢杠胡: 选中即结算,不走副露流程
         if (candidate && candidate.type === 'ron') {
-            this._pendingMeldCandidates = [];
-            this._pendingMeldTile = null;
-            this._pendingMeldFrom = -1;
-            this._doPlayerRon(tile, fromSeat);
+            const ctx = ron;
+            if (!ctx) return;
+            this._settleRon(ctx.payerSeat, ctx.tile, [0, ...ctx.aiWinners], ctx.robKan);
             return;
         }
         // 续杠: 摸牌后自己决定是否把碰补成杠(fromSeat 为 -1 时是本回合的续杠抉择)
         if (candidate && candidate.type === 'kan' && fromSeat < 0) {
-            this._pendingMeldCandidates = [];
-            this._pendingMeldTile = null;
-            this._pendingMeldFrom = -1;
             this._upgradeToKan(0, tile);
+            return;
+        }
+        // 放弃胡牌: 抢杠要继续把杠补上, 普通点炮继续副露/下家摸牌
+        if (ron && !candidate) {
+            if (ron.robKan) {
+                // 抢杠方都没抢 → 补杠照常进行
+                this._upgradeToKan(ron.resumeKanSeat, ron.tile, true);
+                return;
+            }
+            if (ron.aiWinners.length > 0) {
+                // AI 依然胡(一炮多响), 玩家只是没参与
+                this._settleRon(ron.payerSeat, ron.tile, ron.aiWinners, false);
+                return;
+            }
+            // 无人胡 → 回到吃/碰/杠判定(跳过玩家, 避免重复询问 → 死循环)
+            const rest = this._checkMelds(ron.payerSeat, ron.tile, true);
+            if (rest) {
+                this._doMeld(rest.seat, rest.candidate, ron.tile, ron.payerSeat);
+                return;
+            }
+            this._continueToNextSeat(ron.payerSeat);
             return;
         }
         if (candidate) {
@@ -544,30 +778,26 @@ export class GameManager extends Component {
         }
         // 过: 继续向下检查是否还有 AI 要这张牌,否则下家摸牌
         // (跳过座位0,否则会把自己重新问一遍 → 死循环)
-        this._pendingMeldCandidates = [];
-        this._pendingMeldTile = null;
-        this._pendingMeldFrom = -1;
         const rest = this._checkMelds(fromSeat, tile, true);
         if (rest) {
             this._doMeld(rest.seat, rest.candidate, tile, fromSeat);
             return;
         }
-        const nextSeat = NEXT_SEAT[fromSeat];
-        // 玩家若还留着刚摸到的牌(待出牌),不能重复摸牌
-        if (nextSeat === 0 && this._canResumePlayerTurn()) {
-            this._phase = GamePhase.PLAYER_TURN;
-            this._firePhaseChanged();
-            return;
-        }
-        this._startDrawTurn(nextSeat);
+        this._continueToNextSeat(fromSeat);
+    }
+
+    /** 清空一次选择请求的全部临时状态 */
+    private _clearPendingChoice(): void {
+        this._pendingMeldCandidates = [];
+        this._pendingMeldTile = null;
+        this._pendingMeldFrom = -1;
+        this._pendingRon = null;
     }
 
     /** 取消等待中的副露选择(重新开局/手动重开时调用),避免流程被卡住 */
     cancelPendingMeld(): void {
         this._awaitingPlayerMeld = false;
-        this._pendingMeldCandidates = [];
-        this._pendingMeldTile = null;
-        this._pendingMeldFrom = -1;
+        this._clearPendingChoice();
     }
 
     /** 执行副露: 添加meld → (杠补摸) → 副露者出牌 */
@@ -600,22 +830,22 @@ export class GameManager extends Component {
 
         // 杠后补摸1张(简化: 直接从牌墙摸,非岭上牌)
         if (candidate.type === 'kan') {
-            if (!this._drawReplacement(seat)) return; // 牌墙空已结算流局
+            const replacement = this._drawReplacement(seat);
+            if (!replacement) return; // 牌墙空已结算流局
+            const owner = this._getPlayer(seat)!;
+            // 补摸的这张就是杠上开花的机会
+            if (HuChecker.isHu(owner.hand, owner.melds)) {
+                this._settleSelfDraw(seat, replacement, true, this._wall.remaining === 0);
+                return;
+            }
+            this._refreshTenpaiFlag(seat, seat === 0 ? replacement : null);
+        } else {
+            // 吃/碰后手牌变少, 听牌状态可能变了
+            this._refreshTenpaiFlag(seat);
         }
 
         // 副露者需出牌
-        this._currentSeat = seat;
-        if (seat === 0) {
-            // 玩家副露后: 等玩家手动出牌
-            this._phase = GamePhase.PLAYER_TURN;
-            this._canDiscard = true;
-            this._firePhaseChanged();
-        } else {
-            // AI 副露后: 延时自动出牌
-            this._phase = GamePhase.AI_TURN;
-            this._firePhaseChanged();
-            this.scheduleOnce(() => this._aiDiscard(seat), this._rules.aiDelay);
-        }
+        this._continueAfterKanDraw(seat);
     }
 
     // ==================== 回合调度 ====================
@@ -649,12 +879,13 @@ export class GameManager extends Component {
         }
         const drawn = this._wall.draw();
         if (!drawn) { this._endByDraw(); return; }
+        const isLastTile = this._wall.remaining === 0;
         ai.addTile(drawn);
         this._fireAIHandChanged(seat - 1);
 
-        // 检测胡
+        // 检测胡(摸走牌墙最后一张 → 海底捞月)
         if (HuChecker.isHu(ai.hand, ai.melds)) {
-            this._finishGame(seat, `AI(${SEAT_NAMES[seat]})胡了!`);
+            this._settleSelfDraw(seat, drawn, false, isLastTile);
             return;
         }
         // 摸到与已碰牌相同的牌 → 续杠(规则允许时 AI 总是补杠)
@@ -662,11 +893,8 @@ export class GameManager extends Component {
             this._upgradeToKan(seat, drawn);
             return;
         }
-        // 听牌(仅日志)
-        const waiting = HuChecker.isTenpai(ai.hand, ai.melds);
-        if (waiting.length > 0) {
-            console.log(`[听牌] AI(${SEAT_NAMES[seat]}) 听: ${waiting.map(t => t.displayText).join(' ')}`);
-        }
+        // 听牌检测(AI 一旦听牌就自动亮明"听"标记)
+        this._refreshTenpaiFlag(seat, drawn, true);
         // 延时出牌
         this.scheduleOnce(() => this._aiDiscard(seat), this._rules.aiDelay);
     }
@@ -676,43 +904,230 @@ export class GameManager extends Component {
         if (this._phase === GamePhase.GAME_OVER) return;
         const ai = this._aiPlayers[seat - 1];
         if (!ai) return;
-        const idx = AIBrain.chooseDiscard(ai.hand);
+        // 已宣告听牌(立直)的 AI 只能打保持听牌的牌
+        const idx = ai.declaredTenpai
+            ? AIBrain.chooseDiscardTenpaiSafe(ai.hand, ai.melds)
+            : AIBrain.chooseDiscard(ai.hand);
         const tile = ai.removeTile(idx);
         if (!tile) return;
         ai.discards.push(tile);
         this._fireAIHandChanged(seat - 1);
         this._fireAIDiscard(seat - 1, tile);
         console.log(`[AI] ${SEAT_NAMES[seat]} 打出 ${tile.displayText}`);
+        // 打完重新检测听牌
+        this._refreshTenpaiFlag(seat);
         this._afterDiscard(seat, tile);
     }
 
-    // ==================== 牌局结束 ====================
+    // ==================== 牌局结束: 胡牌结算 / 流局 ====================
 
     /**
-     * 统一收尾: 结束牌局 → 提示 → 亮出四家手牌
-     * 无论哪家胡牌、还是流局,都走这里,保证"结束时四家手牌全亮"只有一条路径。
-     * @param winnerSeat 胡牌者座位(0-3);流局传 -1
-     * @param message 提示文字
+     * 胡牌结算(自摸/吃胡/抢杠/一炮多响统一入口)
+     *
+     * 流程: 逐家算番型 → 按付分关系算分数 → 更新连庄与累计分 →
+     *       结束牌局 → 亮出四家手牌 → 把结算数据交给 UI 弹结算面板
+     * @param entries 各家胡牌现场(一炮多响时有多条)
+     * @param payerSeat 付分方座位(点炮者/被抢杠者);自摸传 -1
      */
-    private _finishGame(winnerSeat: number, message: string): void {
+    private _finishWithHu(entries: HuEntry[], payerSeat: number): void {
+        if (this._phase === GamePhase.GAME_OVER) return;
+        if (entries.length === 0) return;
+
+        // 1) 逐家算番型(连庄取"本次胡牌后"的连庄次数)
+        const winners: WinnerResult[] = [];
+        for (const e of entries) {
+            const player = this._getPlayer(e.seat);
+            const hu: HuResult = computeHu({
+                hand: e.hand,
+                melds: e.melds,
+                isSelfDraw: e.isSelfDraw,
+                isAfterKan: e.isAfterKan,
+                isLastTile: e.isLastTile,
+                isRobKan: e.isRobKan,
+                streak: this._streaks[e.seat] + 1,
+                declaredTenpai: !!player?.declaredTenpai,
+            });
+            winners.push({
+                seat: e.seat,
+                name: SEAT_NAMES[e.seat],
+                hu,
+                delta: 0,
+                winTile: e.winTile,
+                isSelfDraw: e.isSelfDraw,
+            });
+        }
+
+        // 2) 分数: 自摸=三家各付一份; 点炮/抢杠=付分方一次付清(可同时付给多家)
+        const deltas = [0, 0, 0, 0];
+        for (const w of winners) {
+            if (w.isSelfDraw) {
+                w.delta = w.hu.points * 3;
+                deltas[w.seat] += w.delta;
+                for (let s = 0; s < 4; s++) {
+                    if (s !== w.seat) deltas[s] -= w.hu.points;
+                }
+            } else {
+                w.delta = w.hu.points;
+                deltas[w.seat] += w.delta;
+                if (payerSeat >= 0) deltas[payerSeat] -= w.delta;
+            }
+        }
+
+        // 3) 累计分与连庄(赢家 +1 局, 其他人断庄)
+        const winnerSeats = new Set(winners.map(w => w.seat));
+        for (let s = 0; s < 4; s++) {
+            this._scores[s] += deltas[s];
+            this._streaks[s] = winnerSeats.has(s) ? this._streaks[s] + 1 : 0;
+        }
+
+        const { title, subtitle } = this._buildHuTitle(winners, payerSeat);
+        const message = subtitle ? `${title}(${subtitle})` : title;
+        this._endGame(title, subtitle, message, winners[0].seat, this._buildSeatResults(deltas, winnerSeats), winners);
+    }
+
+    /** 流局: 牌墙摸空且无人胡(同样要亮牌 + 弹结算面板, 连庄不断) */
+    private _endByDraw(): void {
+        if (this._phase === GamePhase.GAME_OVER) return;
+        const title = '流局';
+        const subtitle = '牌墙已空, 无人胡牌';
+        const message = `流局(牌墙已空)`;
+        this._endGame(title, subtitle, message, -1, this._buildSeatResults([0, 0, 0, 0], new Set()), []);
+    }
+
+    /**
+     * 收尾公共部分: 结束状态 + 提示 + 亮牌 + 结算数据
+     */
+    private _endGame(
+        title: string,
+        subtitle: string,
+        message: string,
+        winnerSeat: number,
+        seats: SeatResult[],
+        winners: WinnerResult[],
+    ): void {
         this._phase = GamePhase.GAME_OVER;
+        this.cancelPendingMeld();
+        this._canDiscard = false;
         this._fireHu(message);
         this._firePhaseChanged();
         this.onReveal?.(winnerSeat, message);
+        const data: SettlementData = {
+            kind: winners.length > 0 ? 'hu' : 'draw',
+            title,
+            subtitle,
+            winners,
+            seats,
+        };
+        this.onSettle?.(data);
     }
 
-    /** 流局: 牌墙摸空且无人胡(同样要亮牌) */
-    private _endByDraw(): void {
-        this._finishGame(-1, '流局(牌墙已空)');
-    }
-
-    /** 玩家听牌检测并提示 */
-    private _checkPlayerTenpai(): void {
-        if (!this._player) return;
-        const waiting = HuChecker.isTenpai(this._player.hand, this._player.melds);
-        if (waiting.length > 0) {
-            this.onTenpai?.(waiting);
+    /** 四家结算行(含累计分与本局得失) */
+    private _buildSeatResults(deltas: number[], winnerSeats: Set<number>): SeatResult[] {
+        const rows: SeatResult[] = [];
+        for (let s = 0; s < 4; s++) {
+            const p = this._getPlayer(s);
+            if (!p) continue;
+            rows.push({
+                seat: s,
+                name: SEAT_NAMES[s],
+                hand: [...p.hand].sort((a, b) => a.sortKey - b.sortKey),
+                melds: [...p.melds],
+                delta: deltas[s] ?? 0,
+                total: this._scores[s],
+                isWinner: winnerSeats.has(s),
+                declaredTenpai: p.declaredTenpai,
+            });
         }
+        return rows;
+    }
+
+    /** 胡牌标题文案(一炮多响单独一句) */
+    private _buildHuTitle(
+        winners: WinnerResult[],
+        payerSeat: number,
+    ): { title: string; subtitle: string } {
+        if (winners.length > 1) {
+            return {
+                title: '一炮多响',
+                subtitle: `${winners.map(w => w.name).join('、')} 同时胡 ${winners[0].winTile?.displayText ?? ''}`,
+            };
+        }
+        const w = winners[0];
+        const title = w.seat === 0 ? '你胡了!' : `${w.name}胡了!`;
+        let subtitle: string;
+        if (w.isSelfDraw) {
+            subtitle = '自摸';
+        } else if (w.hu.fans.some(f => f.name === '抢杠胡')) {
+            subtitle = `抢${payerSeat === 0 ? '你' : SEAT_NAMES[payerSeat]}的杠`;
+        } else {
+            subtitle = `${payerSeat === 0 ? '你' : SEAT_NAMES[payerSeat]}点炮`;
+        }
+        return { title, subtitle };
+    }
+
+    // ==================== 听牌检测 / 立直 ====================
+
+    /**
+     * 重新检测某家听牌状态并广播变化
+     *
+     * @param seat 座位 0-3
+     * @param exclude 刚摸到的那张牌(未并入理牌, 参与听牌判定时要排除)
+     * @param announce true=顺带把听牌张通过 onTenpai 提示给玩家
+     */
+    private _refreshTenpaiFlag(seat: number, exclude: Tile | null = null, announce = false): void {
+        const player = this._getPlayer(seat);
+        if (!player) return;
+        const hand = exclude ? player.hand.filter(t => t !== exclude) : player.hand;
+        const waiting = HuChecker.isTenpai(hand, player.melds);
+        const isTenpai = waiting.length > 0;
+        const changed = player.tenpai !== isTenpai;
+        player.tenpai = isTenpai;
+        // AI 一旦听牌就自动亮明"听", 让玩家知道对手在等牌
+        if (seat !== 0 && isTenpai && !player.declaredTenpai) {
+            player.declaredTenpai = true;
+            console.log(`[听牌] AI(${SEAT_NAMES[seat]}) 听: ${waiting.map(t => t.displayText).join(' ')}`);
+        }
+        if (changed) this.onTenpaiChanged?.(seat, isTenpai);
+        if (announce && isTenpai && seat === 0) this.onTenpai?.(waiting);
+    }
+
+    /**
+     * 玩家是否可以宣告听牌(立直)
+     *
+     * 条件: 本局进行中、轮到玩家、没在等副露选择、还没宣告过、手上没有副露(必须门清)、当前确实听牌
+     */
+    get canRiichi(): boolean {
+        if (!this._rules.allowRiichi) return false;
+        if (this._phase === GamePhase.GAME_OVER || this._phase === GamePhase.DEALING) return false;
+        if (this._phase !== GamePhase.PLAYER_TURN) return false;
+        if (!this._player || this._awaitingPlayerMeld) return false;
+        if (!this._canDiscard || this._player.declaredTenpai) return false;
+        if (this._player.melds.length > 0) return false;
+        return this._player.tenpai;
+    }
+
+    /**
+     * 玩家宣告听牌(立直): 亮明"听"标记, 加 1 番
+     * 本局不能再吃/碰/杠, 且出牌必须保持听牌(见 playTile 的立直锁)
+     * @returns 是否宣告成功
+     */
+    declareTenpai(): boolean {
+        if (!this.canRiichi || !this._player) return false;
+        this._player.declaredTenpai = true;
+        this.onTenpaiChanged?.(0, true);
+        this.onNotice?.('已宣告听牌(立直): 本局不能再吃/碰/杠, 出牌须保持听牌');
+        console.log('[立直] 你宣告听牌');
+        return true;
+    }
+
+    /** 某家是否已亮明听牌(UI 画"听"标记用) */
+    isTenpaiDeclared(seat: number): boolean {
+        return !!this._getPlayer(seat)?.declaredTenpai;
+    }
+
+    /** 某家当前是否听牌(UI 显示"可宣告听牌"按钮用) */
+    isTenpai(seat: number): boolean {
+        return !!this._getPlayer(seat)?.tenpai;
     }
 
     // ==================== 状态查询 ====================
@@ -727,6 +1142,8 @@ export class GameManager extends Component {
     get playerDrawnTile(): Tile | null { return this._playerDrawnTile; }
     /** 玩家是否正在选择吃/碰/杠(此时回合挂起) */
     get awaitingPlayerMeld(): boolean { return this._awaitingPlayerMeld; }
+    /** 某家累计得分 */
+    getScore(seat: number): number { return this._scores[seat] ?? 0; }
 
     /** 获取座位玩家(0=自己, 1-3=AI) */
     private _getPlayer(seat: number): Player | null {

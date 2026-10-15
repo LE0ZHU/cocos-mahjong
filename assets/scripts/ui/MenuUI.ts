@@ -12,7 +12,7 @@ const { ccclass } = _decorator;
 
 /** 主页面 / 设置页面的内容基准尺寸 */
 const MENU_CONTENT_W = 1680;
-const MENU_CONTENT_H = 800;
+const MENU_CONTENT_H = 1040;
 
 // ==================== 配色方案 ====================
 // 基于背景图的色调(暖棕木色 + 玉绿绒布 + 阳光金)重新搭配
@@ -55,7 +55,7 @@ const OPACITY_OFF = 165;
 
 // ==================== 规则设置页布局 ====================
 const PANEL_W = 1080;
-const PANEL_H = 720;
+const PANEL_H = 940;
 const RULES_PAD = 44;
 const RULES_TEXT_LEFT = -PANEL_W / 2 + RULES_PAD;
 const RULES_TEXT_W = 420;
@@ -65,12 +65,13 @@ const RULES_BTN_H = 60;
 const RULES_BTN_GAP = 16;
 const RULES_CAPTION_DY = 16;
 const RULES_HINT_DY = -18;
-const RULES_TITLE_Y = 244;
-const RULES_ROW_YS = [150, 66, -18, -102];
-const RULES_TIPS_Y = -176;
+const RULES_TITLE_Y = 372;
+/** 7 行选项(吃/续杠/吃胡/抢杠/一炮多响/听牌宣言/AI 速度) */
+const RULES_ROW_YS = [292, 216, 140, 64, -12, -88, -164];
+const RULES_TIPS_Y = -238;
 const RULES_TIPS_W = 1000;
 const RULES_TIPS_H = 64;
-const RULES_BTN_Y = -PANEL_H / 2 + 92;
+const RULES_BTN_Y = -PANEL_H / 2 + 88;
 
 export interface ChoiceOption { label: string; value: number; }
 
@@ -368,18 +369,48 @@ export class MenuUI extends Component {
         });
 
         this._buildChoiceGroup(page, {
+            key: 'allowRobKan',
+            caption: '抢杠胡',
+            hint: '别人补杠时可以抢那张牌胡',
+            options: ON_OFF,
+            y: RULES_ROW_YS[3],
+            selected: () => (GAME_RULES.rules.allowRobKan ? 1 : 0),
+            onPick: (v) => GAME_RULES.setAllowRobKan(v === 1),
+        });
+
+        this._buildChoiceGroup(page, {
+            key: 'allowMultiRon',
+            caption: '一炮多响',
+            hint: '多家同时听同一张牌时可一起胡',
+            options: ON_OFF,
+            y: RULES_ROW_YS[4],
+            selected: () => (GAME_RULES.rules.allowMultiRon ? 1 : 0),
+            onPick: (v) => GAME_RULES.setAllowMultiRon(v === 1),
+        });
+
+        this._buildChoiceGroup(page, {
+            key: 'allowRiichi',
+            caption: '听牌宣言',
+            hint: '亮明听牌加 1 番, 之后不可吃碰杠',
+            options: ON_OFF,
+            y: RULES_ROW_YS[5],
+            selected: () => (GAME_RULES.rules.allowRiichi ? 1 : 0),
+            onPick: (v) => GAME_RULES.setAllowRiichi(v === 1),
+        });
+
+        this._buildChoiceGroup(page, {
             key: 'aiSpeed',
             caption: 'AI 思考速度',
             hint: 'AI 出牌的间隔时间',
             options: AI_SPEED_OPTIONS.map(o => ({ label: o.label, value: o.delay })),
-            y: RULES_ROW_YS[3],
+            y: RULES_ROW_YS[6],
             selected: () => GAME_RULES.rules.aiDelay,
             onPick: (v) => GAME_RULES.setAiDelay(v),
         });
 
         const tips = createLabelNode(
-            '胡牌: 自摸;开启吃胡后也可胡别人打出的牌。  副露: 吃(下家) / 碰 / 杠 / 续杠。\n规则在下一局生效, 开局或重新开始即可应用。',
-            22, new Color(214, 202, 176, 255), RULES_TIPS_W, RULES_TIPS_H, true,
+            '胡牌: 自摸;开启吃胡后也可胡别人打出的牌(可一炮多响);补杠会被抢杠。\n计分: 每 1 番翻一倍, 8 番封顶;清一色/对对胡/七对/十三幺/杠上开花/海底捞月等自动识别。\n听牌宣言: 点"听牌"亮明在等牌(加 1 番), 之后不能再吃碰杠, 出牌须保持听牌。',
+            22, new Color(214, 202, 176, 255), RULES_TIPS_W, RULES_TIPS_H + 24, true,
         );
         tips.parent = page;
         tips.setPosition(RULES_TEXT_LEFT + RULES_TIPS_W / 2, RULES_TIPS_Y, 0);
@@ -443,14 +474,19 @@ export class MenuUI extends Component {
         this._applyChoice('allowChi', r.allowChi ? 1 : 0);
         this._applyChoice('allowAddKan', r.allowAddKan ? 1 : 0);
         this._applyChoice('allowChiHu', r.allowChiHu ? 1 : 0);
+        this._applyChoice('allowRobKan', r.allowRobKan ? 1 : 0);
+        this._applyChoice('allowMultiRon', r.allowMultiRon ? 1 : 0);
+        this._applyChoice('allowRiichi', r.allowRiichi ? 1 : 0);
         this._applyChoice('aiSpeed', r.aiDelay);
 
         if (this._summaryLabel) {
             const speed = AI_SPEED_OPTIONS.find(o => Math.abs(o.delay - r.aiDelay) < 1e-6);
-            const onOff = (v: boolean): string => (v ? '允许' : '禁止');
+            const onOff = (v: boolean): string => (v ? '开' : '关');
             this._summaryLabel.string =
-                `当前规则: 吃牌${onOff(r.allowChi)} · 续杠${onOff(r.allowAddKan)}`
-                + ` · 吃胡${onOff(r.allowChiHu)} · AI ${speed ? speed.label : '自定义'}`
+                `当前规则: 吃${onOff(r.allowChi)} · 续杠${onOff(r.allowAddKan)}`
+                + ` · 吃胡${onOff(r.allowChiHu)} · 抢杠${onOff(r.allowRobKan)}`
+                + ` · 一炮多响${onOff(r.allowMultiRon)} · 听牌宣言${onOff(r.allowRiichi)}`
+                + ` · AI ${speed ? speed.label : '自定义'}`
                 + (GAME_RULES.isDefault ? '(默认)' : '');
         }
     }

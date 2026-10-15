@@ -1,5 +1,7 @@
 import { Tile } from '../core/Tile';
+import { Meld } from '../core/Meld';
 import { MeldCandidate } from '../core/MeldDetector';
+import { HuChecker } from '../core/HuChecker';
 
 /**
  * AI 大脑 - 纯逻辑,不依赖引擎
@@ -87,8 +89,30 @@ export class AIBrain {
         return `${suit}-${rank}`;
     }
 
-    // ==================== 副露决策 ====================
+    /**
+     * 已宣告听牌(立直)后的出牌: 只打"打完仍然听牌"的牌
+     *
+     * 先按常规启发式选一张, 若它会破坏听牌再退回寻找安全牌。
+     * 注意刚摸到的那张牌永远可以安全打出(打掉它就回到摸牌前的听牌手牌),
+     * 所以本方法一定找得到合法牌。
+     */
+    static chooseDiscardTenpaiSafe(hand: Tile[], melds: Meld[]): number {
+        const fallback = AIBrain.chooseDiscard(hand);
+        if (AIBrain._keepsTenpai(hand, fallback, melds)) return fallback;
+        for (let i = 0; i < hand.length; i++) {
+            if (AIBrain._keepsTenpai(hand, i, melds)) return i;
+        }
+        return fallback;
+    }
 
+    /** 打出第 index 张后是否仍处于听牌状态 */
+    private static _keepsTenpai(hand: Tile[], index: number, melds: Meld[]): boolean {
+        if (index < 0 || index >= hand.length) return false;
+        const rest = hand.filter((_, i) => i !== index);
+        return HuChecker.isTenpai(rest, melds).length > 0;
+    }
+
+    // ==================== 副露决策 ====================
     /**
      * 选择副露候选(简化策略: 杠>碰>吃,原型演示用)
      * @param candidates 所有可行副露候选

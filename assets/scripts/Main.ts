@@ -3,6 +3,7 @@ import { GameManager, GamePhase, MeldPromptItem, MeldPromptRequest, SEAT_NAMES }
 import { createTileNode, createTileBackNode, createLabelNode, createButtonNode, repaintButtons, setTileBgColor, getFrontBand, applyDesignResolution, BTN_COLOR_GREY, ButtonStyle, bindSafeClick } from './ui/UIFactory';
 import { TileView } from './ui/TileView';
 import { MenuUI } from './ui/MenuUI';
+import { SettlementPanel } from './ui/SettlementPanel';
 import { GAME_RULES } from './game/GameRules';
 import { preloadTileImages } from './ui/TileImage';
 import { preloadSounds, playDiscard, playBgm } from './audio/Sound';
@@ -11,6 +12,7 @@ import {
 } from './ui/Anim';
 import { Tile } from './core/Tile';
 import { Meld } from './core/Meld';
+import { SettlementData } from './core/HuScore';
 
 const { ccclass } = _decorator;
 
@@ -107,6 +109,13 @@ export class Main extends Component {
     private _meldBtnRow: Node | null = null;
     /** 面板纵向位置(由 _applyLayout 按可见高度计算) */
     private _meldPanelY = 0;
+    // ---- 结算面板 / 听牌(立直) ----
+    /** 独立结算面板(胡牌或流局时弹出, 显示番型/得失分/四家手牌) */
+    private _settlement: SettlementPanel | null = null;
+    /** "听牌"宣言按钮(听牌时才出现) */
+    private _riichiBtn: Node | null = null;
+    /** 四家的"听"标记(已宣告听牌时亮出) */
+    private _tenpaiMarkers: (Node | null)[] = [null, null, null, null];
     // ---- 需要按屏幕比例动态定位的零散节点 ----
     /** 重新开始按钮,固定屏幕左上角 */
     private _restartBtn: Node | null = null;
@@ -389,6 +398,10 @@ export class Main extends Component {
         this._handSlots.clear();
         this._prevHandSlots.clear();
         this._riverCount = [0, 0, 0, 0];
+        // 收起结算面板与听牌标记
+        this._settlement?.hide();
+        for (const m of this._tenpaiMarkers) if (m) m.active = false;
+        if (this._riichiBtn) this._riichiBtn.active = false;
     }
 
     /**
@@ -501,6 +514,14 @@ export class Main extends Component {
         this._meldPanelY = discY + rivH / 2 + 30;
         this._meldPanel?.setPosition(0, this._meldPanelY, 0);
 
+        // 听牌(立直)按钮在自家手牌左侧; "听"标记分放牌桌四角, 均不与牌区重叠
+        const halfW = this.CONTENT_W / 2;
+        this._riichiBtn?.setPosition(-halfW + 115, handY, 0);
+        this._tenpaiMarkers[0]?.setPosition(halfW - 70, handY, 0);
+        this._tenpaiMarkers[1]?.setPosition(-halfW + 70, topMeldY, 0);
+        this._tenpaiMarkers[2]?.setPosition(-halfW + 70, 0, 0);
+        this._tenpaiMarkers[3]?.setPosition(halfW - 70, 0, 0);
+
         // ---- 上家(索引 0): 贴可见顶部 ----
         this._aiHandContainers[0]?.setPosition(0, topHandY, 0);
         this._meldContainers[1]?.setPosition(0, topMeldY, 0);
@@ -585,6 +606,12 @@ export class Main extends Component {
 
         this._buildMeldPrompt();
 
+        this._buildRiichiButton();
+
+        this._buildTenpaiMarkers();
+
+        this._buildSettlementPanel();
+
         // 节点创建顺序带来的层级不对: 副露区是最后建的,会盖在自家手牌上
         // (选中的牌上抬、以及拖牌时,上半截会被自家吃/碰/杠那一行压住),统一排一次
         this._applyLayerOrder();
@@ -622,7 +649,50 @@ export class Main extends Component {
 
         push(this._restartBtn);
         push(this._returnBtn);
+        push(this._riichiBtn);
         push(this._meldPanel);
+        // 结算面板永远在最上层: 遮罩 + 番型/手牌, 盖住整张牌桌
+        push(this._settlement?.node);
+    }
+
+    /**
+     * 创建"听牌(立直)"宣言按钮(默认隐藏)
+     *
+     * 听牌且没宣告过时才出现; 点它把听牌亮给对手看(加 1 番),
+     * 宣告后本局不能再吃/碰/杠, 出牌也必须保持听牌。
+     */
+    private _buildRiichiButton(): void {
+        const color = new Color(226, 182, 74, 255);
+        const btn = createButtonNode('听牌', 120, 46, color, ButtonStyle.Pill);
+        btn.parent = this._gameRoot;
+        bindSafeClick(btn, () => this._onRiichiClick(), this);
+        btn.active = false;
+        this._riichiBtn = btn;
+    }
+
+    /**
+     * 创建四家的"听"标记(默认隐藏, 宣告听牌后亮出)
+     *
+     * 放在牌桌四角: 自己右下 / 上家左上 / 左家左侧 / 右家右侧,
+     * 都不与手牌、牌河、副露行重叠。
+     */
+    private _buildTenpaiMarkers(): void {
+        for (let seat = 0; seat < 4; seat++) {
+            const node = createTenpaiChip(SEAT_NAMES[seat]);
+            node.parent = this._gameRoot;
+            node.active = false;
+            this._tenpaiMarkers[seat] = node;
+        }
+    }
+
+    /** 创建独立结算面板(默认隐藏, 牌局结束时由 onSettle 弹出) */
+    private _buildSettlementPanel(): void {
+        const node = new Node('Settlement');
+        node.parent = this._gameRoot;
+        const panel = node.addComponent(SettlementPanel);
+        panel.onRestart = () => this._onRestartClick();
+        panel.onBack = () => this._onBackToMenuClick();
+        this._settlement = panel;
     }
 
     /**
@@ -926,8 +996,11 @@ export class Main extends Component {
         gm.onMeld = (seat, meld) => this._refreshMelds(seat, meld);
         gm.onPlayerMeldChoice = (request) => this._showMeldPrompt(request);
         gm.onTenpai = (tiles) => this._showTenpai(tiles);
+        gm.onTenpaiChanged = (seat) => this._refreshTenpaiMarkers();
+        gm.onNotice = (msg) => this._showToast(msg);
         gm.onHu = (msg) => this._showHuToast(msg);
         gm.onReveal = (winnerSeat, msg) => this._onGameEndReveal(winnerSeat, msg);
+        gm.onSettle = (data) => this._onSettle(data);
     }
 
     // ==================== 刷新 UI ====================
@@ -1219,6 +1292,32 @@ export class Main extends Component {
     private _refreshInfo(): void {
         this._refreshTurnPointer();
         this._refreshWall();
+        this._refreshRiichiButton();
+        this._refreshTenpaiMarkers();
+    }
+
+    /** 听牌按钮: 只有"轮到自己 + 听牌 + 没宣告过 + 门清"时才亮出来 */
+    private _refreshRiichiButton(): void {
+        const btn = this._riichiBtn;
+        if (!btn) return;
+        const show = !!GameManager.instance?.canRiichi;
+        if (btn.active === show) return;
+        btn.active = show;
+        // 原生平台: 藏过再亮的 Graphics 会只剩文字, 亮出来时补画一次底框
+        if (show) repaintButtons(btn);
+    }
+
+    /** 四家"听"标记: 谁宣告了听牌就亮谁 */
+    private _refreshTenpaiMarkers(): void {
+        const gm = GameManager.instance;
+        for (let seat = 0; seat < 4; seat++) {
+            const node = this._tenpaiMarkers[seat];
+            if (!node) continue;
+            const on = !!gm && gm.isTenpaiDeclared(seat);
+            if (node.active === on) continue;
+            node.active = on;
+            if (on) repaintButtons(node);
+        }
     }
 
     /** 显示一条临时文字提示(听牌/胡牌/操作提示),到时自动清除 */
@@ -1253,6 +1352,16 @@ export class Main extends Component {
         this._restartVisible = true;
         this._showTableButtons();
         console.log(`[结束] ${message} → 亮出四家手牌`);
+    }
+
+    /**
+     * 牌局结算: 弹出独立结算面板(番型列表 + 四家得失分 + 四家手牌)
+     * 牌桌上的四家手牌同时已亮出, 面板里再集中看一遍
+     */
+    private _onSettle(data: SettlementData): void {
+        this._refreshRiichiButton();
+        this._settlement?.show(data);
+        console.log(`[结算] ${data.title} ${data.subtitle}`, data.winners.map(w => `${w.name} ${w.hu.totalFan}番 ${w.hu.points}分`));
     }
 
     /**
@@ -1438,6 +1547,14 @@ export class Main extends Component {
         GameManager.instance?.startGame(GAME_RULES.rules);
         // 重开后两个按钮仍然可用(重开期间它们的显示状态可能被改过)
         this._showTableButtons();
+    }
+
+    /** 点"听牌": 宣告本局已听牌(亮给对手看, 胡牌时加 1 番) */
+    private _onRiichiClick(): void {
+        const gm = GameManager.instance;
+        if (!gm || this._sceneState !== SceneState.PLAYING) return;
+        gm.declareTenpai();
+        this._refreshRiichiButton();
     }
 
     /** 左上角"返回主页面": 结束当前对局,回到主菜单 */
@@ -1722,6 +1839,29 @@ function addClaimedRing(node: Node, w: number, h: number): void {
     g.roundRect(-w / 2 - 2, -h / 2 - 2, w + 4, h + 4, r + 2);
     g.stroke();
     ring.setSiblingIndex(0);   // 画在牌身之下,只露出外侧那一圈
+}
+
+/**
+ * "听"标记小牌: 金边深底 + "xx·听"
+ * 宣告听牌后挂到该座位附近, 一眼看出谁在等牌
+ */
+function createTenpaiChip(seatName: string): Node {
+    const w = 112;
+    const h = 36;
+    const node = new Node('TenpaiChip');
+    node.addComponent(UITransform).setContentSize(w, h);
+    const g = node.addComponent(Graphics);
+    g.fillColor = new Color(24, 58, 40, 235);
+    g.roundRect(-w / 2, -h / 2, w, h, 8);
+    g.fill();
+    g.strokeColor = new Color(244, 200, 108, 245);
+    g.lineWidth = 2;
+    g.roundRect(-w / 2, -h / 2, w, h, 8);
+    g.stroke();
+
+    const label = createLabelNode(`${seatName}·听`, 22, new Color(255, 226, 158, 255), w - 8, h);
+    label.parent = node;
+    return node;
 }
 
 /**

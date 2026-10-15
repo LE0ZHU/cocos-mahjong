@@ -12,6 +12,15 @@ export class Player {
     melds: Meld[] = [];
     /** 弃牌(出牌区,按打出顺序) */
     discards: Tile[] = [];
+    /** 当前是否处于听牌状态(每次手牌变动后由 GameManager 重新检测) */
+    tenpai: boolean = false;
+    /**
+     * 是否已"亮明听牌"(立直/听牌宣言)
+     *
+     * 玩家: 需要主动点"听牌"按钮, 宣告后本局不可再吃/碰/杠, 出牌必须保持听牌
+     * AI: 一旦检测到听牌就自动亮明(让玩家知道对手在等牌)
+     */
+    declaredTenpai: boolean = false;
 
     /** 理牌: 按花色和点数排序 */
     sortHand(): void {
@@ -69,5 +78,7 @@ export class Player {
         this.hand.length = 0;
         this.melds.length = 0;
         this.discards.length = 0;
+        this.tenpai = false;
+        this.declaredTenpai = false;
     }
 }
