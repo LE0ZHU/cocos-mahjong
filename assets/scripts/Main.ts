@@ -542,6 +542,8 @@ export class Main extends Component {
 
         // ---- 剩余牌墙(图形化),依赖当前可见高度 ----
         this._halfH = halfH;
+        // 结算面板按可见高度自适应(手机横屏比 16:9 矮很多), 转屏/改窗口时跟着重排
+        this._settlement?.fit(halfH);
         this._refreshWall();
     }
 
