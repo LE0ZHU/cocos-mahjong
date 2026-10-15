@@ -5,9 +5,15 @@ import {
 } from './UIFactory';
 import { TileView } from './TileView';
 import { Tile } from '../core/Tile';
-import { FanItem, SeatResult, SettlementData } from '../core/HuScore';
+import { FanItem, SeatResult, SettlementData, WinnerResult } from '../core/HuScore';
 
 const { ccclass } = _decorator;
+
+/** 番型块里的一枚芯片: 和的那张牌 + 各番型, 统一按"文字 + 颜色"排版 */
+interface ChipItem {
+    label: string;
+    color: Color;
+}
 
 // ==================== 结算面板布局 ====================
 // 卡片宽度固定(内容坐标横向永远放得下, 内容 x 恒为 ±840), 高度随可见区自适应。
@@ -27,9 +33,9 @@ const PAD_MAX = 40;
 
 // ---- 纵向节奏: 每段高度 + 段后间距 ----
 const H_TITLE = 54;
-const GAP_TITLE = 6;
+const GAP_TITLE = 12;
 const H_SUBTITLE = 28;
-const GAP_SUBTITLE = 8;
+const GAP_SUBTITLE = 10;
 const H_FAN = 130;       // 番型块(标题行 + 芯片区; 合计分数放在标题行右侧)
 const GAP_FAN = 18;
 const H_DIVIDER = 30;    // "四家手牌" 小标题(与分隔线同一行, 不叠高度)
@@ -42,20 +48,34 @@ const H_BUTTON = 58;
 // ---- 行内尺寸(行节点居中于卡片, 局部坐标) ----
 const ROW_W = CARD_W - 80;
 const ROW_HALF = ROW_W / 2;
-/** 座位名牌宽 / 中心 x */
-const NAME_W = 160;
-const NAME_CX = -ROW_HALF + 92;
+/** 座位名牌宽 / 中心 x / 字号 */
+const NAME_W = 140;
+const NAME_CX = -ROW_HALF + 86;
+const NAME_FONT = 30;
 /** 手牌起点 x / 手牌与副露的间隔 */
 const HAND_TILES_X = -ROW_HALF + 180;
 const HAND_TILE_W = 36;  // 比牌桌小, 但足够看清牌面花纹
 const MELD_TILE_W = 26;  // 副露略小, 一眼分得清
 const MELD_GAP = 16;
-/** 右侧分数列中心 x */
-const SCORE_CX = ROW_HALF - 100;
+/** 右侧分数列中心 x / 字号 / 纵向位置(两者错开, 字形不重叠) */
+const SCORE_CX = ROW_HALF - 110;
+const DELTA_FONT = 32;
+const DELTA_Y = 16;
+const TOTAL_FONT = 20;
+const TOTAL_Y = -17;
 
-// ---- 番型芯片 ----
+// ---- 番型块 ----
+/** 块最小宽(要放得下"谁胡了什么牌" + "N番 · X分"这一行) */
+const FAN_BLOCK_MIN_W = 470;
+/** 标题行里"合计分数"文字的宽度与内边距 */
+const FAN_TOTAL_W = 230;
+const FAN_PAD_X = 28;
+const FAN_HEAD_GAP = 16;
+/** 芯片 */
 const CHIP_H = 30;
 const CHIP_PITCH = 34;
+/** 和的那张牌用的芯片配色 */
+const CHIP_WIN_COLOR = new Color(250, 214, 140, 255);
 
 /** 依可见高度算出的面板纵向排布(全部由 _computeLayout 算出, 别处不再写死 y) */
 interface PanelLayout {
@@ -261,7 +281,7 @@ export class SettlementPanel extends Component {
         // 标题 + 来源说明
         this._label(card, data.title, 52, TEXT_TITLE, CARD_W - 120, L.titleY);
         if (data.subtitle) {
-            this._label(card, data.subtitle, 25, TEXT_SUB, CARD_W - 120, L.subtitleY);
+            this._label(card, data.subtitle, 28, TEXT_SUB, CARD_W - 120, L.subtitleY);
         }
 
         // 番型区(流局没有番型, 提示"本局不计分")
@@ -269,8 +289,8 @@ export class SettlementPanel extends Component {
         else this._label(card, '本局无人胡牌, 不计分', 26, TEXT_MUTED, 900, L.fanCY);
 
         // "四家手牌" 小标题 + 同高度的分隔线(同一行, 不叠高度)
-        this._label(card, '四家手牌', 24, TEXT_SUB, 180, L.headerY, -CARD_W / 2 + 96, true);
-        this._divider(card, L.headerY, -CARD_W / 2 + 196, CARD_W / 2 - 40);
+        this._label(card, '四家手牌', 26, TEXT_TITLE, 190, L.headerY, -CARD_W / 2 + 100, true);
+        this._divider(card, L.headerY, -CARD_W / 2 + 208, CARD_W / 2 - 40);
 
         // 四家手牌
         for (let i = 0; i < data.seats.length; i++) {
@@ -288,84 +308,116 @@ export class SettlementPanel extends Component {
     private _buildFanArea(card: Node, data: SettlementData): void {
         const L = this._layout;
         const winners = data.winners;
+        const multi = winners.length > 1;
         const gap = 22;
         const avail = (CARD_W - 160) / winners.length - gap;
 
-        let cursor = -(winners.length * this._fanBlockW(winners[0].hu.fans, avail) + (winners.length - 1) * gap) / 2;
+        let cursor = -(winners.length * this._fanBlockW(winners[0], avail) + (winners.length - 1) * gap) / 2;
         for (const w of winners) {
-            const bw = this._fanBlockW(w.hu.fans, avail);
+            const bw = this._fanBlockW(w, avail);
+            const half = bw / 2;
             const block = new Node(`Fan_${w.seat}`);
             block.parent = card;
             block.addComponent(UITransform).setContentSize(bw, L.fanH);
             const bg = block.addComponent(Graphics);
             bg.fillColor = WINNER_BG;
-            bg.roundRect(-bw / 2, -L.fanH / 2, bw, L.fanH, 14);
+            bg.roundRect(-half, -L.fanH / 2, bw, L.fanH, 14);
             bg.fill();
             bg.strokeColor = WINNER_EDGE;
             bg.lineWidth = 2;
-            bg.roundRect(-bw / 2, -L.fanH / 2, bw, L.fanH, 14);
+            bg.roundRect(-half, -L.fanH / 2, bw, L.fanH, 14);
             bg.stroke();
             block.setPosition(cursor + bw / 2, L.fanCY, 0);
             cursor += bw + gap;
 
-            // 标题行: 左侧"谁胡了什么牌", 右侧"共 N 番 · X 分"
-            const half = bw / 2;
-            this._label(block, `${w.name} · ${w.isSelfDraw ? '自摸' : '胡'} ${w.winTile ? w.winTile.displayText : ''}`,
-                25, TEXT_TITLE, half - 150, L.fanH / 2 - 26, -half + 26, true);
-            const cap = w.hu.capped ? ' 封顶' : '';
-            this._label(block, `共 ${w.hu.totalFan} 番${cap} · ${w.hu.points} 分`,
-                26, GAIN, half - 26, L.fanH / 2 - 26, half - 150);
+            const headY = L.fanH / 2 - 27;
 
-            // 番型芯片: 在标题行下方的空带里逐行居中, 放不下自动换行
-            const bandTop = L.fanH / 2 - 46;
+            // 标题行右侧: "N 番 · X 分"(右边界贴内边距), 宽度随块宽收缩保证左侧放得下
+            const totalW = Math.max(150, Math.min(FAN_TOTAL_W, bw * 0.44));
+            this._label(block, `${w.hu.totalFan} 番 · ${w.hu.points} 分`, 28, GAIN,
+                totalW, headY, half - FAN_PAD_X - totalW / 2);
+
+            // 标题行左侧: "谁胡了什么"。多赢家并排时块窄, 只留名字(和的牌在芯片行里)
+            const headLeft = -half + FAN_PAD_X;
+            const headMaxW = (half - FAN_PAD_X - totalW - FAN_HEAD_GAP) - headLeft;
+            const headText = multi ? w.name : `${w.name} · ${w.isSelfDraw ? '自摸' : '胡'}`;
+            this._label(block, headText, 26, TEXT_TITLE, Math.max(60, headMaxW), headY,
+                headLeft + Math.max(60, headMaxW) / 2, true);
+
+            // 芯片行: 先放"和的那张牌"(金色), 再列番型, 每行居中
+            const chips: ChipItem[] = [];
+            if (w.winTile) chips.push({ label: w.winTile.displayText, color: CHIP_WIN_COLOR });
+            for (const f of w.hu.fans) chips.push({ label: this._fanLabel(f), color: fanColor(f.fan) });
+
+            const bandTop = L.fanH / 2 - 48;
             const bandBottom = -L.fanH / 2 + 12;
-            for (const c of this._layoutFans(w.hu.fans, bw - 28, bandTop, bandBottom)) {
-                const node = this._fanChip(c.item);
+            for (const c of this._layoutChips(chips, bw - 28, bandTop, bandBottom)) {
+                const node = this._chip(c.item);
                 node.parent = block;
                 node.setPosition(c.x, c.y, 0);
             }
         }
     }
 
-    /** 番型块宽度: 至少放得下"谁胡了什么牌 + 合计N番X分"这一行, 再按芯片总宽自适应 */
-    private _fanBlockW(fans: FanItem[], avail: number): number {
-        return Math.min(avail, Math.max(400, this._fansWidth(fans) + 56));
+    /** 番型块的芯片文字 */
+    private _fanLabel(item: FanItem): string {
+        return item.fan > 0 ? `${item.name} ${item.fan}番` : item.name;
     }
 
-    /** 单个番型芯片的宽度 */
-    private _fanChipWidth(item: FanItem): number {
-        const text = item.fan > 0 ? `${item.name} ${item.fan}番` : item.name;
-        return Math.max(78, text.length * 22 + 36);
+    /**
+     * 番型块宽度: 下限 FAN_BLOCK_MIN_W, 再按芯片总宽与标题行实际需求一起放大
+     *
+     * 标题行需要 = 左内边距 + "谁胡了什么牌" + 间隙 + "N番·X分" + 右内边距
+     */
+    private _fanBlockW(w: WinnerResult, avail: number): number {
+        const chipsW = this._chipsWidth(this._winnerChips(w));
+        const headW = w.name.length * 26 + 26;          // 多赢家时只显示名字
+        const headNeed = w.name.length * 4 * 26;          // 单赢家显示"名字 · 自摸/胡"
+        const titleNeed = FAN_PAD_X * 2 + Math.max(headW, headNeed) + FAN_HEAD_GAP + FAN_TOTAL_W;
+        return Math.min(avail, Math.max(FAN_BLOCK_MIN_W, Math.max(chipsW + 56, titleNeed)));
     }
 
-    /** 一排番型芯片的总宽度 */
-    private _fansWidth(fans: FanItem[]): number {
+    /** 该赢家的芯片列表(和的牌 + 番型) */
+    private _winnerChips(w: WinnerResult): ChipItem[] {
+        const chips: ChipItem[] = [];
+        if (w.winTile) chips.push({ label: w.winTile.displayText, color: CHIP_WIN_COLOR });
+        for (const f of w.hu.fans) chips.push({ label: this._fanLabel(f), color: fanColor(f.fan) });
+        return chips;
+    }
+
+    /** 单个芯片的宽度 */
+    private _chipWidth(item: ChipItem): number {
+        return Math.max(76, item.label.length * 22 + 34);
+    }
+
+    /** 一排芯片的总宽度 */
+    private _chipsWidth(items: ChipItem[]): number {
         let sum = 0;
-        for (const f of fans) sum += this._fanChipWidth(f) + 8;
+        for (const c of items) sum += this._chipWidth(c) + 8;
         return Math.max(0, sum - 8);
     }
 
     /**
-     * 番型芯片排布: 超过 maxW 就换行, **每行各自居中**, 整组在给定纵向空带里垂直居中
+     * 芯片排布: 超过 maxW 就换行, **每行各自居中**, 整组在给定纵向空带里垂直居中
      */
-    private _layoutFans(
-        fans: FanItem[],
+    private _layoutChips(
+        items: ChipItem[],
         maxW: number,
         bandTop: number,
         bandBottom: number,
-    ): { item: FanItem; x: number; y: number }[] {
+    ): { item: ChipItem; x: number; y: number }[] {
         // 先分行
-        const lines: FanItem[][] = [];
-        let line: FanItem[] = [];
+        const lines: ChipItem[][] = [];
+        let line: ChipItem[] = [];
         let lineW = 0;
-        for (const f of fans) {
-            const w = this._fanChipWidth(f) + 8;
+        for (const c of items) {
+            const w = this._chipWidth(c) + 8;
             if (line.length > 0 && lineW + w > maxW) {
                 lines.push(line);
                 line = [];
                 lineW = 0;
             }
-            line.push(f);
+            line.push(c);
             lineW += w;
         }
         if (line.length > 0) lines.push(line);
@@ -373,36 +425,35 @@ export class SettlementPanel extends Component {
         // 整组垂直居中于空带
         const blockH = lines.length * CHIP_PITCH - (CHIP_PITCH - CHIP_H);
         const top = (bandTop + bandBottom) / 2 + blockH / 2;
-        const out: { item: FanItem; x: number; y: number }[] = [];
+        const out: { item: ChipItem; x: number; y: number }[] = [];
         for (let r = 0; r < lines.length; r++) {
             const rowY = top - CHIP_H / 2 - r * CHIP_PITCH;
             let totalW = 0;
-            for (const f of lines[r]) totalW += this._fanChipWidth(f) + 8;
+            for (const c of lines[r]) totalW += this._chipWidth(c) + 8;
             totalW = Math.max(0, totalW - 8);
             let x = -totalW / 2;
-            for (const f of lines[r]) {
-                const w = this._fanChipWidth(f);
-                out.push({ item: f, x: x + w / 2, y: rowY });
+            for (const c of lines[r]) {
+                const w = this._chipWidth(c);
+                out.push({ item: c, x: x + w / 2, y: rowY });
                 x += w + 8;
             }
         }
         return out;
     }
 
-    private _fanChip(item: FanItem): Node {
-        const w = this._fanChipWidth(item);
-        const node = new Node('Fan');
+    private _chip(item: ChipItem): Node {
+        const w = this._chipWidth(item);
+        const node = new Node('Chip');
         node.addComponent(UITransform).setContentSize(w, CHIP_H);
         const g = node.addComponent(Graphics);
         g.fillColor = new Color(0, 0, 0, 105);
         g.roundRect(-w / 2, -CHIP_H / 2, w, CHIP_H, CHIP_H / 2);
         g.fill();
-        g.strokeColor = fanColor(item.fan);
+        g.strokeColor = item.color;
         g.lineWidth = 1.5;
         g.roundRect(-w / 2, -CHIP_H / 2, w, CHIP_H, CHIP_H / 2);
         g.stroke();
-        const text = item.fan > 0 ? `${item.name} ${item.fan}番` : item.name;
-        const label = createLabelNode(text, 21, fanColor(item.fan), w - 8, CHIP_H);
+        const label = createLabelNode(item.label, 21, item.color, w - 8, CHIP_H);
         label.parent = node;
         return node;
     }
@@ -442,8 +493,8 @@ export class SettlementPanel extends Component {
         ng.roundRect(-NAME_W / 2, -19, NAME_W, 38, 9);
         ng.stroke();
         nameBg.setPosition(NAME_CX, 0, 0);
-        this._label(row, `${seat.name}${seat.declaredTenpai ? ' 听' : ''}`, 27,
-            seat.isWinner ? TEXT_TITLE : TEXT_ROW, NAME_W - 10, 0, NAME_CX);
+        this._label(row, `${seat.name}${seat.declaredTenpai ? ' 听' : ''}`, NAME_FONT,
+            seat.isWinner ? TEXT_TITLE : TEXT_ROW, NAME_W - 8, 0, NAME_CX);
 
         // 手牌(和的那张金边高亮)
         let x = HAND_TILES_X;
@@ -460,12 +511,12 @@ export class SettlementPanel extends Component {
             }
         }
 
-        // 右侧: 本局得失(大) + 累计(小)
+        // 右侧: 本次得失(大, 偏上) + 累计(小, 偏下), 两者纵向错开不重叠
         const deltaText = seat.delta > 0 ? `+${seat.delta}` : `${seat.delta}`;
-        this._label(row, deltaText, 34, seat.delta > 0 ? GAIN : (seat.delta < 0 ? LOSS : TEXT_MUTED),
-            190, 11, SCORE_CX);
-        this._label(row, `累计 ${seat.total >= 0 ? '+' : ''}${seat.total}`, 22, TEXT_MUTED,
-            190, -15, SCORE_CX);
+        this._label(row, deltaText, DELTA_FONT, seat.delta > 0 ? GAIN : (seat.delta < 0 ? LOSS : TEXT_MUTED),
+            200, DELTA_Y, SCORE_CX);
+        this._label(row, `累计 ${seat.total >= 0 ? '+' : ''}${seat.total}`, TOTAL_FONT, TEXT_MUTED,
+            200, TOTAL_Y, SCORE_CX);
     }
 
     /** 在一行里放一张小牌,返回下一张牌的 x */
