@@ -1,0 +1,1 @@
+this._sceneState=Y.PLAYING;this._gameRoot.active=!0;this._menu&&this._menu.hide();this.scheduleOnce(()=>{try{C.instance.startGame(A.rules);console.log("[DIAG] auto startGame")}catch(err){console.log("[DIAG] auto startGame err "+err)}},0.1),
