@@ -16,8 +16,8 @@ from PIL import Image, ImageDraw
 # ===== Main.ts 中与尺寸无关的常量 =====
 CONTENT_W = 1680
 BASE_W, BASE_H = 1920, 1080
-TILE_H_RATIO = 87 / 64          # 所有牌统一宽高比
-TILE_W, TILE_H, TILE_GAP = 64, 87, 4          # 自家手牌(三家 AI 手牌现在同尺寸)
+TILE_H_RATIO = 4 / 3             # 所有牌统一宽高比 3:4(与 Main.ts 一致)
+TILE_W, TILE_H, TILE_GAP = 63, 84, 4          # 自家手牌(三家 AI 手牌现在同尺寸)
 MELD_MARK_GAP = 24
 DEFAULT_AI_LAYOUT = [               # [hx, 横向, dx]
     (0, True, 0),                   # 上家
@@ -137,12 +137,14 @@ def resolve_layout(v, design_w, design_h):
 
 # ===== 绘制 =====
 def make_canvas(design_w, design_h):
-    img = Image.new('RGB', (design_w, design_h), (24, 16, 10))
+    # 必须 RGBA: 桌面的暗角/高光是半透明描边, RGB 画布无法 alpha 合成
+    img = Image.new('RGBA', (design_w, design_h), (24, 16, 10, 255))
     return img
 
 
 class Painter:
     def __init__(self, img, scale, design_w, design_h):
+        self.img = img            # 合成半透明描边时要用到底图本身
         self.d = ImageDraw.Draw(img, 'RGBA')
         self.scale = scale
         self.cx, self.cy = design_w / 2, design_h / 2
@@ -151,8 +153,32 @@ class Painter:
         return (self.cx + x * self.scale, self.cy - y * self.scale)
 
     def poly(self, pts, fill=None, outline=None, width=1):
+        """填充/描边多边形。
+
+        描边必须**逐层混合**: PIL 的 RGBA 画笔不会自动与已有像素混合,
+        直接把半透明色当不透明画上去, 暗角/高光会变成纯白或纯黑边,
+        预览就会骗人(曾据此误判"桌面多了一圈白边")。
+        """
         pix = [self.pt(x, y) for x, y in pts]
-        self.d.polygon(pix, fill=fill, outline=outline, width=width)
+        if fill:
+            self.d.polygon(pix, fill=fill)
+        if outline:
+            r, g_, b, a = (outline + (255,))[:4] if len(outline) == 4 else (*outline, 255)
+            # PIL 的 RGBA 画笔**不会**与底图混合: 直接把半透明色画上去会变成实色,
+            # 暗角/高光会渲染成纯黑或纯白边, 预览因此骗人。
+            # 正确做法: 透明图层上画线 → alpha_composite 合成回底图。
+            w = max(1, int(width))
+            pad = w + 2
+            box = [
+                min(p[0] for p in pix) - pad, min(p[1] for p in pix) - pad,
+                max(p[0] for p in pix) + pad, max(p[1] for p in pix) + pad,
+            ]
+            layer = Image.new('RGBA', (int(box[2] - box[0]), int(box[3] - box[1])), (0, 0, 0, 0))
+            ld = ImageDraw.Draw(layer)
+            shifted = [(p[0] - box[0], p[1] - box[1]) for p in pix]
+            ld.line(shifted + [shifted[0]], fill=(r, g_, b, a), width=w, joint='curve')
+            self.img.alpha_composite(layer, dest=(int(box[0]), int(box[1])))
+            self.d = ImageDraw.Draw(self.img, 'RGBA')
 
     def circle(self, x, y, r, fill=None, outline=None, width=1):
         box = [self.pt(x - r, y + r), self.pt(x + r, y - r)]
@@ -169,6 +195,11 @@ class Painter:
 
 
 def draw_table(p, v):
+    """镜像 Main.ts 的 _buildTable()。
+
+    桌面倒角/毡布用横向色带做光照渐变(远端受光偏亮、近端沉暗),
+    台面不再有平涂浅绿色块。改 Main.ts 时必须同步改这里, 否则预览会骗人。
+    """
     NEAR_HH, FAR_RATIO, FAR_HH = 560, 0.78, 530
 
     def trap(hwb, hh, fill=None, outline=None, width=1):
@@ -176,14 +207,36 @@ def draw_table(p, v):
         hhf = hh * (FAR_HH / NEAR_HH)
         p.poly([(-hwb, -hh), (hwb, -hh), (hwt, hhf), (-hwt, hhf)], fill=fill, outline=outline, width=width)
 
+    def trap_bands(hwb, hh, col_far, col_near, bands=72):
+        """在梯形内画横向色带, 由远及近插值 —— 光照渐变"""
+        hwt = hwb * FAR_RATIO
+        hhf = hh * (FAR_HH / NEAR_HH)
+        band_h = (hh + hhf) / bands
+        for i in range(bands):
+            t = i / (bands - 1)
+            y_top = hhf - (i + 1) * band_h
+            y_bot = hhf - i * band_h
+            col = tuple(int(round(col_far[k] + (col_near[k] - col_far[k]) * t)) for k in range(3))
+            w_top = hwb + (hwt - hwb) * ((y_top + hh) / (hh + hhf))
+            w_bot = hwb + (hwt - hwb) * ((y_bot + hh) / (hh + hhf))
+            p.poly([(-w_bot, y_bot), (w_bot, y_bot), (w_top, y_top), (-w_top, y_top)], fill=col)
+
     trap(824, 560, fill=(18, 10, 4, 200))
     trap(820, 556, fill=(54, 32, 16))
-    trap(814, 550, fill=(124, 78, 42))
-    trap(794, 534, fill=(156, 102, 56))
-    trap(790, 530, fill=(64, 40, 22))
-    trap(786, 526, fill=(28, 78, 50), outline=(15, 52, 32), width=2)
-    trap(766, 514, outline=(60, 130, 80, 120))
-    trap(460, 320, fill=(42, 102, 66), outline=(22, 72, 42))
+    trap_bands(814, 550, (158, 104, 58), (104, 64, 34))
+    trap(804, 544, outline=(52, 30, 14), width=2)
+    trap(800, 540, outline=(186, 132, 78), width=1)
+    trap(794, 534, fill=(150, 98, 54))
+    trap(790, 530, fill=(58, 36, 20))
+    # 毡布色相 ~135° 正绿(去青); 转盘盘身同色系, 两处必须与 Main.ts 保持同步
+    trap_bands(786, 526, (36, 72, 45), (19, 42, 26))
+    trap(786, 526, outline=(12, 28, 22), width=2)
+    # 四边暗角: 绒布被木框挡光后的自然阴影, 平涂色块没有这个会显得"贴"在框上
+    # lineWidth 是像素单位(与 Cocos 一致), 画粗会变黑边
+    trap(776, 521, outline=(0, 0, 0, 52), width=14)
+    trap(779, 523, outline=(0, 0, 0, 44), width=6)
+    # 只勾一圈细边, 不再有平涂浅绿色块
+    trap(768, 515, outline=(132, 158, 124))
 
 
 def draw_disc(p, v, lay):
@@ -191,8 +244,8 @@ def draw_disc(p, v, lay):
     p.circle(R * 0.022, -R * 0.022, R * 1.03, fill=(0, 0, 0, 70))
     p.circle(0, 0, R, fill=(168, 120, 52))
     p.circle(0, 0, R * 0.97, fill=(230, 192, 110))
-    p.circle(0, 0, R * 0.91, fill=(38, 96, 64))
-    p.circle(0, 0, R * 0.895, fill=(50, 114, 78))
+    p.circle(0, 0, R * 0.91, fill=(41, 98, 57))
+    p.circle(0, 0, R * 0.895, fill=(53, 116, 71))
     p.circle(0, 0, R * 0.73, fill=(244, 236, 219))
     p.circle(0, 0, R * 0.7, outline=(206, 172, 104))
 
@@ -209,8 +262,8 @@ def draw_disc(p, v, lay):
     return R
 
 
-FACE = (248, 238, 210, 255)
-FACE_EDGE = (168, 158, 130, 255)
+FACE = (255, 255, 255, 255)      # 牌身底色 = 牌面图片白底(无边框, 与 Main.ts 一致)
+FACE_EDGE = (255, 255, 255, 255)  # 牌身已不画描边, 与底色同色
 BACK = (60, 90, 160, 255)
 BACK_EDGE = (30, 50, 100, 255)
 
@@ -374,7 +427,7 @@ def main():
             report.append((v.name, discards, lay))
         canvas = Image.new('RGB', (design_w, design_h * 2 + 8), (0, 0, 0))
         for i, f in enumerate(panels):
-            canvas.paste(Image.open(f), (0, i * (design_h + 8)))
+            canvas.paste(Image.open(f).convert('RGB'), (0, i * (design_h + 8)))
         canvas.save(out)
         # 中间产物只用于拼接,拼完即删
         for f in panels:

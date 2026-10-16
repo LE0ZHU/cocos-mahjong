@@ -4,10 +4,12 @@ import { Tile } from '../core/Tile';
 import { Meld } from '../core/Meld';
 import { MeldCandidate, MeldDetector } from '../core/MeldDetector';
 import { Player } from '../game/Player';
-import { AIBrain } from '../game/AIBrain';
-import { HAND_SIZE, SUIT_CHARS, CN_NUMERALS } from '../core/TileDefine';
-import { GameRules, GAME_RULES } from '../game/GameRules';
+import { AIBrain, AIContext } from '../game/AIBrain';
+import { Hint, HintAdvisor } from '../game/HintAdvisor';
+import { HAND_SIZE, SUIT_CHARS, CN_NUMERALS, TILE_TYPE_COUNT, tileIndexOf } from '../core/TileDefine';
+import { GameRules, GAME_RULES, difficultyOfDelay } from '../game/GameRules';
 import { HuChecker } from '../core/HuChecker';
+import { ThreatInfo } from '../core/AIDefense';
 import {
     computeHu, HuResult, SeatResult, SettlementData, WinnerResult,
 } from '../core/HuScore';
@@ -20,8 +22,31 @@ export enum GamePhase {
     DEALING,
     PLAYER_TURN,   // 玩家回合(可摸牌或出牌)
     AI_TURN,       // AI 回合
+    /**
+     * 刚打出一张牌, 正在等别家反应(吃/碰/杠/胡)的短暂窗口
+     *
+     * 这是一个**真实存在的空档**: 牌已打出但流程还没往下走。
+     * 必须与 PLAYER_TURN / AI_TURN 区分开, 否则这段空档里玩家还能点手牌,
+     * 而 `playTile` 会因为 `_canDiscard` 为 false 而拒绝 —— 表现为"点了没反应"，
+     * 玩家会以为卡住了。
+     */
+    DISCARDING,
     GAME_OVER,
 }
+
+/**
+ * 打出牌之后, 别家开口吃/碰/杠/胡之前的"反应间隔"(秒)
+ *
+ * 为什么需要它: 牌名播报约 0.2~0.4s, 而别家响应原本是**同帧**发生的
+ * (`_afterDiscard` 直接同步调 `_checkMelds`), 两段声音重叠, 什么都听不清。
+ *
+ * 为什么不是"让播报变短": 播报长度是素材决定的, 改不了; 能改的是**响的时机**。
+ * 这也符合真实麻将的观感 —— 听到"五万"之后, 对家想一下才喊"碰"。
+ *
+ * 取值 0.45s: 略长于最长的牌名播报(0.40s), 保证前一段一定放完;
+ * 又不至于让 AI 显得迟钝。这个值只影响**节奏观感**, 不影响任何判定结果。
+ */
+const MELD_REACT_DELAY = 0.45;
 
 /** 玩家座位: 0=自己(下), 1=上家(上), 2=左家(左), 3=右家(右); AI 索引 0/1/2 对应座位 1/2/3 */
 export const SEAT_NAMES = ['你', '上家', '左家', '右家'];
@@ -145,6 +170,27 @@ export class GameManager extends Component {
     /** 各家连庄次数(本局胡牌后 +1, 别人胡牌或未胡则清零) */
     private _streaks: number[] = [0, 0, 0, 0];
 
+    // ---- 决策超时(自动行动) ----
+    /** 玩家每次需要做决定时的时限(秒) */
+    private static readonly DECIDE_LIMIT = 20;
+    /** 本次决策已过的秒数;<=0 表示当前没有在计时 */
+    private _decideElapsed = 0;
+    /** 这次计时对应的是"出牌"还是"副露选择"(影响超时动作) */
+    private _decideKind: 'discard' | 'meld' | 'none' = 'none';
+    /** 已因超时自动行动过(防止同一决策被重复处理) */
+    private _decideTimedOut = false;
+    /**
+     * 决策倒计时被暂停(打开设置弹窗时冻结)
+     *
+     * 为什么要暂停而不是"让它继续走": 玩家在设置里调音量时看不到牌桌,
+     * 却会被 20 秒判超时自动打牌 —— 那是系统替玩家做的、玩家并不知情的决定。
+     * 冻结只影响**玩家决策**的计时, AI 的调度不受影响(见 pauseDecideTimer 注释)。
+     */
+    private _decidePaused = false;
+    // ---- AI 提示 ----
+    /** 玩家最近一次请求的提示(局面变化时清空, 避免显示过期的建议) */
+    private _hint: Hint | null = null;
+
     // ---- 常量 ----
     private readonly AI_COUNT = 3;
     /** 本局生效的规则(由 startGame 传入,默认取全局设置) */
@@ -177,6 +223,13 @@ export class GameManager extends Component {
      * 牌局结算数据(有人胡牌或流局都会给): UI 用它弹出独立结算面板
      */
     onSettle: ((data: SettlementData) => void) | null = null;
+    /**
+     * 提示内容已变化(玩家点了"提示"): UI 据此刷新提示面板
+     *
+     * 用回调而不是让 UI 主动轮询, 是为了与本文件其余事件保持同一套风格;
+     * 触发点只有"玩家主动点提示", 所以不会有高频调用。
+     */
+    onHint: ((hint: Hint | null) => void) | null = null;
 
     onLoad(): void {
         if (GameManager._instance && GameManager._instance !== this) {
@@ -193,10 +246,24 @@ export class GameManager extends Component {
     // ==================== 游戏流程 ====================
 
     /**
-     * 开始新游戏: 新建牌墙 → 4 家各发起手牌 → 玩家回合
-     * @param rules 本局规则(起手牌数/是否允许吃/AI 速度);不传则沿用当前规则
+ * 开始新游戏: 新建牌墙 → 4 家各发起手牌 → **停在 DEALING 等 UI**
+     *
+     * 【为什么发牌与"进入玩家回合"要分成两步】
+     * 发牌是**同步**完成的(13 轮 × 4 张一次算完), 这是规则事实, 不该被动画节奏拖慢;
+     * 而"发牌动画"要分十几帧播放, 是纯表现层的事。
+     * 如果在 startGame 里一口气发完再直接进玩家回合, 玩家会看到 14 张牌瞬间出现;
+     * 如果把发牌拆成 13 次异步, 规则层就被补间污染了(也没法脱离引擎单测)。
+     *
+     * 所以拆成: `startGame()` 同步发完 → UI 播动画 → `beginPlay()` 才真正开局。
+     * 期间阶段一直是 DEALING, 于是:
+     *  - 玩家点不到手牌(`playTile` 要求 PLAYER_TURN)
+     *  - 不会起 20 秒倒计时(`_startDecisionTimer` 只在 `_playerDraw` 里调)
+     *  - AI 不会行动(`_startDrawTurn` 只在 beginPlay 之后被调用)
+     *
+     * @param rules 本局规则;不传则沿用当前规则
+     * @param onDealt 牌已全部发完(但还没进玩家回合)时回调一次, UI 在此定稿刷新手牌
      */
-    startGame(rules: GameRules = GAME_RULES.rules): void {
+    startGame(rules: GameRules = GAME_RULES.rules, onDealt?: () => void): void {
         this._rules = { ...rules };
         this.unscheduleAllCallbacks();
         this._wall = new Wall();
@@ -224,12 +291,20 @@ export class GameManager extends Component {
         this._player.sortHand();
         for (const ai of this._aiPlayers) ai.sortHand();
 
-        // 进入玩家回合: 自动摸牌,等玩家点选/出牌
+        // 牌发完了, 但**先不进玩家回合**: 等 UI 发牌动画播完再调 beginPlay()
+        onDealt?.();
+    }
+
+    /**
+     * 发牌动画播完, 正式开始玩家回合(自动摸牌 + 起 20 秒倒计时)
+     *
+     * 幂等: 只有 DEALING 阶段才继续, 重复调用或已开局时直接返回。
+     */
+    beginPlay(): void {
+        if (this._phase !== GamePhase.DEALING) return;
         this._phase = GamePhase.PLAYER_TURN;
         this._canDiscard = false;
         this._firePhaseChanged();
-        this._fireHandChanged();
-        for (let a = 0; a < this.AI_COUNT; a++) this._fireAIHandChanged(a);
         this._playerDraw();
     }
 
@@ -278,6 +353,9 @@ export class GameManager extends Component {
         if (!this._player.declaredTenpai) this._checkPlayerAddKan();
         // 摸牌后检测听牌(刚摸的那张不算进听牌判定)
         this._refreshTenpaiFlag(0, tile, true);
+        // 走到这里说明没有自摸、也没进续杠面板 → 该玩家要自己决定出哪张牌了
+        // (若 _checkPlayerAddKan 弹了面板, 它已经把计时切成了 'meld', 这里必须跳过)
+        if (!this._awaitingPlayerMeld) this._startDecisionTimer('discard');
         return tile;
     }
 
@@ -334,6 +412,7 @@ export class GameManager extends Component {
         this._pendingMeldTile = tile;
         this._pendingMeldFrom = -1;
         this._awaitingPlayerMeld = true;
+        this._startDecisionTimer('meld');
         this.onPlayerMeldChoice?.({
             kind: 'meld',
             items: [{ label: '续杠', tilesText: `${tile.displayText}(手中摸到)` }],
@@ -388,6 +467,8 @@ export class GameManager extends Component {
             this._phase = GamePhase.PLAYER_TURN;
             this._canDiscard = true;
             this._firePhaseChanged();
+            // 杠后补摸的那张已挂在 _playerDrawnTile 上, 超时自动打的也正是它
+            this._startDecisionTimer('discard');
         } else {
             // AI 杠后: 延时自动出牌
             this._phase = GamePhase.AI_TURN;
@@ -440,6 +521,8 @@ export class GameManager extends Component {
         }
         const discarded = this._player.removeTile(index);
         if (!discarded) return false;
+        // 玩家已做出选择 → 停止倒计时(必须在移牌前, 避免与超时分支抢跑)
+        this._clearDecisionTimer();
         this._player.discards.push(discarded);
         this._playerDrawnTile = null;
         this._player.sortHand(); // 出牌后把摸到的牌并入理牌
@@ -465,8 +548,11 @@ export class GameManager extends Component {
     /**
      * 出牌后统一处理: 检测吃胡(一炮多响) → 检测副露 → 下家摸牌
      *
-     * 自己需要选择吃/碰/杠/吃胡时,流程在此暂停(等玩家点面板),
-     * 由 resolvePlayerMeld 决定后再从这里继续往下家走。
+     * **这里必须异步**(见 `MELD_REACT_DELAY`): 出牌播报刚响起时, 别家就同帧喊"碰"，
+     * 两段声音会叠在一起谁都听不清。加一个可感知的反应间隔后,
+     * 牌名播完 → 停顿一下 → "碰"，才像真人对局。
+     *
+     * 流程在此暂停时由 resolvePlayerMeld 决定后再从这里继续往下家走。
      *
      * 胡牌判定排在流局判定之前: 牌墙摸空时打出的最后一张仍然可以被胡(点炮)。
      * @param discarder 出牌者座位(0-3)
@@ -474,6 +560,19 @@ export class GameManager extends Component {
      */
     private _afterDiscard(discarder: number, tile: Tile): void {
         this._lastDiscard = tile;
+        this._phase = GamePhase.DISCARDING;
+        this._firePhaseChanged();
+        this.scheduleOnce(() => this._resolveAfterDiscard(discarder, tile), MELD_REACT_DELAY);
+    }
+
+    /**
+     * 出牌后的实际处理(延迟 MELD_REACT_DELAY 之后才跑)
+     *
+     * 与 `_afterDiscard` 分开是为了让"反应间隔"只加在**牌名播报之后**这一处,
+     * 而 AI 摸牌→出牌之间的节奏仍由 `AI_DELAY` 控制, 两者互不干扰。
+     */
+    private _resolveAfterDiscard(discarder: number, tile: Tile): void {
+        if (this._phase === GamePhase.GAME_OVER) return;
         // 1) 吃胡(点炮)优先于吃/碰/杠, 且允许多家同时胡(一炮多响)
         if (this._beginRon(discarder, tile, false, -1)) return;
         // 2) 流局: 牌墙空且无人胡
@@ -501,6 +600,8 @@ export class GameManager extends Component {
         if (nextSeat === 0 && this._canResumePlayerTurn()) {
             this._phase = GamePhase.PLAYER_TURN;
             this._firePhaseChanged();
+            // 回到自己的回合: 手里那张还没打, 继续给 20 秒
+            this._startDecisionTimer('discard');
             return;
         }
         this._startDrawTurn(nextSeat);
@@ -553,6 +654,7 @@ export class GameManager extends Component {
             this._pendingMeldTile = tile;
             this._pendingMeldFrom = payerSeat;
             this._awaitingPlayerMeld = true;
+            this._startDecisionTimer('meld');
             this.onPlayerMeldChoice?.({
                 kind: 'ron',
                 items: [{
@@ -658,8 +760,11 @@ export class GameManager extends Component {
         for (let offset = 1; offset <= 3; offset++) {
             seat = NEXT_SEAT[seat];
             if (seat === 0 && skipPlayer) continue;
-            // 玩家已宣告听牌(立直)后不能再吃/碰/杠
-            if (seat === 0 && this._player?.declaredTenpai) continue;
+            // 已宣告听牌(立直)后不能再吃/碰/杠 —— 对 AI 同样成立。
+            // AI 听牌后会自动亮明"听", 若这里仍允许它副露, 它会自己把听牌拆掉
+            // (副露会改变手牌张数与副露数, 立直锁的前提就不成立了)。
+            const p0 = this._getPlayer(seat);
+            if (p0?.declaredTenpai) continue;
             const isNext = offset === 1; // 仅下家可吃
             // 规则可禁止吃牌(碰/杠不受影响)
             const canChi = isNext && this._rules.allowChi;
@@ -674,13 +779,18 @@ export class GameManager extends Component {
                 this._pendingMeldTile = tile;
                 this._pendingMeldFrom = discarder;
                 this._awaitingPlayerMeld = true;
+                this._startDecisionTimer('meld');
                 this.onPlayerMeldChoice?.({
                     kind: 'meld',
                     items: this._buildMeldPromptItems(candidates),
                 });
                 return null;
             }
-            const chosen = AIBrain.chooseMeld(candidates);
+            const chosen = AIBrain.chooseMeld(
+                this._buildAIContext(seat),
+                candidates,
+                tile,
+            );
             if (chosen) return { seat, candidate: chosen };
         }
         return null;
@@ -730,6 +840,8 @@ export class GameManager extends Component {
      */
     resolvePlayerMeld(candidateIndex: number): void {
         if (!this._awaitingPlayerMeld) return;
+        // 玩家已回应(无论是选了一项还是点"过")→ 停止倒计时
+        this._clearDecisionTimer();
         const tile = this._pendingMeldTile;
         const fromSeat = this._pendingMeldFrom;
         const candidate = candidateIndex >= 0 ? this._pendingMeldCandidates[candidateIndex] : null;
@@ -798,6 +910,9 @@ export class GameManager extends Component {
     cancelPendingMeld(): void {
         this._awaitingPlayerMeld = false;
         this._clearPendingChoice();
+        // 面板撤下就不再需要倒计时了
+        // (副露者接着出牌时, 会由 _continueAfterKanDraw 重新起一次 discard 计时)
+        this._clearDecisionTimer();
     }
 
     /** 执行副露: 添加meld → (杠补摸) → 副露者出牌 */
@@ -904,10 +1019,11 @@ export class GameManager extends Component {
         if (this._phase === GamePhase.GAME_OVER) return;
         const ai = this._aiPlayers[seat - 1];
         if (!ai) return;
+        const ctx = this._buildAIContext(seat);
         // 已宣告听牌(立直)的 AI 只能打保持听牌的牌
         const idx = ai.declaredTenpai
-            ? AIBrain.chooseDiscardTenpaiSafe(ai.hand, ai.melds)
-            : AIBrain.chooseDiscard(ai.hand);
+            ? AIBrain.chooseDiscardTenpaiSafe(ctx)
+            : AIBrain.chooseDiscard(ctx);
         const tile = ai.removeTile(idx);
         if (!tile) return;
         ai.discards.push(tile);
@@ -1130,10 +1246,193 @@ export class GameManager extends Component {
         return !!this._getPlayer(seat)?.tenpai;
     }
 
+    // ==================== AI 提示(玩家求助) ====================
+
+    /**
+     * 玩家是否处于"需要做决定"的时刻(可以点提示)
+     *
+     * 两种情形: 轮到自己出牌, 或正在选吃/碰/杠/胡。其余时刻(等 AI 行动、
+     * 发牌中、已结束)给提示没有意义, 按钮也不该亮。
+     */
+    get canHint(): boolean {
+        if (this._phase === GamePhase.IDLE || this._phase === GamePhase.DEALING) return false;
+        if (this._phase === GamePhase.GAME_OVER) return false;
+        if (this._phase === GamePhase.AI_TURN) return false;
+        if (this._awaitingPlayerMeld) return this._pendingMeldCandidates.length > 0;
+        return this._phase === GamePhase.PLAYER_TURN && this._canDiscard;
+    }
+
+    /**
+     * 玩家请求一次提示(由 UI 的"提示"按钮调用)
+     *
+     * 会按当前处境自动选形态: 能胡就提示胡, 在选副露就提示吃/碰/杠,
+     * 否则提示该打哪张牌。结果通过 `onHint` 回调交给 UI。
+     *
+     * 【为什么可以放心把 AI 的算法用在玩家身上】这里用的是**玩家自己能看到的信息**
+     * (自己的手牌 + 所有公开的弃牌/副露), 见 `_buildAdviceContext`:
+     * 相当于把 AI 的思考过程透明地讲给玩家听, 而不是让 AI 透视玩家的手牌。
+     */
+    requestHint(): void {
+        if (!this.canHint) {
+            this._hint = null;
+            this.onHint?.(null);
+            return;
+        }
+        this._hint = this._computeHint();
+        this.onHint?.(this._hint);
+    }
+
+    /** 清除当前提示(局面变化时由 UI 调用, 也可由本文件在状态推进时清) */
+    clearHint(): void {
+        this._hint = null;
+        this.onHint?.(null);
+    }
+
+    /** 组装"玩家视角"的决策上下文: 自己的手牌 + 全部公开信息, 不含别家手牌 */
+    private _buildAdviceContext(): AIContext | null {
+        if (!this._player) return null;
+        return this._buildAIContext(0);
+    }
+
+    /** 按当前处境计算一份提示(不触发回调) */
+    private _computeHint(): Hint | null {
+        if (!this.canHint) return null;
+        const ctx = this._buildAdviceContext();
+        if (!ctx) return null;
+
+        if (!this._awaitingPlayerMeld) return HintAdvisor.discard(ctx);
+
+        // 正在选副露: 候选按类型分两种语义
+        const tile = this._pendingMeldTile;
+        const candidates = this._pendingMeldCandidates;
+        if (!tile || candidates.length === 0) return null;
+        // 吃胡单独一条路径: 它没有"该不该"的取舍, 本项目里放过只是白丢分
+        if (candidates.length === 1 && candidates[0].type === 'ron') {
+            return HintAdvisor.ron(tile);
+        }
+        // 吃/碰/杠(含续杠)统一走副露评估
+        return HintAdvisor.meld(ctx, candidates, tile);
+    }
+
+    /** 玩家最近一次请求的提示(UI 重建时用来恢复面板) */
+    get hint(): Hint | null { return this._hint; }
+
+    // ==================== 决策超时(自动行动) ====================
+
+    /**
+     * 每帧推进决策倒计时, 到点自动替玩家做决定
+     *
+     * 为什么要有这个: 玩家可能离开/走神, 让整局卡死。
+     * 超时后的动作刻意取得很"笨":
+     *  - 出牌超时 → 直接打掉**刚摸到的那张**(玩家的原话: "不管三饼对我是否有用")
+     *    这样行为可预期, 也绝不会出现非法出牌(刚摸的牌永远打得出去)。
+     *  - 副露超时 → 一律"过"(保守, 不会因为发呆而白白亮牌/损失门清)
+     */
+    update(dt: number): void {
+        if (this._decideKind === 'none') return;
+        // 牌局已结束或玩家已做出选择 → 停止计时
+        if (this._phase === GamePhase.GAME_OVER || this._phase === GamePhase.IDLE) {
+            this._clearDecisionTimer();
+            return;
+        }
+        // 设置弹窗开着: 冻结计时(不累加 dt), 关闭后从原剩余时间继续
+        if (this._decidePaused) return;
+        this._decideElapsed += dt;
+        if (this._decideElapsed < GameManager.DECIDE_LIMIT) return;
+
+        // 到点: 先摘掉计时状态, 避免自动行动触发的流程里再次命中
+        const kind = this._decideKind;
+        this._clearDecisionTimer();
+        if (this._decideTimedOut) return;
+        this._decideTimedOut = true;
+
+        if (kind === 'meld') {
+            if (this._awaitingPlayerMeld) {
+                console.log('[超时] 副露选择超过 20 秒, 自动"过"');
+                this.resolvePlayerMeld(-1);
+            }
+            return;
+        }
+        // 出牌超时
+        if (this._phase === GamePhase.PLAYER_TURN && this._canDiscard && !this._awaitingPlayerMeld) {
+            const drawn = this._playerDrawnTile;
+            const idx = drawn ? this._player.hand.indexOf(drawn) : -1;
+            if (idx >= 0) {
+                console.log(`[超时] 出牌超过 20 秒, 自动打出刚摸的 ${drawn.displayText}`);
+                this.playTile(idx);
+            } else {
+                // 理论上到不了这里(刚摸的牌一定在手牌里), 兜底打第一张保证牌局能继续
+                this.playTile(0);
+            }
+        }
+    }
+
+    /** 开始一次决策计时(重复调用会重置, 不会叠加) */
+    private _startDecisionTimer(kind: 'discard' | 'meld'): void {
+        this._decideKind = kind;
+        this._decideElapsed = 0;
+        this._decideTimedOut = false;
+    }
+
+    /** 停止决策计时(玩家已做出选择 / 回合结束) */
+    private _clearDecisionTimer(): void {
+        this._decideKind = 'none';
+        this._decideElapsed = 0;
+        this._decideTimedOut = false;
+        // 暂停标志一并复位: 结束路径(startGame/stopGame/cancelPendingMeld)都经过这里,
+        // 漏复位会让下一局的倒计时"看着在走、实际不动"(计时被冻住, 永远不超时)
+        this._decidePaused = false;
+        // 决策一结束(出牌/副露/结束牌局都会经过这里), 之前的提示立刻失效:
+        // 局面已经变了, 再显示"建议打 X"就是在给过期建议。
+        if (this._hint) this.clearHint();
+    }
+
+    /**
+     * 暂停玩家决策倒计时(打开设置弹窗时调用)
+     *
+     * 只冻结**玩家决策**的计时; AI 的回合调度(`scheduleOnce`)不暂停 ——
+     * 那需要连带保存/恢复整条调度链, 收益却为零: 玩家关掉弹窗后
+     * AI 该走还是会走, 而玩家自己的决定永远不会被系统替他做。
+     */
+    pauseDecideTimer(): void {
+        this._decidePaused = true;
+    }
+
+    /** 恢复玩家决策倒计时(关闭设置弹窗时调用), 从暂停时的剩余时间继续 */
+    resumeDecideTimer(): void {
+        this._decidePaused = false;
+    }
+
+    /** 决策倒计时是否被暂停(UI 可据此显示"已暂停") */
+    get decidePaused(): boolean { return this._decidePaused; }
+
+    /** 当前决策剩余秒数(UI 画倒计时用;不在计时返回 0) */
+    get decideRemain(): number {
+        if (this._decideKind === 'none') return 0;
+        return Math.max(0, GameManager.DECIDE_LIMIT - this._decideElapsed);
+    }
+
+    /** 决策时限总秒数(UI 画进度环用) */
+    get decideLimit(): number { return GameManager.DECIDE_LIMIT; }
+
+    /** 当前是否正在为玩家的某个决定计时 */
+    get deciding(): boolean { return this._decideKind !== 'none'; }
+
     // ==================== 状态查询 ====================
 
     get player(): Player | null { return this._player; }
     get phase(): GamePhase { return this._phase; }
+    /**
+     * 牌局是否在进行中(含"刚打出一张牌、等别家反应"的短暂空档)
+     *
+     * UI 判断"该不该动"时用这个, **不要**手写 `phase === PLAYER_TURN || phase === AI_TURN` ——
+     * 那样会漏掉 DISCARDING, 表现为每次出牌指针都暗一下再亮起来(闪烁)。
+     */
+    get isTurnRunning(): boolean {
+        return this._phase === GamePhase.PLAYER_TURN
+            || this._phase === GamePhase.AI_TURN
+            || this._phase === GamePhase.DISCARDING;
+    }
     get wallRemaining(): number { return this._wall ? this._wall.remaining : 0; }
     get aiCount(): number { return this.AI_COUNT; }
     get canDiscard(): boolean { return this._canDiscard; }
@@ -1149,6 +1448,49 @@ export class GameManager extends Component {
     private _getPlayer(seat: number): Player | null {
         if (seat === 0) return this._player;
         return this._aiPlayers[seat - 1] ?? null;
+    }
+
+    /**
+     * 为某个 AI 座位组装决策上下文
+     *
+     * AI 能看到的信息严格限制在"公开信息": 自己的手牌、所有人的弃牌与副露、
+     * 自己手牌+副露+弃牌的可见张数。**不把别家的手牌给 AI**, 否则就是作弊。
+     */
+    private _buildAIContext(seat: number): AIContext {
+        const me = this._getPlayer(seat);
+        const visible = new Int8Array(TILE_TYPE_COUNT);
+        const threats: ThreatInfo[] = [];
+        const addAll = (tiles: Tile[]): void => {
+            for (const t of tiles) visible[tileIndexOf(t.suit, t.rank)]++;
+        };
+
+        for (let s = 0; s < 4; s++) {
+            const p = this._getPlayer(s);
+            if (!p) continue;
+            addAll(p.discards);
+            for (const m of p.melds) addAll(m.tiles);
+        }
+        for (let s = 0; s < 4; s++) {
+            if (s === seat) continue;
+            const p = this._getPlayer(s);
+            if (!p) continue;
+            threats.push({
+                discards: p.discards,
+                melds: p.melds,
+                declaredTenpai: p.declaredTenpai,
+            });
+        }
+        if (me) addAll(me.hand);
+
+        return {
+            hand: me ? me.hand : [],
+            melds: me ? me.melds : [],
+            declaredTenpai: me ? me.declaredTenpai : false,
+            visible,
+            threats,
+            wallRemaining: this._wall ? this._wall.remaining : 0,
+            difficulty: difficultyOfDelay(this._rules.aiDelay),
+        };
     }
 
     /** 获取指定 AI 索引的玩家(0=上家 1=左家 2=右家) */

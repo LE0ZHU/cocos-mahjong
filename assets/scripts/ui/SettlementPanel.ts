@@ -19,8 +19,8 @@ interface ChipItem {
 // 卡片宽度固定(内容坐标横向永远放得下, 内容 x 恒为 ±840), 高度随可见区自适应。
 //
 // 为什么要自适应高度: Main 把牌桌内容按"宽度铺满"缩放(_gameRoot.scale = 设计宽 / 1680),
-// 因此内容坐标系里的可见高度 = 1680 / 屏幕宽高比:
-//   16:9(1920×1080)→945   19.5:9(2340×1080)→775   20:9→756   21:9→720   竖屏 2600~4200
+// 因此内容坐标系里的**可见半高** = 840 / 屏幕宽高比:
+//   16:9→472  19.5:9→387  21:9→360  竖屏→1867+   (全高是这些数字的两倍)
 // 纵向各段按"实际可用高度"自上而下顺排, 任何屏幕比例下都完整可见且互不重叠。
 const CARD_W = 1420;
 /** 遮罩尺寸(比屏幕大得多, 盖住整张牌桌) */
@@ -553,7 +553,7 @@ export class SettlementPanel extends Component {
         highlight: Tile | undefined,
         w: number,
     ): number {
-        const h = w * 87 / 64;
+        const h = w * 4 / 3;   // 与局内麻将一致: 宽高比 3:4
         const node = createTileNode(w, h, false);
         node.parent = row;
         node.setPosition(x + w / 2, 0, 0);

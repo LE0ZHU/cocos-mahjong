@@ -1,12 +1,13 @@
 import {
     _decorator, Component, Node, Color, Label, Graphics, UITransform, Vec3,
-    view, UIOpacity, Sprite, SpriteFrame, resources,
+    view, UIOpacity, Sprite, SpriteFrame, resources, ScrollView, Mask,
 } from 'cc';
 import {
     createLabelNode, createButtonNode, restyleButton, repaintButtons, applyDesignResolution,
-    ButtonStyle, bindSafeClick,
+    ButtonStyle, bindSafeClick, buttonLabel,
 } from './UIFactory';
-import { GAME_RULES, DEFAULT_RULES, AI_SPEED_OPTIONS } from '../game/GameRules';
+import { GAME_RULES, DEFAULT_RULES } from '../game/GameRules';
+import { syncAudioSettings } from '../audio/Sound';
 
 const { ccclass } = _decorator;
 
@@ -32,11 +33,6 @@ const TEXT_MUTED = new Color(180, 176, 164, 255);
 const MENU_BTN_STYLE = ButtonStyle.Pill;
 const MENU_GHOST_STYLE = ButtonStyle.PillGhost;
 
-/** 取按钮节点里的文字 Label(createButtonNode 固定用名为 'Label' 的子节点) */
-function buttonLabel(node: Node): Label | null {
-    return node.getChildByName('Label')?.getComponent(Label) ?? null;
-}
-
 /** 给标题类文字加粗 + 可选字距 */
 function emphasizeLabel(node: Node, spacingX = 0): void {
     const l = node.getComponent(Label);
@@ -50,12 +46,62 @@ const ON_OFF: ChoiceOption[] = [
     { label: '允许', value: 1 },
     { label: '禁止', value: 0 },
 ];
+/** 通用"开/关"选项(音频设置用, 措辞与玩法规则区分开) */
+export const ON_OFF_AUDIO: ChoiceOption[] = [
+    { label: '开', value: 1 },
+    { label: '关', value: 0 },
+];
+/**
+ * 音量档位
+ *
+ * 用固定档位而不是 0~100 连续值: 设置页的选项是按钮,
+ * 连续值要么加滑杆(与现有版式不符), 要么用步进按钮(点一下只动一格, 很别扭)。
+ * 4 档对玩家足够用, 且档位间距听感上差别明显。
+ *
+ * 导出给对局内的设置弹窗(SettingsPanel)复用 —— 音量档位只能有一套定义,
+ * 两处各写一份必然出现"菜单里是 4 档、牌桌上是 5 档"这类漂移。
+ */
+export const VOLUME_LEVELS: ChoiceOption[] = [
+    { label: '静音', value: 0 },
+    { label: '小', value: 0.35 },
+    { label: '中', value: 0.7 },
+    { label: '大', value: 1 },
+];
+
+/**
+ * 把 0~1 的音量落到最接近的档位值(用于高亮当前档位)
+ *
+ * 存档里的音量可能是任意值(旧版本或手改的 localStorage),
+ * 而选项按钮只有 4 个 —— 必须吸附到最近档才能正确点亮。
+ */
+export function nearestVolumeLevel(v: number): number {
+    let best = VOLUME_LEVELS[0].value;
+    let bestDiff = Math.abs(v - best);
+    for (const o of VOLUME_LEVELS) {
+        const d = Math.abs(v - o.value);
+        if (d < bestDiff) { bestDiff = d; best = o.value; }
+    }
+    return best;
+}
+
 const OPACITY_ON = 255;
 const OPACITY_OFF = 165;
 
 // ==================== 规则设置页布局 ====================
+//
+// 【改为全屏 + 滚动, 不再用居中的深色面板】
+// 原来 PANEL_H=940 装在 MENU_CONTENT_H=1040 里, 上下各留 50 白边,
+// 而面板内部能用的纵向只有 703px(标题下沿 351 → 返回按钮上沿 -352),
+// 9 个"标题+说明"的选项(每行 76px)根本放不下, 于是把说明文字挤到一块。
+//
+// 去掉面板框后可视高度从 703px 涨到 941px, 9 行带说明(928px)**一屏就装得下**。
+// 滚动条仍保留: 以后再加设置项超出时可直接滚, 不必再改版式。
+//
+// 2026-10-15: 应用户要求删除"规则设置"标题与上下两条黑色半透明渐变遮罩,
+// 顶部一行现在只放左上角的返回/恢复默认按钮; 可读性只靠 MenuMask 的整页渐变。
+// PANEL_H 已移除: 曾经定义面板高度 940(装在可见 1040 里), 现在改成全屏布局。
+// PANEL_W 仍保留 —— 它只用来定位文字列与按钮列, 两者现在都要收在屏幕宽度内。
 const PANEL_W = 1080;
-const PANEL_H = 940;
 const RULES_PAD = 44;
 const RULES_TEXT_LEFT = -PANEL_W / 2 + RULES_PAD;
 const RULES_TEXT_W = 420;
@@ -63,15 +109,29 @@ const RULES_BTN_RIGHT = PANEL_W / 2 - RULES_PAD;
 const RULES_BTN_W = 170;
 const RULES_BTN_H = 60;
 const RULES_BTN_GAP = 16;
-const RULES_CAPTION_DY = 16;
-const RULES_HINT_DY = -18;
-const RULES_TITLE_Y = 372;
-/** 7 行选项(吃/续杠/吃胡/抢杠/一炮多响/听牌宣言/AI 速度) */
-const RULES_ROW_YS = [292, 216, 140, 64, -12, -88, -164];
-const RULES_TIPS_Y = -238;
+/** 行内: 标题与其说明小字之间的间距(必须小于 RULES_ROW_GAP, 否则层次反了) */
+const RULES_CAPTION_DY = 10;
+const RULES_HINT_DY = -22;
+/**
+ * 行间距(行心到行心): 行块(caption30+内8+hint20=58) + 28px 行间空隙。
+ * 28px 是"视觉上分得开各项"的下限, 再小就会糊成一片(真机截图教训)。
+ */
+const RULES_ROW_GAP = 28;
+/** 9 行选项(吃/续杠/吃胡/抢杠/一炮多响/听牌宣言 + 音效音量/背景音乐/音乐音量) */
+const RULES_ROW_YS = [407, 321, 235, 149, 63, -23, -109, -195, -281];
+const RULES_TIPS_Y = -368;
 const RULES_TIPS_W = 1000;
+/** 底部说明块: 2 行 × 字号 22 + 余量 */
 const RULES_TIPS_H = 64;
-const RULES_BTN_Y = -PANEL_H / 2 + 88;
+/**
+ * 顶部一行(原"规则设置"标题所在行)的中心 y。
+ * 标题已删除, 这一行现在只放左上角的返回/恢复默认两个按钮;
+ * 滚动视口顶 = RULES_TOP_Y - 42(按钮下沿再留一点呼吸位)。
+ */
+const RULES_TOP_Y = 474;
+/** 返回按钮: 左上角 */
+const RULES_BACK_X = -PANEL_W / 2 + RULES_PAD + 100;
+const RULES_BACK_Y = RULES_TOP_Y;
 
 export interface ChoiceOption { label: string; value: number; }
 
@@ -168,18 +228,14 @@ export class MenuUI extends Component {
     }
 
     /**
-     * 重画遮罩层与规则页玻璃卡片(Sprite 背景不需要重绘,Graphics 需要补画)
+     * 重画遮罩层(Sprite 背景不需要重绘,Graphics 需要补画)
      */
     redrawBackdrop(): void {
         const halfH = Math.max(applyDesignResolution().height, MENU_CONTENT_H);
-        // 遮罩层(渐变暗化)
+        // 遮罩层(整页渐变暗化, 主页与设置页共用)
         const mask = this._root?.getChildByName('MenuMask');
         const mg = mask?.getComponent(Graphics);
         if (mg) this._paintMask(mg, halfH);
-        // 规则页玻璃卡片
-        const rulesCard = this._rulesNode?.getChildByName('RulesCard');
-        const rg = rulesCard?.getComponent(Graphics);
-        if (rg) this._paintRulesCard(rg);
     }
 
     // ==================== 背景层(图片 + 遮罩) ====================
@@ -300,85 +356,76 @@ export class MenuUI extends Component {
 
     // ==================== 规则设置页 ====================
 
-    /** 规则页玻璃卡片绘制 */
-    private _paintRulesCard(g: Graphics): void {
-        g.clear();
-        const pw = PANEL_W;
-        const ph = PANEL_H;
-        const r = 40;
-        // 半透明玻璃面(让背景图透一些出来)
-        g.fillColor = new Color(12, 18, 16, 160);
-        g.roundRect(-pw / 2, -ph / 2, pw, ph, r);
-        g.fill();
-        // 顶边高光
-        g.fillColor = new Color(255, 255, 255, 14);
-        g.roundRect(-pw / 2 + r + 24, ph / 2 - 2.5, pw - (r + 24) * 2, 2.5, 1);
-        g.fill();
-        // 外圈细描边
-        g.strokeColor = new Color(255, 255, 255, 22);
-        g.lineWidth = 2;
-        g.roundRect(-pw / 2, -ph / 2, pw, ph, r);
-        g.stroke();
-    }
-
     private _buildRulesPage(): void {
         const page = new Node('MenuRules');
         page.parent = this._root;
         this._rulesNode = page;
 
-        // 玻璃卡片容器
-        const card = new Node('RulesCard');
-        card.parent = page;
-        card.addComponent(UITransform).setContentSize(PANEL_W, PANEL_H);
-        this._paintRulesCard(card.addComponent(Graphics));
+        // 【不再画居中深色面板, 也没有标题和上下渐变遮罩】
+        // 全屏直接用背景图; 可视高度 941px, 9 行"标题+说明"一屏就装得下。
+        // 左上角只放返回/恢复默认两个按钮(原标题"规则设置"已按需求删除,
+        // 上下两条黑色半透明渐变也已删除, 可读性只靠 MenuMask)。
 
-        const title = createLabelNode('规则设置', 60, TEXT_TITLE, 1200);
-        title.parent = page;
-        title.setPosition(0, RULES_TITLE_Y, 0);
-        emphasizeLabel(title, 4);
+        // 返回按钮: 左上角顶部一行
+        const backBtn = createButtonNode('返回', 200, 62, LINE_GHOST, MENU_GHOST_STYLE);
+        backBtn.parent = page;
+        backBtn.setPosition(RULES_BACK_X, RULES_BACK_Y, 0);
+        bindSafeClick(backBtn, () => this.showHome(), this);
+
+        // 恢复默认也放左上角, 排在返回右侧(原来在底部, 现在底部要留给滚动内容)
+        const resetBtn = createButtonNode('恢复默认', 220, 62, LINE_GHOST, MENU_GHOST_STYLE);
+        resetBtn.parent = page;
+        resetBtn.setPosition(RULES_BACK_X + 320, RULES_BACK_Y, 0);
+        bindSafeClick(resetBtn, () => GAME_RULES.reset(), this);
+
+        // 选项内容装进滚动容器。
+        // 目前 9 行一屏就装得下(此时 ScrollView 会自动禁用拖动, 等同静态布局),
+        // 保留它是为了以后再加设置项时不必重排版式。
+        const scroll = this._createRulesScroll(page);
+        const host = scroll ?? page;
 
         // 选项组 1-4
-        this._buildChoiceGroup(page, {
+        this._buildChoiceGroup(host, {
             key: 'allowChi',
             caption: '吃牌',
-            hint: '只能吃上家打出的牌',
+            hint: '仅吃上家的出牌',
             options: ON_OFF,
             y: RULES_ROW_YS[0],
             selected: () => (GAME_RULES.rules.allowChi ? 1 : 0),
             onPick: (v) => GAME_RULES.setAllowChi(v === 1),
         });
 
-        this._buildChoiceGroup(page, {
+        this._buildChoiceGroup(host, {
             key: 'allowAddKan',
             caption: '续杠',
-            hint: '碰过之后再摸到同一张,可补成杠',
+            hint: '碰过的牌后来又摸到,可补成杠',
             options: ON_OFF,
             y: RULES_ROW_YS[1],
             selected: () => (GAME_RULES.rules.allowAddKan ? 1 : 0),
             onPick: (v) => GAME_RULES.setAllowAddKan(v === 1),
         });
 
-        this._buildChoiceGroup(page, {
+        this._buildChoiceGroup(host, {
             key: 'allowChiHu',
             caption: '吃胡',
-            hint: '听牌时别人打出所听的牌,可选择胡',
+            hint: '可以胡别人打出的牌',
             options: ON_OFF,
             y: RULES_ROW_YS[2],
             selected: () => (GAME_RULES.rules.allowChiHu ? 1 : 0),
             onPick: (v) => GAME_RULES.setAllowChiHu(v === 1),
         });
 
-        this._buildChoiceGroup(page, {
+        this._buildChoiceGroup(host, {
             key: 'allowRobKan',
             caption: '抢杠胡',
-            hint: '别人补杠时可以抢那张牌胡',
+            hint: '别人补杠时可抢那张牌胡',
             options: ON_OFF,
             y: RULES_ROW_YS[3],
             selected: () => (GAME_RULES.rules.allowRobKan ? 1 : 0),
             onPick: (v) => GAME_RULES.setAllowRobKan(v === 1),
         });
 
-        this._buildChoiceGroup(page, {
+        this._buildChoiceGroup(host, {
             key: 'allowMultiRon',
             caption: '一炮多响',
             hint: '多家同时听同一张牌时可一起胡',
@@ -388,42 +435,123 @@ export class MenuUI extends Component {
             onPick: (v) => GAME_RULES.setAllowMultiRon(v === 1),
         });
 
-        this._buildChoiceGroup(page, {
+        this._buildChoiceGroup(host, {
             key: 'allowRiichi',
             caption: '听牌宣言',
-            hint: '亮明听牌加 1 番, 之后不可吃碰杠',
+            hint: '亮明在等牌(加 1 番), 之后不可吃碰杠',
             options: ON_OFF,
             y: RULES_ROW_YS[5],
             selected: () => (GAME_RULES.rules.allowRiichi ? 1 : 0),
             onPick: (v) => GAME_RULES.setAllowRiichi(v === 1),
         });
 
-        this._buildChoiceGroup(page, {
-            key: 'aiSpeed',
-            caption: 'AI 思考速度',
-            hint: 'AI 出牌的间隔时间',
-            options: AI_SPEED_OPTIONS.map(o => ({ label: o.label, value: o.delay })),
+        // 原本这里有"AI 思考速度"三档(快/常规/慢), 现已移除:
+        // 速度档同时决定 AI 强度, 让玩家用"速度"去换"难度"并不合理,
+        // 因此直接固定为最大能力档(expert), 只保留一个固定的出牌节奏延时。
+        // 节奏本身仍可感知: AI 回合之间有 ~0.9s 停顿, 不会瞬间打完。
+
+        // ---- 音频设置 ----
+        // 每次改动都立刻调 syncAudioSettings(): AudioSource.volume 在 play() 时就固定了,
+        // 只改 GAME_RULES 不会让"正在播的 BGM"变化, 必须显式同步。
+        this._buildChoiceGroup(host, {
+            key: 'sfxVolume',
+            caption: '音效音量',
+            hint: '按钮点击与出牌声',
+            options: VOLUME_LEVELS,
             y: RULES_ROW_YS[6],
-            selected: () => GAME_RULES.rules.aiDelay,
-            onPick: (v) => GAME_RULES.setAiDelay(v),
+            selected: () => nearestVolumeLevel(GAME_RULES.rules.sfxVolume),
+            onPick: (v) => {
+                GAME_RULES.setSfxVolume(v);
+                syncAudioSettings();
+            },
+        });
+
+        this._buildChoiceGroup(host, {
+            key: 'bgmEnabled',
+            caption: '背景音乐',
+            hint: '关闭后完全静音',
+            options: ON_OFF_AUDIO,
+            y: RULES_ROW_YS[7],
+            selected: () => (GAME_RULES.rules.bgmEnabled ? 1 : 0),
+            onPick: (v) => {
+                GAME_RULES.setBgmEnabled(v === 1);
+                syncAudioSettings();
+            },
+        });
+
+        this._buildChoiceGroup(host, {
+            key: 'bgmVolume',
+            caption: '音乐音量',
+            hint: '背景音乐的响度',
+            options: VOLUME_LEVELS,
+            y: RULES_ROW_YS[8],
+            selected: () => nearestVolumeLevel(GAME_RULES.rules.bgmVolume),
+            onPick: (v) => {
+                GAME_RULES.setBgmVolume(v);
+                syncAudioSettings();
+            },
         });
 
         const tips = createLabelNode(
-            '胡牌: 自摸;开启吃胡后也可胡别人打出的牌(可一炮多响);补杠会被抢杠。\n计分: 每 1 番翻一倍, 8 番封顶;清一色/对对胡/七对/十三幺/杠上开花/海底捞月等自动识别。\n听牌宣言: 点"听牌"亮明在等牌(加 1 番), 之后不能再吃碰杠, 出牌须保持听牌。',
-            22, new Color(214, 202, 176, 255), RULES_TIPS_W, RULES_TIPS_H + 24, true,
+            // 补充说明: 每行的小字讲"这一项是什么", 这里讲"跨项的通用规则"
+            '计分: 每 1 番翻一倍, 8 番封顶; 清一色 / 对对胡 / 七对 / 十三幺 / 杠上开花 / 海底捞月等自动识别。\nAI 满能力档: 你的每次出牌与吃碰杠有 20 秒, 超时自动处理(出牌打掉刚摸的牌, 副露默认过)。音效与背景音乐改完立刻生效。',
+            // 行数与 RULES_TIPS_H 绑定, 改行数必须同步改并重跑 rules-layout-test
+            22, new Color(214, 202, 176, 255), RULES_TIPS_W, RULES_TIPS_H, true,
         );
-        tips.parent = page;
+        tips.parent = host;
         tips.setPosition(RULES_TEXT_LEFT + RULES_TIPS_W / 2, RULES_TIPS_Y, 0);
+    }
 
-        const backBtn = createButtonNode('返回', 240, 68, LINE_GHOST, MENU_GHOST_STYLE);
-        backBtn.parent = page;
-        backBtn.setPosition(-140, RULES_BTN_Y, 0);
-        bindSafeClick(backBtn, () => this.showHome(), this);
+    /**
+     * 创建设置页的滚动容器
+     *
+     * 结构: RulesScrollView(带 Mask 的视口)
+     *            └ Content(实际内容, 高度可大于视口 → 可拖动)
+     *
+     * 内容比视口短时 ScrollView 不会响应拖动, 所以"当前一屏放得下"与
+     * "以后能滚动"这两件事不冲突 —— 不需要为了将来而现在就付出滚动的操作成本。
+     *
+     * 视口 = 顶部按钮行下沿 → 屏幕底部(标题已删除, 顶部只剩返回/恢复默认)。
+     * @returns Content 节点(选项组与说明文字都挂在它下面)
+     */
+    private _createRulesScroll(page: Node): Node {
+        const viewTop = RULES_TOP_Y - 42;         // 顶部按钮行下沿
+        const viewBottom = -MENU_CONTENT_H / 2 + 8;
+        const viewH = viewTop - viewBottom;
+        const viewW = MENU_CONTENT_W - 80;
+        const viewCenterY = (viewTop + viewBottom) / 2;
 
-        const resetBtn = createButtonNode('恢复默认', 240, 68, LINE_GHOST, MENU_GHOST_STYLE);
-        resetBtn.parent = page;
-        resetBtn.setPosition(140, RULES_BTN_Y, 0);
-        bindSafeClick(resetBtn, () => GAME_RULES.reset(), this);
+        const view = new Node('RulesScrollView');
+        view.parent = page;
+        view.addComponent(UITransform).setContentSize(viewW, viewH);
+        view.setPosition(0, viewCenterY, 0);
+        // Mask 裁剪: 拖动时内容不会溢出到顶部按钮上
+        // GRAPHICS_RECT 是默认值(0), 显式写出来是为了表意
+        const mask = view.addComponent(Mask);
+        mask.type = Mask.Type.GRAPHICS_RECT;
+
+        const content = new Node('Content');
+        content.parent = view;
+        // 内容高度按"9 行 + 说明块"实际用到的范围给足, 超出视口才可拖动
+        const contentH = viewH;
+        content.addComponent(UITransform).setContentSize(viewW, contentH);
+        /**
+         * 【坐标系对齐】RULES_ROW_YS 等常量是按"全屏中心 y=0"设计的,
+         * 而 ScrollView 的 content 原点在**视口中心**。
+         * 这里把 Content 下移 -(视口中心 y), 使 content 原点与全屏中心重合 ——
+         * 否则所有行会整体上移 40px, 首行顶到标题上。
+         */
+        content.setPosition(0, -viewCenterY, 0);
+
+        const sv = view.addComponent(ScrollView);
+        sv.content = content;
+        sv.horizontal = false;
+        sv.vertical = true;
+        sv.inertia = true;
+        sv.brake = 0.6;
+        sv.elastic = false;      // 不用回弹, 避免内容"飘"出边界
+        sv.cancelInnerEvents = true;
+        return content;
     }
 
     private _buildChoiceGroup(
@@ -451,14 +579,21 @@ export class MenuUI extends Component {
         }
 
         const buttons: Node[] = [];
-        const totalW = cfg.options.length * RULES_BTN_W + (cfg.options.length - 1) * RULES_BTN_GAP;
-        const firstCenter = RULES_BTN_RIGHT - totalW + RULES_BTN_W / 2;
+        // 按钮列的可用宽度: 从文字列右缘到面板右内边距, 留 8px 呼吸位。
+        // 4 个选项(音量档)时 170×4+16×3 会压到文字列上(实测需要 ≤129px),
+        // 所以按选项数自适应收缩 —— 2 选项的玩法行仍然是 170px, 版式不变。
+        const textRight = RULES_TEXT_LEFT + RULES_TEXT_W;
+        const availW = RULES_BTN_RIGHT - textRight - 8;
+        const fitW = (availW - (cfg.options.length - 1) * RULES_BTN_GAP) / cfg.options.length;
+        const btnW = Math.min(RULES_BTN_W, fitW);
+        const totalW = cfg.options.length * btnW + (cfg.options.length - 1) * RULES_BTN_GAP;
+        const firstCenter = RULES_BTN_RIGHT - totalW + btnW / 2;
 
         for (let i = 0; i < cfg.options.length; i++) {
             const opt = cfg.options[i];
-            const btn = createButtonNode(opt.label, RULES_BTN_W, RULES_BTN_H, LINE_GHOST, MENU_GHOST_STYLE);
+            const btn = createButtonNode(opt.label, btnW, RULES_BTN_H, LINE_GHOST, MENU_GHOST_STYLE);
             btn.parent = parent;
-            btn.setPosition(firstCenter + i * (RULES_BTN_W + RULES_BTN_GAP), cfg.y, 0);
+            btn.setPosition(firstCenter + i * (btnW + RULES_BTN_GAP), cfg.y, 0);
             bindSafeClick(btn, () => cfg.onPick(opt.value), this);
             buttons.push(btn);
         }
@@ -477,16 +612,23 @@ export class MenuUI extends Component {
         this._applyChoice('allowRobKan', r.allowRobKan ? 1 : 0);
         this._applyChoice('allowMultiRon', r.allowMultiRon ? 1 : 0);
         this._applyChoice('allowRiichi', r.allowRiichi ? 1 : 0);
-        this._applyChoice('aiSpeed', r.aiDelay);
+        this._applyChoice('sfxVolume', nearestVolumeLevel(r.sfxVolume));
+        this._applyChoice('bgmEnabled', r.bgmEnabled ? 1 : 0);
+        this._applyChoice('bgmVolume', nearestVolumeLevel(r.bgmVolume));
 
         if (this._summaryLabel) {
-            const speed = AI_SPEED_OPTIONS.find(o => Math.abs(o.delay - r.aiDelay) < 1e-6);
             const onOff = (v: boolean): string => (v ? '开' : '关');
+            const volName = (v: number): string => {
+                const hit = VOLUME_LEVELS.find(o => Math.abs(o.value - nearestVolumeLevel(v)) < 1e-6);
+                return hit ? hit.label : '中';
+            };
             this._summaryLabel.string =
                 `当前规则: 吃${onOff(r.allowChi)} · 续杠${onOff(r.allowAddKan)}`
                 + ` · 吃胡${onOff(r.allowChiHu)} · 抢杠${onOff(r.allowRobKan)}`
                 + ` · 一炮多响${onOff(r.allowMultiRon)} · 听牌宣言${onOff(r.allowRiichi)}`
-                + ` · AI ${speed ? speed.label : '自定义'}`
+                + ' · AI 满能力'
+                + `\n音频: 音效${volName(r.sfxVolume)} · 音乐${onOff(r.bgmEnabled)}`
+                + (r.bgmEnabled ? `(${volName(r.bgmVolume)})` : '')
                 + (GAME_RULES.isDefault ? '(默认)' : '');
         }
     }

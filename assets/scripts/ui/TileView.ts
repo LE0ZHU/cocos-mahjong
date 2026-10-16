@@ -15,6 +15,13 @@ const WAN_NUM_COLOR = new Color(40, 40, 40, 255);
 const WAN_CHAR_COLOR = new Color(196, 36, 36, 255);
 /** 选中/按下时牌上抬的高度(容器局部坐标) */
 const SELECTED_LIFT = 30;
+/**
+ * 被 AI 提示"建议打出"时牌上抬的高度
+ *
+ * 比选中略低: 提示是"建议", 玩家完全可能改主意; 选中是"我就要打这张了"。
+ * 两者同高会让人分不清哪个是系统说的、哪个是自己点的。
+ */
+const HINTED_LIFT = 22;
 
 // ---- 拖牌手势参数 ----
 /** 手指移动超过这个距离(UI 像素)才算拖牌,低于它按"点一下"处理 */
@@ -53,6 +60,8 @@ export class TileView extends Component {
     private _face: Sprite | null = null;       // 真实牌面图片
     private _imageMode = false;                // 是否使用图片牌面
     private _mark: Node | null = null;         // 刚摸到的牌高亮标注
+    private _hintMark: Node | null = null;     // AI 建议打出的牌高亮标注
+    private _hinted = false;                   // 是否处于"AI 建议打出"状态(影响静止位置)
     private _onClick: ((index: number) => void) | null = null;
     /** 拖牌出牌回调: 返回 true 表示确实打出去了(手牌会被整体重建) */
     private _onDiscard: ((index: number) => boolean) | null = null;
@@ -123,6 +132,16 @@ export class TileView extends Component {
         this._applyDisplay();
     }
 
+    /**
+     * 这张牌的 id(未 setData 时为 -1)
+     *
+     * 发牌动画要按"本轮新增的是哪张牌"找到对应节点, 而 AI 手牌节点没有固定命名,
+     * 只能靠牌 id 反查 —— 这个 getter 就是为此存在(不要改成 setter)。
+     */
+    get tileId(): number {
+        return this._tile ? this._tile.id : -1;
+    }
+
     /** 设置点击回调(同时代表"这张牌参与点选/拖牌手势") */
     setOnClick(callback: (index: number) => void): void {
         this._onClick = callback;
@@ -178,6 +197,33 @@ export class TileView extends Component {
             this._mark = mark;
         }
         if (this._mark) this._mark.active = drawn;
+    }
+
+    /**
+     * 标记/取消"AI 建议打出这张牌"的提示框
+     *
+     * 与"刚摸到"的金色框刻意区分开: 提示框用**青蓝色**且没有柔光底,
+     * 只画外侧一圈亮边 —— 因为"刚摸到的牌"经常同时就是"建议打出的牌",
+     * 两个金色框叠在一起会分不清谁是谁。
+     */
+    setHinted(hinted: boolean): void {
+        if (hinted && !this._hintMark) {
+            const tileT = this.node.getComponent(UITransform);
+            const w = tileT ? tileT.width : 64;
+            const h = tileT ? tileT.height : 87;
+            const mark = new Node('HintMark');
+            mark.parent = this.node;
+            mark.addComponent(UITransform).setContentSize(w, h);
+            drawHintMark(mark.addComponent(Graphics), w, h);
+            // 画在牌身**之上**: 提示框只勾外沿, 盖住一点牌边不影响读面
+            mark.setSiblingIndex(this.node.children.length - 1);
+            this._hintMark = mark;
+        }
+        if (this._hintMark) this._hintMark.active = hinted;
+        this._hinted = hinted;
+        // 提示态也要把牌抬起来(比选中抬得略低, 见 HINTED_LIFT)
+        Tween.stopAllByTarget(this.node);
+        this._applyRestPos();
     }
 
     /** 按花色应用显示: 优先使用真实牌面图片,缺失时回退矢量绘制 */
@@ -420,10 +466,13 @@ export class TileView extends Component {
         return this._slotPos ? this._slotPos.x : this.node.position.x;
     }
 
-    /** 静止时应处的位置: 选中或按下则上抬 */
+    /** 静止时应处的位置: 选中/按下则上抬, 提示态也上抬但略低 */
     private _applyRestPos(): void {
         const x = this._slotX();
-        this.node.setPosition(x, (this._selected || this._pressed) ? SELECTED_LIFT : 0, 0);
+        let y = 0;
+        if (this._selected || this._pressed) y = SELECTED_LIFT;
+        else if (this._hinted) y = HINTED_LIFT;
+        this.node.setPosition(x, y, 0);
     }
 
     /** UI 坐标 → 父节点局部坐标(手牌容器的缩放/旋转都会被正确抵消) */
@@ -454,6 +503,28 @@ function drawDrawnMark(g: Graphics, w: number, h: number): void {
     g.strokeColor = new Color(255, 232, 150, 255);
     g.lineWidth = 3;
     g.roundRect(-w / 2, -h / 2, w, h, r + 2);
+    g.stroke();
+}
+
+/**
+ * 绘制"AI 建议打出"的提示框: 青蓝色双层描边, 只勾在牌身外沿
+ *
+ * 刻意**不画柔光底**, 也**不用金色**:
+ *  - 金色柔光底已经是"刚摸到这张牌"的语言, 两者叠加就分不清了;
+ *  - 建议牌往往正是刚摸到的那张, 两个标记同时出现是常态。
+ * 青蓝是牌桌上没有的第三种信号色, 一眼能区分"系统说的"与"我刚摸的"。
+ */
+function drawHintMark(g: Graphics, w: number, h: number): void {
+    const r = Math.max(4, Math.min(w, h) * 0.12);
+    // 外层柔光(青蓝)
+    g.strokeColor = new Color(110, 226, 224, 120);
+    g.lineWidth = 7;
+    g.roundRect(-w / 2 - 2, -h / 2 - 2, w + 4, h + 4, r + 3);
+    g.stroke();
+    // 主体亮边
+    g.strokeColor = new Color(178, 244, 240, 255);
+    g.lineWidth = 3;
+    g.roundRect(-w / 2 - 2, -h / 2 - 2, w + 4, h + 4, r + 3);
     g.stroke();
 }
 

@@ -28,6 +28,31 @@ export const ANIM = {
     kanPop: 0.22,
     /** 副露金色闪光 */
     flash: 0.34,
+    /** 发牌: 单张牌从牌墙飞到手里的飞行时长 */
+    dealFly: 0.18,
+    /**
+     * 发牌: 同一帧内四家之间的错峰(绕桌顺时针依次落下)
+     *
+     * 必须让 `dealInterval`(轮间隔) ≥ 本值 × 3, 否则下一轮的重建会打断上一轮
+     * 还没落位的牌 —— 那种帧间打架看起来就是"卡了一下"。
+     */
+    dealStagger: 0.022,
+    /**
+     * 发牌: 每一轮之间的间隔
+     *
+     * 13 轮总耗时 ≈ 13 × (0.075 + 3×0.022) + 前置 + 收尾 ≈ 2.1s。
+     * 再慢玩家就干等了, 再快就退回"啪一下全出来" —— 这个值是两头平衡点。
+     */
+    dealInterval: 0.075,
+    /** 发牌: 开始前的短暂停顿, 让"牌墙准备好"这一下看得见 */
+    dealLeadIn: 0.14,
+    /**
+     * 发牌: 最后一轮落位后, 再等多久才放开玩家操作
+     *
+     * 要留出"最后一张飞到位"的时间, 否则玩家在牌还没落定时就能点,
+     * 读起来像是抢在动画前面 —— 十几轮发完手牌已经在位, 这点延迟玩家感觉不到。
+     */
+    dealLastSettle: 0.2,
 };
 
 /** 递归停掉节点及其子节点上的补间(销毁节点前调用) */
@@ -103,6 +128,13 @@ export interface FlyOptions {
     duration?: number;
     /** 落点是否弹一下(默认弹) */
     pop?: boolean;
+    /**
+     * 错峰延时(秒)
+     *
+     * 发牌时同一轮有 4 张牌要依次落下, 靠它排成"一张张码"而不是一起飞。
+     * 注意: 延时只推迟**开始**, 时长不变 —— 所以错峰总时长 = delay + duration。
+     */
+    delay?: number;
 }
 
 /**
@@ -115,6 +147,7 @@ export function flyToSlot(node: Node, container: Node, opts: FlyOptions = {}): v
     const targetScale = node.scale.clone();
     const targetAngle = node.angle;
     const dur = opts.duration ?? ANIM.discardFly;
+    const delay = opts.delay ?? 0;
 
     if (opts.fromWorld) {
         const start = toLocal(container, opts.fromWorld);
@@ -122,25 +155,35 @@ export function flyToSlot(node: Node, container: Node, opts: FlyOptions = {}): v
         node.angle = targetAngle + (opts.startTilt ?? 0);
         const op = ensureOpacity(node);
         op.opacity = opts.startOpacity ?? 120;
-        tween(op).to(dur * 0.5, { opacity: 255 }).start();
-        tween(node).to(dur, { position: target }, { easing: 'quadOut' }).start();
-        tween(node).to(dur * 0.85, { angle: targetAngle }, { easing: 'quadOut' }).start();
+        opTween(op, delay).to(dur * 0.5, { opacity: 255 }).start();
+        tw(node, delay).to(dur, { position: target }, { easing: 'quadOut' }).start();
+        tw(node, delay).to(dur * 0.85, { angle: targetAngle }, { easing: 'quadOut' }).start();
     } else {
         node.angle = targetAngle + (opts.startTilt ?? 0);
-        tween(node).to(dur * 0.85, { angle: targetAngle }, { easing: 'quadOut' }).start();
+        tw(node, delay).to(dur * 0.85, { angle: targetAngle }, { easing: 'quadOut' }).start();
     }
 
     const s0 = opts.startScale ?? 1;
-    const tw = tween(node);
+    const twMain = tw(node, delay);
     if (s0 !== 1) {
         node.setScale(targetScale.x * s0, targetScale.y * s0, 1);
-        tw.to(dur * 0.85, { scale: targetScale }, { easing: 'quadOut' });
+        twMain.to(dur * 0.85, { scale: targetScale }, { easing: 'quadOut' });
     }
     if (opts.pop !== false) {
-        tw.to(ANIM.discardPop, { scale: v3(targetScale.x * 1.07, targetScale.y * 1.07, 1) })
+        twMain.to(ANIM.discardPop, { scale: v3(targetScale.x * 1.07, targetScale.y * 1.07, 1) })
             .to(ANIM.discardPop + 0.01, { scale: targetScale });
     }
-    tw.start();
+    twMain.start();
+}
+
+/** 带可选延时的补间起点(delay 为 0 时就是普通 tween) */
+function tw(node: Node, delay: number): Tween<Node> {
+    return delay > 0 ? tween(node).delay(delay) : tween(node);
+}
+
+/** 带可选延时的 UIOpacity 补间起点 */
+function opTween(op: UIOpacity, delay: number): Tween<UIOpacity> {
+    return delay > 0 ? tween(op).delay(delay) : tween(op);
 }
 
 /**

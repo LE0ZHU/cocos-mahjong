@@ -5,5 +5,12 @@
   /* Add your custom configuration here. */
   "compilerOptions": {
     "strict": false
-  }
+  },
+
+  /*
+   * tools/ 下是纯 node 的验证脚本(编译到 temp/ 用 node 直接跑),
+   * 不参与 Cocos 构建, 也不该受 target=ES2015 的限制
+   * (它们需要 Array.includes / String.padEnd 这些 ES2016+ API)。
+   */
+  "exclude": ["tools", "temp", "library", "build", "native"]
 }

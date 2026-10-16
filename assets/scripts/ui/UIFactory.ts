@@ -1,6 +1,6 @@
 import {
-    Node, Label, Graphics, UITransform, Color, Button, Sprite, view, screen, ResolutionPolicy,
-    EventTouch,
+    Node, Label, Graphics, UITransform, Color, Button, Sprite, SpriteFrame, resources,
+    view, screen, ResolutionPolicy, EventTouch,
 } from 'cc';
 import { TileSuit, SUIT_BG_COLORS } from '../core/TileDefine';
 import { Tile } from '../core/Tile';
@@ -197,33 +197,23 @@ function drawTileFace3D(
     g.fill();
 }
 
-/** 平面牌面: 圆角矩形 + 细描边(其他三家使用,无 3D 立体效果) */
+/** 平面牌面: 圆角矩形填充(其他三家与本家手牌共用,无 3D 立体效果) ——
+ *  真实麻将牌身没有描边,牌与牌的区分靠各自牌面图案,所以这里不画边框 */
 function drawTileFaceFlat(g: Graphics, w: number, h: number, base: Color, radius = 6): void {
     g.clear();
     const r = fitRadius(w, h, radius);
     g.fillColor = base;
-    g.strokeColor = adjust(base, -80);
-    g.lineWidth = 1.5;
     g.roundRect(-w / 2, -h / 2, w, h, r);
     g.fill();
-    g.stroke();
 }
 
-/** 平面牌背: 圆角矩形 + 描边(其他三家手牌背面,无 3D 立体效果) */
+/** 平面牌背: 纯圆角矩形填充(其他三家手牌背面) —— 真实麻将牌背是一整块素色, 同样无边框 */
 function drawTileBackFlat(g: Graphics, w: number, h: number, base: Color, radius = 4): void {
     g.clear();
     const r = fitRadius(w, h, radius);
     g.fillColor = base;
-    g.strokeColor = adjust(base, -80);
-    g.lineWidth = 1.5;
     g.roundRect(-w / 2, -h / 2, w, h, r);
     g.fill();
-    g.stroke();
-    // 内沿细线(平面装饰,非立体)
-    g.strokeColor = adjust(base, 45);
-    g.lineWidth = 1;
-    g.roundRect(-w / 2 + 2, -h / 2 + 2, w - 4, h - 4, Math.max(1, r - 2));
-    g.stroke();
 }
 
 /** 牌身绘制入口: frontView=true 自家正面立体牌面; false 其他三家平面牌面 */
@@ -800,7 +790,8 @@ export function createTileNode(width = 70, height = 100, frontView = false): Nod
     const bgTransform = bgNode.addComponent(UITransform);
     bgTransform.setContentSize(width, height);
     const g = bgNode.addComponent(Graphics);
-    drawTileBg(g, width - 2, height - 2, new Color(248, 238, 210, 255), frontView);
+    // 底色用纯白(与 tiles 里牌面图片的白底一致),否则图片四周会露出一圈米白"边框"
+    drawTileBg(g, width - 2, height - 2, new Color(255, 255, 255, 255), frontView);
 
     // ---- 牌面图片层: 凹槽内显示真实牌面图片,由 TileView 按需设置 ----
     const faceNode = new Node('Face');
@@ -879,7 +870,7 @@ export function setTileBgColor(node: Node, suit: TileSuit, frontView = false): v
     const g = bgNode.getComponent(Graphics);
     const bgTransform = bgNode.getComponent(UITransform);
     if (!g || !bgTransform) return;
-    const [r, gC, b] = SUIT_BG_COLORS[suit] ?? [248, 238, 210];
+    const [r, gC, b] = SUIT_BG_COLORS[suit] ?? [255, 255, 255];
     drawTileBg(g, bgTransform.width - 2, bgTransform.height - 2,
         new Color(r, gC, b, 255), frontView);
 }
@@ -984,10 +975,65 @@ export function createButtonNode(
     return node;
 }
 
+/**
+ * 取按钮节点里的文字 Label
+ *
+ * `createButtonNode` 固定把文字放在名为 'Label' 的子节点里, 取它的地方很多
+ * (改字号/改颜色/按选中态换字色), 统一放在这里, 免得各处各写一遍
+ * `getChildByName('Label')?.getComponent(Label)`。
+ */
+export function buttonLabel(node: Node): Label | null {
+    return node.getChildByName('Label')?.getComponent(Label) ?? null;
+}
+
 /** 默认按钮主色(蓝) */
 export const BTN_COLOR_BLUE = new Color(70, 130, 200, 255);
 /** 次要按钮主色(灰) */
 export const BTN_COLOR_GREY = new Color(96, 104, 116, 255);
+
+/**
+ * 创建图标按钮: 底框沿用同一套按钮绘制, 上面叠一张图标 Sprite
+ *
+ * 【为什么给图标垫一层底】图标素材多是**深灰实心**图形(如齿轮),
+ * 直接压在深绿牌桌上几乎看不见; 浅色底 + 深图标在任何桌面色上都清晰。
+ * 底框走 `createButtonNode` 的同一套 painter, 于是原生(JSB)平台上
+ * "藏过再亮"时能由 `repaintButtons` 补画, 不需要另写一套。
+ *
+ * 【图标异步加载】`resources.load` 回调回来时节点可能已被销毁(重开/切页面),
+ * 所以回调里必须判 `isValid` —— 对已销毁节点设 spriteFrame 会炸在引擎里。
+ *
+ * @param iconRes resources 下的图标路径(不含扩展名, 内部自动补 `/spriteFrame`)
+ * @param iconSize 图标边长; 传 0 表示按按钮短边的 62% 取值
+ * @param iconColor 可选染色(Sprite 颜色是**乘算**, 白色=原样)
+ */
+export function createIconButton(
+    iconRes: string,
+    width = 64,
+    height = 64,
+    baseColor: Color = new Color(245, 240, 228, 255),
+    style: ButtonStyle = ButtonStyle.Pill,
+    iconSize = 0,
+    iconColor?: Color,
+): Node {
+    const node = createButtonNode('', width, height, baseColor, style);
+    node.name = `BtnIcon_${iconRes}`;
+
+    const size = iconSize > 0 ? iconSize : Math.min(width, height) * 0.62;
+    const icon = new Node('Icon');
+    icon.parent = node;
+    icon.addComponent(UITransform).setContentSize(size, size);
+    const sprite = icon.addComponent(Sprite);
+    sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+    sprite.type = Sprite.Type.SIMPLE;
+    if (iconColor) sprite.color = iconColor;
+
+    resources.load(`${iconRes}/spriteFrame`, SpriteFrame, (err, sf) => {
+        // 加载失败只留底框(不阻塞交互); 节点已销毁则直接丢弃结果
+        if (err || !sf || !icon.isValid) return;
+        sprite.spriteFrame = sf;
+    });
+    return node;
+}
 
 /**
  * 计算并应用设计分辨率,返回设计尺寸

@@ -1,16 +1,20 @@
-import { _decorator, Component, Node, Color, Label, Graphics, UITransform, Vec3, view, Canvas, Camera, UIOpacity } from 'cc';
+import { _decorator, Component, Node, Color, Label, Graphics, UITransform, Vec3, view, Canvas, Camera, UIOpacity, tween } from 'cc';
 import { GameManager, GamePhase, MeldPromptItem, MeldPromptRequest, SEAT_NAMES } from './managers/GameManager';
-import { createTileNode, createTileBackNode, createLabelNode, createButtonNode, repaintButtons, setTileBgColor, getFrontBand, applyDesignResolution, BTN_COLOR_GREY, ButtonStyle, bindSafeClick } from './ui/UIFactory';
+import { createTileNode, createTileBackNode, createLabelNode, createButtonNode, createIconButton, repaintButtons, setTileBgColor, getFrontBand, applyDesignResolution, BTN_COLOR_GREY, ButtonStyle, bindSafeClick } from './ui/UIFactory';
 import { TileView } from './ui/TileView';
 import { MenuUI } from './ui/MenuUI';
 import { SettlementPanel } from './ui/SettlementPanel';
+import { HintPanel } from './ui/HintPanel';
+import { SettingsPanel } from './ui/SettingsPanel';
+import { Hint } from './game/HintAdvisor';
 import { GAME_RULES } from './game/GameRules';
 import { preloadTileImages } from './ui/TileImage';
-import { preloadSounds, playDiscard, playBgm } from './audio/Sound';
+import { preloadSounds, playTileVoice, playMeldVoice, playPassVoice, playBgm } from './audio/Sound';
 import {
-    centerOf, flashBurst, flyToSlot, gatherIn, glideTo, popIn, slideIn, stopTweensDeep, toWorld,
+    ANIM, centerOf, ensureOpacity, flashBurst, flyToSlot, gatherIn, glideTo, popIn, slideIn, stopTweensDeep, toWorld,
 } from './ui/Anim';
 import { Tile } from './core/Tile';
+import { HAND_SIZE } from './core/TileDefine';
 import { Meld } from './core/Meld';
 import { SettlementData } from './core/HuScore';
 
@@ -26,6 +30,28 @@ const MELD_BTN_GAP = 12;
 const MELD_BTN_COLOR = new Color(196, 132, 44, 255);
 const PASS_BTN_COLOR = new Color(96, 104, 116, 255);
 const RON_BTN_COLOR = new Color(178, 52, 48, 255);
+
+// ---- AI 提示按钮 ----
+/** 提示按钮尺寸(与"听牌"按钮同一档, 视觉上属同一组) */
+const HINT_BTN_W = 120;
+const HINT_BTN_H = 46;
+/** 提示按钮与"听牌"按钮之间的水平间距 */
+const HINT_BTN_GAP = 14;
+/** 提示面板与吃/碰按钮行之间的垂直间距 */
+const HINT_PANEL_GAP = 18;
+/**
+ * 提示面板贴到转盘/手牌时保留的呼吸位
+ *
+ * 不留这一点的后果不是"压住", 而是**刚好贴死**: 版式校验算出来是 `panelBottom == handTop`,
+ * 看起来像贴在一起。加几像素空隙才读得出"这是浮在上层的一张卡片"。
+ */
+const HINT_BREATH = 8;
+/**
+ * 提示面板高度的兜底值(面板还没显示时用它排版)
+ *
+ * 取"只有首选 + 一条次选"的典型高度: 顶部队落 + 首选 + 理由 + 分隔 + 1 条次选 + 上下内边距。
+ */
+const HINT_PANEL_FALLBACK_H = 26 + 6 + 46 + 4 + 28 + 18 + 26 + 44;
 
 /**
  * 中央转盘的盘面半径(钳制范围)
@@ -116,11 +142,29 @@ export class Main extends Component {
     private _riichiBtn: Node | null = null;
     /** 四家的"听"标记(已宣告听牌时亮出) */
     private _tenpaiMarkers: (Node | null)[] = [null, null, null, null];
+    // ---- AI 提示 ----
+    /** "提示"按钮: 玩家需要做决定时才亮 */
+    private _hintBtn: Node | null = null;
+    /** 提示面板(显示首选/理由/次选) */
+    private _hintPanel: HintPanel | null = null;
+    /** 当前被提示标记的手牌下标(-1 = 无); 手牌重建后据此重新贴标记 */
+    private _hintedTileIndex = -1;
+    /** 玩家手牌的上沿 y(提示面板绝不能压到这里, 由 _applyLayout 更新) */
+    private _handTopY = 0;
     // ---- 需要按屏幕比例动态定位的零散节点 ----
-    /** 重新开始按钮,固定屏幕左上角 */
-    private _restartBtn: Node | null = null;
-    /** 返回主页面按钮(牌局结束后出现在重新开始右侧) */
-    private _returnBtn: Node | null = null;
+    /**
+     * 设置按钮(齿轮图标, 固定屏幕左上角)
+     *
+     * 2026-10-16: 原先这里并排两个文字按钮"重新开始 / 返回主页面",
+     * 现按需求收成一个设置按钮 —— 点开弹窗里同时有声音设置与这两个操作。
+     * 好处: 对局中能直接调音量(以前必须退回主菜单), 且牌桌上方让出一大片视觉空间。
+     */
+    private _settingsBtn: Node | null = null;
+    /** 对局内设置弹窗(声音设置 + 重新开始 / 返回主页面) */
+    private _settingsPanel: SettingsPanel | null = null;
+    /** 设置按钮位置(由 _applyLayout 计算) */
+    private _settingsBtnX = 0;
+    private _settingsBtnY = 0;
     /** 当前场景状态(主页面 / 规则设置 / 对局中) */
     private _sceneState: SceneState = SceneState.HOME;
     /** 主页面与设置页面 */
@@ -144,13 +188,14 @@ export class Main extends Component {
     private _prevHandSlots: Map<number, Map<number, Vec3>> = new Map();
     /** 各家弃牌河上一帧的张数(索引 0=自己,1-3=三家 AI): 只有 +1 才做出牌飞入,吃碰杠收牌时不动画 */
     private _riverCount: number[] = [0, 0, 0, 0];
-    /** 对局界面(重新开始按钮)是否已显示 */
-    private _restartVisible = false;
-    /** 两个左上角按钮的位置(由 _applyLayout 计算) */
-    private _restartBtnX = 0;
-    private _restartBtnY = 0;
-    private _returnBtnX = 0;
-    private _returnBtnY = 0;
+    // ---- 发牌动画 ----
+    /**
+     * 发牌动画进行中
+     *
+     * 期间手牌是"只读"的: 玩家点不到(`playTile` 要求 PLAYER_TURN, 而发牌时阶段是 DEALING),
+     * 这里额外拦一道是为了让"能不能点"与阶段无关, 逻辑更直白。
+     */
+    private _dealing = false;
     // ---- 回合提示(牌桌中央转盘指向)与剩余牌墙(图形化) ----
     /** 转盘盘面当前半径(由 _applyLayout 按可见高度自适应,见 TURN_DISC_R_MAX 注释) */
     private _discR = TURN_DISC_R_MAX;
@@ -164,6 +209,13 @@ export class Main extends Component {
     private _pointerAngle = 0;
     /** 指针呼吸动画计时 */
     private _pointerPulseT = 0;
+    /** 决策倒计时: 环形进度 Graphics + 中央秒数 Label(平时整体隐藏) */
+    private _countdownG: Graphics | null = null;
+    private _countdownLabel: Label | null = null;
+    /** 倒计时显示是否已创建(原生平台要等首帧后才画,见 _staticGraphicsDrawn) */
+    private _countdownShown = false;
+    /** 转盘的Y(倒计时叠在盘心, 目前不用单独记录) */
+    private _discY = 0;
     private _wallNode: Node | null = null;
     private _wallG: Graphics | null = null;
     private _halfH = 0;
@@ -173,11 +225,11 @@ export class Main extends Component {
 
     // ---- 牌的统一长宽比例 ----
     // 所有牌(自己手牌 / 上家手牌 / 左右家手牌 / 弃牌河 / 吃碰杠副露)的宽高比都与此一致,
-    // 只通过宽度区分远近大小,改比例只需改 TILE_W / TILE_H 两个值。
+    // 统一为 3:4(宽:高), 只通过宽度区分远近大小,改比例只需改 TILE_W / TILE_H 两个值。
     /** 玩家(底部)手牌宽度: 全局尺寸基准(最大,最近) */
-    private readonly TILE_W = 64;
-    /** 玩家(底部)手牌高度 */
-    private readonly TILE_H = 87;
+    private readonly TILE_W = 63;
+    /** 玩家(底部)手牌高度: 与宽度成 3:4(63×84) */
+    private readonly TILE_H = 84;
 
     // ---- 玩家(底部)手牌 ----
     /** 牌间距: 0 = 牌与牌紧贴排成一整条 */
@@ -333,13 +385,11 @@ export class Main extends Component {
         const begin = (): void => {
             this._showScene(SceneState.PLAYING);
             this._revealAll = false;
-            this._restartVisible = false;
-            this._returnBtn?.setPosition(this._returnBtnX, this._returnBtnY, 0);
-            // 对局中随时可以重新开始 / 返回主页面,开局就把两个按钮亮出来
-            this._showTableButtons();
+            // 对局中随时可以调设置/重开/退出,开局就把设置按钮亮出来
+            this._showSettingsButton();
             // 浏览器预览下音频要用户手势才能解锁,开局时再确保一次(已在播则无副作用)
             playBgm();
-            GameManager.instance?.startGame(GAME_RULES.rules);
+            this._startDealing();
         };
         if (this._tileImagesReady) {
             begin();
@@ -351,36 +401,191 @@ export class Main extends Component {
         }
     }
 
+    // ==================== 发牌动画 ====================
+
+    /**
+     * 开局发牌(带动画)
+     *
+     * 原本 52 张牌在同一帧全部发完, 四家手牌"啪"地整排出现, 很突兀。
+     *
+     * 【关键设计: 牌同步发完, UI 分帧"揭示"】
+     * 最初想把发牌拆成 13 次异步回调逐轮播, 但 `startGame` 是**同步**方法 ——
+     * 13 次回调全落在同一帧, 每帧重建手牌都会把上一帧的动画节点销毁,
+     * 结果等于**没动画**(还白白重建 13 次)。这个坑踩过。
+     *
+     * 所以最终方案: `GameManager.startGame()` 一次性把牌发完并停在 DEALING,
+     * UI 再按 `ANIM.dealInterval` 逐帧多显示一张, 让它从牌墙飞进各家手里。
+     * 规则层保持同步可测(AGENTS.md 的分层约定), 动画节奏完全由 UI 控制。
+     *
+     * 【时序安全】
+     * 发牌期间 `GameManager.phase` 是 DEALING, 于是玩家点不到手牌、
+     * 不会起 20 秒倒计时、AI 也不会行动 —— 直到动画播完调 `beginPlay()`。
+     * 中途返回主页面/重新开始时, 调用方要自己 `unscheduleAllCallbacks()`
+     * (清 Main 排的帧) + `_abortDealing()` (清 UI 标记)。
+     */
+    private _startDealing(): void {
+        const gm = GameManager.instance;
+        if (!gm) return;
+        this._dealing = true;
+        this._dealShown = 0;
+        // 发牌期间不能沿用上一局的槽位快照:
+        // 否则新发的牌会"从上一局的位置滑过来", 读起来是错位的瞬移
+        this._handSlots.clear();
+        this._prevHandSlots.clear();
+        this._riverCount = [0, 0, 0, 0];
+
+        // 牌同步发完(张数立刻就是 13), 但由下面的帧逐张揭示
+        gm.startGame(GAME_RULES.rules, () => this._renderDealFrame(0));
+        // 记下"发完牌后墙里剩多少张", 之后每帧减去已揭示的张数,
+        // 牌墙就会看起来在一张张被取走(而不是发完就一直是最终张数)
+        this._wallRemainingBase = gm.wallRemaining;
+        this.scheduleOnce(() => this._dealNextFrame(), ANIM.dealLeadIn);
+    }
+
+    /** 当前已揭示到第几张(0 = 一张都没显示, 13 = 全部显示) */
+    private _dealShown = 0;
+
+    /** 发完 13 张后牌墙的真实剩余张数(发牌动画每帧从它往回退) */
+    private _wallRemainingBase = 0;
+
+    /** 推进一帧发牌动画: 多揭示一张, 再排下一帧 */
+    private _dealNextFrame(): void {
+        const gm = GameManager.instance;
+        if (!gm || this._sceneState !== SceneState.PLAYING) return;
+        if (gm.phase !== GamePhase.DEALING) {
+            // 期间被 stopGame / 重开打断了: 收尾, 别把牌留在半截状态
+            this._dealing = false;
+            this._dealShown = 0;
+            this._refreshHand();
+            return;
+        }
+
+        this._dealShown++;
+        this._renderDealFrame(this._dealShown);
+
+        if (this._dealShown >= HAND_SIZE) {
+            // 13 张都到位: 等最后一轮飞行动画收尾, 再让玩家真正开始
+            this.scheduleOnce(() => this._finishDealing(), ANIM.dealLastSettle);
+            return;
+        }
+        this.scheduleOnce(() => this._dealNextFrame(), ANIM.dealInterval);
+    }
+
+    /**
+     * 按"已揭示 n 张"重画四家手牌, 并让第 n 张从牌墙飞进来
+     *
+     * @param shown 已揭示的张数(0~13)
+     */
+    private _renderDealFrame(shown: number): void {
+        const gm = GameManager.instance;
+        if (!gm) return;
+        const n = Math.max(0, Math.min(HAND_SIZE, shown));
+
+        // 每帧都要重建: 整排是居中排布的, 张数变了位置就得重算。
+        // 只给"本帧新揭示的那张"加飞入动画, 其余静止 —— 否则每帧都在重排, 读起来像洗牌。
+        this._refreshHand(n);
+        const aiCount = gm.aiCount;
+        for (let a = 0; a < aiCount; a++) this._refreshAIHand(a, n);
+        // 牌墙同步回退: 视觉上牌一张张从墙里被取走
+        this._refreshWall(this._wallRemainingBase - n);
+
+        if (n === 0) return;
+        const wallWorld = this._wallNode ? centerOf(this._wallNode) : null;
+        this._dealTileFly(0, n - 1, wallWorld);
+        for (let a = 0; a < aiCount; a++) this._dealTileFly(a + 1, n - 1, wallWorld);
+    }
+
+    /**
+     * 让某家"本帧新揭示的那张牌"从牌墙飞进手牌
+     * @param seat 座位(0=自己,1-3=AI)
+     * @param index 该牌在自家手牌容器里的序号
+     * @param fromWorld 起点(牌墙中心);为空则只做原地弹入
+     */
+    private _dealTileFly(seat: number, index: number, fromWorld: Vec3 | null): void {
+        const container = seat === 0 ? this._handContainer : this._aiHandContainers[seat - 1];
+        if (!container) return;
+        const node = container.children[index];
+        if (!node) return;
+
+        // 错峰: 同一帧里 4 家依次落下, 读起来像"一张张码到各家手里"
+        const order = [0, 1, 3, 2];  // 自己 → 上家 → 左家 → 右家, 绕桌顺时针
+        const delay = order.indexOf(seat) * ANIM.dealStagger;
+        const op = ensureOpacity(node);
+        op.opacity = 0;
+        flyToSlot(node, container, {
+            fromWorld,
+            startScale: 0.82,
+            // 轻微歪着落位再回正 —— 读起来是"牌被甩进手里", 而不是平移过去
+            startTilt: seat === 0 ? -8 : 8,
+            startOpacity: 255,
+            duration: ANIM.dealFly,
+            delay,
+        });
+        tween(op).delay(delay).to(ANIM.dealFly * 0.45, { opacity: 255 }).start();
+    }
+
+    /**
+     * 发牌动画播完: 定稿刷新全部手牌, 再让玩家真正进入回合
+     *
+     * 这次刷新**必须**做: 前面每帧只画了前 n 张(且位置按 n 张居中),
+     * 这里要按完整 14 张重画一遍, 否则玩家会少牌、且整排位置也不对。
+     */
+    private _finishDealing(): void {
+        const gm = GameManager.instance;
+        if (!gm || this._sceneState !== SceneState.PLAYING) return;
+        this._dealShown = 0;
+        this._refreshHand();
+        for (let a = 0; a < gm.aiCount; a++) this._refreshAIHand(a);
+        this._refreshWall();
+        this._dealing = false;
+        // 真正开局: 自动摸牌 + 起 20 秒倒计时(发牌期间刻意不起, 否则动画还没完就开始计时)
+        gm.beginPlay();
+    }
+
     /**
      * 对局中/结束后"返回主页面": 停下当前对局,收起牌桌回到主菜单
      */
     private _backToMenu(): void {
         this._setSelection(-1);
         this._hideMeldPrompt();
+        // 发牌动画可能正在播: 一并撤销, 否则排队的帧会在主菜单里继续刷新手牌。
+        // 注意清的是 **Main 自己**的调度 —— GameManager.stopGame() 里的
+        // unscheduleAllCallbacks() 只清 GameManager 自己的(AI 调度), 清不到这里。
+        this.unscheduleAllCallbacks();
+        this._abortDealing();
+        // 返回前先收起设置弹窗(含恢复倒计时) —— 否则下局开始时它还压在牌桌上
+        this._closeSettings();
         // 中途返回要把对局真的停下来: 撤销排队中的 AI 调度 + 清掉等待中的副露选择
         GameManager.instance?.stopGame();
         this._clearTable();
         this._revealAll = false;
-        this._restartVisible = false;
-        if (this._returnBtn) this._returnBtn.active = false;
-        if (this._restartBtn) this._restartBtn.active = false;
+        if (this._settingsBtn) this._settingsBtn.active = false;
         this._showScene(SceneState.HOME);
     }
 
     /**
-     * 亮出左上角两个牌桌按钮(重新开始 / 返回主页面)
-     * 整局都显示,想退出或重开随时可点;
+     * 中断发牌动画(返回主页面 / 重新开始时调用)
+     *
+     * 排队中的帧由**调用方**的 `this.unscheduleAllCallbacks()` 清掉 ——
+     * `GameManager.stopGame()`/`startGame()` 里那个同名方法作用在 GameManager 组件上,
+     * 清不到 Main 排的 `_dealNextFrame` / `_finishDealing`。
+     * 这里只负责把 UI 侧的发牌状态归零 —— 否则 `_dealing` 残留为 true,
+     * 下一局开始时点击手牌会被静默吞掉(表现为"牌点不动")。
+     */
+    private _abortDealing(): void {
+        this._dealing = false;
+        this._dealShown = 0;
+    }
+
+    /**
+     * 亮出左上角设置按钮
+     * 整局都显示(含牌局结束后),想调声音/重开/退出随时可点;
      * 原生平台上"藏过再亮"的 Graphics 会只剩文字,所以激活后立刻补画一次底框。
      */
-    private _showTableButtons(): void {
-        if (this._restartBtn) {
-            this._restartBtn.active = true;
-            repaintButtons(this._restartBtn);
-        }
-        if (this._returnBtn) {
-            this._returnBtn.active = true;
-            repaintButtons(this._returnBtn);
-        }
+    private _showSettingsButton(): void {
+        if (!this._settingsBtn) return;
+        this._settingsBtn.active = true;
+        repaintButtons(this._settingsBtn);
     }
 
     /** 清空牌桌上所有牌面(手牌/弃牌河/副露) */
@@ -398,18 +603,39 @@ export class Main extends Component {
         this._handSlots.clear();
         this._prevHandSlots.clear();
         this._riverCount = [0, 0, 0, 0];
+        // 手牌节点引用也必须归零(极易漏,踩过):
+        // 上面 destroy 掉的牌节点在**帧末**才真正销毁,而下一局开始时已经跨帧了 ——
+        // 此时 `_handNodes` 里若还留着它们,任何对这批节点的 getComponent 调用
+        // 都会进引擎 `Node._findComponent` 读已置 null 的 `_components.length`,
+        // 抛 "Cannot read properties of null (reading 'length')"。
+        // 表现是"返回主页面后再点开始游戏必崩"(同一 tick 内重开反而正常,
+        // 因为那时节点还没被真正销毁)。
+        this._handNodes = [];
+        this._hintedTileIndex = -1;
         // 收起结算面板与听牌标记
         this._settlement?.hide();
         for (const m of this._tenpaiMarkers) if (m) m.active = false;
         if (this._riichiBtn) this._riichiBtn.active = false;
+        // 新一局/返回主页面: 倒计时与提示一并收起(下一局需要时会重新起/重新要)
+        this._hideCountdown();
+        this._hideHint();
+        // 设置弹窗一并收起(它可能开着; 收起时恢复被冻结的决策倒计时)
+        this._closeSettings();
+        // 发牌链被 unscheduleAllCallbacks 清掉时, toast 的自动清除也一并没了,
+        // 这里主动清一次, 免得上一局的提示文字留到下一局还挂在桌上
+        this._clearMessage();
     }
 
     /**
-     * 中央转盘指针动画:
+     * 中央转盘指针动画 + 决策倒计时刷新:
      *  - 缓动旋转到当前出牌者方位(走最短路径,避免绕圈)
      *  - 回合进行中指针轻微呼吸,强调"该这边出牌了";牌局结束则压暗
+     *  - 倒计时跟随 GameManager 的剩余时间, 只在玩家需要做决定时显示
      */
     update(dt: number): void {
+        // 倒计时不依赖转盘指针是否存在(指针没建好时也要能画),
+        // 且必须在 pointer 早退之前调用
+        this._refreshCountdown();
         const pointer = this._turnPointer;
         if (!pointer) return;
 
@@ -427,7 +653,7 @@ export class Main extends Component {
         const op = pointer.getComponent(UIOpacity);
         if (!op) return;
         const gm = GameManager.instance;
-        const running = !!gm && (gm.phase === GamePhase.PLAYER_TURN || gm.phase === GamePhase.AI_TURN);
+        const running = !!gm && gm.isTurnRunning;
         if (!running) {
             // 发牌中/已结束: 压暗但保留指向,不做呼吸
             op.opacity = 160;
@@ -498,25 +724,30 @@ export class Main extends Component {
             TURN_DISC_R_MIN,
             TURN_DISC_R_MAX,
         ));
+        // 转盘的 Y 记下来: 倒计时圆牌要摆在盘面下方(见 _ensureCountdownWidget)
+        this._discY = 0;
 
         if (this._handContainer) this._handContainer.setPosition(0, handY, 0);
-        // 左上角按钮: 重新开始 / 返回主页面(牌局结束后才显示返回)
-        this._restartBtnX = -this.CONTENT_W / 2 + 24 + 75;
-        this._restartBtnY = halfH - 8 - 26;
-        this._returnBtnX = this._restartBtnX + 150 / 2 + 12 + 75;
-        this._returnBtnY = this._restartBtnY;
-        this._restartBtn?.setPosition(this._restartBtnX, this._restartBtnY, 0);
-        this._returnBtn?.setPosition(this._returnBtnX, this._returnBtnY, 0);
+        // 左上角设置按钮(齿轮图标, 对局中唯一常驻按钮; 其余操作在弹窗里)
+        this._settingsBtnX = -this.CONTENT_W / 2 + 24 + 32;
+        this._settingsBtnY = halfH - 8 - 32;
+        this._settingsBtn?.setPosition(this._settingsBtnX, this._settingsBtnY, 0);
         if (this._meldContainers[0]) this._meldContainers[0].setPosition(0, meldY, 0);
         if (this._discardContainer) this._discardContainer.setPosition(0, discY, 0);
         if (this._infoLabel) this._infoLabel.node.setPosition(0, infoY, 0);
         // 吃/碰选择面板: 浮在自家弃牌河之上(不遮挡手牌)
         this._meldPanelY = discY + rivH / 2 + 30;
         this._meldPanel?.setPosition(0, this._meldPanelY, 0);
+        // 提示面板: 由 _placeHintPanel 在按钮行上/下两条通道里挑宽的那条落位,
+        // 这里只更新它依赖的边界(手牌上沿; 转盘半径已在本函数里算好)。
+        this._handTopY = handY + this.TILE_H / 2;
+        this._placeHintPanel();
 
-        // 听牌(立直)按钮在自家手牌左侧; "听"标记分放牌桌四角, 均不与牌区重叠
+        // 听牌(立直)按钮在自家手牌左侧; "提示"按钮排在它右边同一排
         const halfW = this.CONTENT_W / 2;
-        this._riichiBtn?.setPosition(-halfW + 115, handY, 0);
+        const riichiX = -halfW + 115;
+        this._riichiBtn?.setPosition(riichiX, handY, 0);
+        this._hintBtn?.setPosition(riichiX + HINT_BTN_W / 2 + HINT_BTN_GAP + HINT_BTN_W / 2, handY, 0);
         this._tenpaiMarkers[0]?.setPosition(halfW - 70, handY, 0);
         this._tenpaiMarkers[1]?.setPosition(-halfW + 70, topMeldY, 0);
         this._tenpaiMarkers[2]?.setPosition(-halfW + 70, 0, 0);
@@ -544,6 +775,8 @@ export class Main extends Component {
         this._halfH = halfH;
         // 结算面板按可见高度自适应(手机横屏比 16:9 矮很多), 转屏/改窗口时跟着重排
         this._settlement?.fit(halfH);
+        // 设置弹窗同理: 卡片高度随可见高度缩放, 转屏时要重排(否则按钮会被挤出屏幕)
+        this._settingsPanel?.fit(halfH);
         this._refreshWall();
     }
 
@@ -588,19 +821,9 @@ export class Main extends Component {
         this._handContainer.addComponent(UITransform).setContentSize(1, 1);
         this._handContainer.parent = this._gameRoot;
 
-        // 左上角按钮: 重新开始 / 返回主页面(对局中整局都显示,随时能重开或直接回主菜单)
-        // 使用描边胶囊风格,与主菜单次按钮保持一致的软件主题风格
-        const tableBtnColor = new Color(245, 240, 228, 255); // 近白偏暖,深绿牌桌上清晰
-        const restartBtn = createButtonNode('重新开始', 150, 52, tableBtnColor, ButtonStyle.PillGhost);
-        restartBtn.parent = this._gameRoot;
-        bindSafeClick(restartBtn, this._onRestartClick, this);
-        this._restartBtn = restartBtn;
-
-        const returnBtn = createButtonNode('返回主页面', 150, 52, tableBtnColor, ButtonStyle.PillGhost);
-        returnBtn.parent = this._gameRoot;
-        bindSafeClick(returnBtn, this._onBackToMenuClick, this);
-        returnBtn.active = false;
-        this._returnBtn = returnBtn;
+        // 左上角设置按钮(齿轮图标): 对局中唯一常驻的按钮,
+        // 声音设置与"重新开始 / 返回主页面"都收进它弹出的设置弹窗里
+        this._buildSettingsUI();
 
         this._buildAISeats();
 
@@ -609,6 +832,8 @@ export class Main extends Component {
         this._buildMeldPrompt();
 
         this._buildRiichiButton();
+
+        this._buildHintUI();
 
         this._buildTenpaiMarkers();
 
@@ -649,10 +874,14 @@ export class Main extends Component {
         push(this._meldContainers[0]);
         push(this._handContainer);
 
-        push(this._restartBtn);
-        push(this._returnBtn);
+        push(this._settingsBtn);
         push(this._riichiBtn);
+        push(this._hintBtn);
+        push(this._hintPanel?.node);
         push(this._meldPanel);
+        // 设置弹窗(含遮罩)压在牌桌之上、结算面板之下:
+        // 结算出现时牌局已结束, 不该再被设置弹窗盖住
+        push(this._settingsPanel?.node);
         // 结算面板永远在最上层: 遮罩 + 番型/手牌, 盖住整张牌桌
         push(this._settlement?.node);
     }
@@ -670,6 +899,180 @@ export class Main extends Component {
         bindSafeClick(btn, () => this._onRiichiClick(), this);
         btn.active = false;
         this._riichiBtn = btn;
+    }
+
+    /**
+     * 创建 AI 提示的按钮与面板(默认隐藏)
+     *
+     * 按钮放在**自家手牌左侧**: 玩家的视线本来就在手牌上, 而"提示"要回答的
+     * 正是"这张/那张怎么打"。放在"听牌"按钮右边同一排, 两者都属于"关于手牌的辅助操作"。
+     *
+     * 面板浮在自家弃牌河上方(与吃/碰面板同一带), 不遮挡手牌 —— 玩家看到建议后
+     * 还要能立刻点那张牌, 所以**绝不能压在手牌区上面**。
+     */
+    private _buildHintUI(): void {
+        // 青蓝色: 牌桌上原本只有金(刚摸到/副露)与红(吃胡)两种信号色,
+        // 提示是第三种语义, 用一个没出现过的颜色最不容易混淆
+        const hintColor = new Color(96, 186, 190, 255);
+        const btn = createButtonNode('提示', HINT_BTN_W, HINT_BTN_H, hintColor, ButtonStyle.PillGhost);
+        btn.parent = this._gameRoot;
+        bindSafeClick(btn, () => this._onHintClick(), this);
+        btn.active = false;
+        this._hintBtn = btn;
+
+        const panelNode = new Node('HintPanel');
+        panelNode.parent = this._gameRoot;
+        panelNode.addComponent(UITransform).setContentSize(1, 1);
+        const panel = panelNode.addComponent(HintPanel);
+        panel.onClose = () => this._hideHint();
+        panelNode.active = false;
+        this._hintPanel = panel;
+    }
+
+    /**
+     * 创建设置按钮与设置弹窗
+     *
+     * 按钮是齿轮图标(浅色圆底 + 深图标), 位置沿用原"重新开始"按钮的左上角;
+     * 弹窗里放声音设置与"重新开始 / 返回主页面"两个对局操作。
+     * 声音设置直接读写 GAME_RULES + syncAudioSettings(), 与主菜单"设置规则"页
+     * 共用同一份数据与档位定义(MenuUI 导出) —— 两处各存一份必然漂移。
+     */
+    private _buildSettingsUI(): void {
+        // 底: 近白偏暖的浅色圆底(深绿牌桌上清晰), 图标只有 40px, 靠底托住
+        const btn = createIconButton('icons/settings', 64, 64, new Color(245, 240, 228, 255), ButtonStyle.Pill, 40);
+        btn.parent = this._gameRoot;
+        bindSafeClick(btn, () => this._onSettingsClick(), this);
+        this._settingsBtn = btn;
+
+        const panelNode = new Node('SettingsPanel');
+        panelNode.parent = this._gameRoot;
+        panelNode.addComponent(UITransform).setContentSize(1, 1);
+        const panel = panelNode.addComponent(SettingsPanel);
+        // 两个对局操作都要先把弹窗收掉再执行: 否则重开后弹窗还压在牌桌上
+        panel.onRestart = () => this._closeSettings(() => this._onRestartClick());
+        panel.onBack = () => this._closeSettings(() => this._onBackToMenuClick());
+        panel.onClose = () => this._closeSettings();
+        panelNode.active = false;
+        this._settingsPanel = panel;
+    }
+
+    /** 点设置按钮: 弹出设置弹窗, 并冻结 20 秒决策倒计时 */
+    private _onSettingsClick(): void {
+        if (this._sceneState !== SceneState.PLAYING) return;
+        const panel = this._settingsPanel;
+        if (!panel || panel.isOpen) return;
+        // 先按当前可见高度重排(转屏后可能变过), 再显示
+        panel.fit(this._halfH);
+        // 冻结倒计时: 玩家在调音量时看不到牌桌, 不该被系统判超时替他出牌
+        GameManager.instance?.pauseDecideTimer();
+        panel.show();
+    }
+
+    /**
+     * 关闭设置弹窗并恢复决策倒计时
+     * @param after 关闭后要执行的动作(重新开始 / 返回主页面)
+     */
+    private _closeSettings(after?: () => void): void {
+        if (this._settingsPanel?.isOpen) this._settingsPanel.hide();
+        GameManager.instance?.resumeDecideTimer();
+        after?.();
+    }
+
+    /** 设置弹窗是否正开着(牌桌输入要在这期间被拦掉) */
+    private _settingsOpen(): boolean {
+        return this._settingsPanel?.isOpen === true;
+    }
+
+    /** 点"提示": 向 GameManager 要一份建议, 由 onHint 回调驱动显示 */
+    private _onHintClick(): void {
+        const gm = GameManager.instance;
+        if (!gm || this._sceneState !== SceneState.PLAYING) return;
+        // 发牌动画期间点提示没有意义(此刻还没轮到自己), 静默忽略, 与牌面点击同理
+        if (this._dealing) return;
+        gm.requestHint();
+    }
+
+    /**
+     * 显示一份提示: 面板 + 在被建议的手牌上贴青色标记
+     *
+     * 标记的是**手牌下标**, 而手牌每次刷新都是整体重建的 —— 所以这里既记录下标,
+     * 也由 `_refreshHand` 在重建后重新贴一次(见 `_reapplyHintMark`)。
+     */
+    private _showHint(hint: Hint): void {
+        const panel = this._hintPanel;
+        if (!panel) return;
+        panel.show(hint);
+        // 面板高度随"次选条数"变化, 每次显示后都要按新高度重新定位
+        this._placeHintPanel();
+        // 出牌类提示才需要标手牌; 吃/碰/胡的提示标的是副露面板上的按钮, 由 _showMeldPrompt 处理
+        if (hint.kind === 'discard' && hint.best) {
+            this._hintedTileIndex = hint.best.index;
+            this._reapplyHintMark();
+        } else {
+            this._clearHintMark();
+        }
+    }
+
+    /**
+     * 按可用高度自适应并定位提示面板
+     *
+     * 【两种落位, 看屏幕比例】面板锚在吃/碰按钮行的上沿, 向上生长;
+     * 但屏幕越扁(手机横屏)这条带越窄, 极端比例下按钮行上沿已经贴着中央转盘,
+     * 此时再往上放就会盖住转盘与倒计时 —— 那种情况下改为**落到按钮行下方**
+     * (压在自家弃牌河上方, 与吃/碰面板本身的做法一致)。
+     *
+     * 两种落位都把可用高度交给 `fit()`: 空间不够就整体缩放, 缩到下限仍不够就砍次选,
+     * 于是**永远不会压到中央转盘、也不会压到手牌** —— 后者尤其重要,
+     * 提示之后玩家要立刻点那张牌, 手牌区必须始终可点。
+     */
+    private _placeHintPanel(): void {
+        const panel = this._hintPanel;
+        if (!panel) return;
+        const gap = MELD_BTN_H / 2 + HINT_PANEL_GAP;
+        const btnTop = this._meldPanelY + gap;       // 按钮行上沿
+        const discBottom = -this._discR - 6 - HINT_BREATH;  // 转盘下沿(倒计时在这一带)
+        const handTop = this._handTopY + HINT_BREATH;        // 手牌上沿: 提示绝不能压过去
+        const btnBottom = this._meldPanelY - gap;
+
+        // 两条通道各自有多少净空, 取宽的那条
+        const availAbove = discBottom - btnTop;
+        const availBelow = btnBottom - handTop;
+        const above = availAbove >= availBelow;
+        const avail = above ? availAbove : availBelow;
+
+        panel.fit(avail);
+        const h = panel.cardHeight || HINT_PANEL_FALLBACK_H;
+        // 兜底: 万一 fit 之后仍越界, 夹回可用区间(宁可贴边也不压住手牌)
+        const minY = above ? btnTop : handTop;
+        const maxY = above ? discBottom : btnBottom;
+        let y = above ? btnTop + h / 2 : btnBottom - h / 2;
+        if (above && y + h / 2 > maxY) y = maxY - h / 2;
+        if (!above && y - h / 2 < minY) y = minY + h / 2;
+        panel.node.setPosition(0, y, 0);
+    }
+
+    private _hideHint(): void {
+        this._hintedTileIndex = -1;
+        this._clearHintMark();
+        this._hintPanel?.hide();
+    }
+
+    /** 清掉手牌上的提示标记(不涉及面板) */
+    private _clearHintMark(): void {
+        // isValid 不能省: 节点被 destroy 后 isValid 立即为 false,但引擎要到帧末才把
+        // _components 置 null —— 这中间任何一次 getComponent 都会读到 null.length 而崩。
+        // 跨局残留的引用(理论上已由 _clearTable 清空)这里再兜一层。
+        for (const n of this._handNodes) {
+            if (n && n.isValid) n.getComponent(TileView)?.setHinted(false);
+        }
+    }
+
+    /** 手牌重建后重新贴上提示标记(下标没变则原样恢复) */
+    private _reapplyHintMark(): void {
+        this._clearHintMark();
+        if (this._hintedTileIndex < 0) return;
+        const n = this._handNodes[this._hintedTileIndex];
+        if (n && n.isValid) n.getComponent(TileView)?.setHinted(true);
     }
 
     /**
@@ -783,6 +1186,137 @@ export class Main extends Component {
             this._pointerTargetAngle = this._pointerAngle;
         }
         pointer.angle = this._pointerAngle;
+        this._ensureCountdownWidget();
+    }
+
+    /**
+     * 创建转盘中央的决策倒计时(环形进度 + 中央秒数)
+     *
+     * 挂在 _gameRoot 之下(与 TurnDisc 同级, 建在 TurnPointer 之后 → 盖住指针):
+     * 不透明圆牌压在象牙内盘正中, 数字不受指针与桌面背景干扰。
+     * 平时整体隐藏, 只有玩家需要做决定(出牌/副露)时才显示。
+     */
+    private _ensureCountdownWidget(): void {
+        const root = this._gameRoot;
+        if (!root) return;
+        const R = this._discR;
+
+        // 【为什么还是叠在盘心, 而不是挪到盘外】
+        // 盘外一圈全是牌: 上方弃牌河紧贴盘缘(y≈-34~-73), 下方是自己手牌与副露区,
+        // 实测挪出去在所有分辨率下都会压到牌河。
+        // 象牙内盘半径 0.73R 是转盘上唯一稳定空着的地方, 且倒计时节点
+        // 建在 TurnPointer **之后** → z序更高, 圆牌的不透明底会把指针盖住,
+        // 数字因此始终清晰。圆牌半径取 0.575R(内盘的 79%), 不会压到金圈。
+        let ring = root.getChildByName('CountdownRing');
+        if (!ring) {
+            ring = new Node('CountdownRing');
+            ring.parent = root;
+            ring.addComponent(UITransform).setContentSize(1, 1);
+            ring.addComponent(UIOpacity).opacity = 255;
+        }
+        // 新建/重画时一律先置为隐藏, 由 _refreshCountdown 按需点亮。
+        // (不能只依赖 _countdownShown 标记: 重画会拿到已存在的节点, 标记是 false)
+        ring.active = false;
+        this._countdownG = ring.getComponent(Graphics) ?? ring.addComponent(Graphics);
+        this._countdownG.clear();
+
+        // 圆牌直径: 锁定为内盘半径的 79%, 与盘半径一起缩放
+        const d = R * 0.575 * 2;
+        let label = root.getChildByName('CountdownLabel') as Node | null;
+        if (!label) {
+            label = createLabelNode('', 40, new Color(60, 40, 20, 255), d, d);
+            label.name = 'CountdownLabel';
+            label.parent = ring;
+        }
+        this._countdownLabel = label.getComponent(Label) ?? null;
+        const lbl = label.getComponent(Label);
+        if (lbl) lbl.fontSize = 40;
+        const tf = label.getComponent(UITransform);
+        if (tf) tf.setContentSize(d, d);
+        label.setPosition(0, 0, 0);
+
+        this._countdownShown = false;
+        this._hideCountdown();
+    }
+
+    /**
+     * 逐帧刷新倒计时显示
+     *
+     * 剩余时间以 GameManager 为准, 这里只负责画, 不持有自己的计时状态,
+     * 避免"两套计时器各走各的"导致显示和实际超时对不上。
+     */
+    private _refreshCountdown(): void {
+        const gm = GameManager.instance;
+        const g = this._countdownG;
+        const lbl = this._countdownLabel;
+        if (!g || !lbl) return;
+
+        if (!gm || !gm.deciding) {
+            this._hideCountdown();
+            return;
+        }
+        const limit = gm.decideLimit;
+        const remain = gm.decideRemain;
+        const ratio = limit > 0 ? Math.max(0, Math.min(1, remain / limit)) : 0;
+        const secs = Math.ceil(remain);
+        const R = this._discR;
+        // 计时圆牌: 叠在象牙内盘正中, 直径 = 内盘半径的 79% × 2
+        const d = R * 0.575 * 2;
+        const rr = d * 0.5;
+
+        // 剩余时间不多时把环和数字染成警示色, 让人一眼看到"快到点了"
+        const urgent = remain <= 5;
+        const arcColor = urgent ? new Color(206, 74, 58, 255) : new Color(224, 160, 48, 255);
+        const textColor = urgent ? new Color(158, 30, 24, 255) : new Color(58, 38, 16, 255);
+
+        g.clear();
+        // 1. 落地投影(与转盘同一套浮雕语言, 把圆牌托起来)
+        g.fillColor = new Color(0, 0, 0, 80);
+        g.circle(d * 0.02, -d * 0.02, rr);
+        g.fill();
+        // 2. 金色外圈
+        g.fillColor = new Color(176, 132, 58, 255);
+        g.circle(0, 0, rr);
+        g.fill();
+        // 3. 象牙底 —— **不透明纯色底是"数字看得清"的根本原因**:
+        //    早先把字直接压在指针与桌面毡布上, 无论字号多大都读不清。
+        g.fillColor = new Color(248, 243, 231, 255);
+        g.circle(0, 0, rr * 0.88);
+        g.fill();
+        // 4. 底槽: 整圈淡金, 表示"总共 20 秒"
+        g.strokeColor = new Color(186, 158, 112, 120);
+        g.lineWidth = rr * 0.12;
+        g.circle(0, 0, rr * 0.7);
+        g.stroke();
+        // 5. 剩余量: 从 12 点方向顺时针填充
+        if (ratio > 0.001) {
+            g.strokeColor = arcColor;
+            g.lineWidth = rr * 0.12;
+            // Cocos 的 arc 角度用弧度, 起点 -PI/2 即 12 点方向, 逆时针为 false
+            g.arc(0, 0, rr * 0.7, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ratio, false);
+            g.stroke();
+        }
+        lbl.string = `${secs}`;
+        lbl.color = textColor;
+        // 圆牌叠在盘心(节点建在 TurnPointer 之后, 天然盖住指针)
+        g.node.setPosition(0, 0, 0);
+
+        // 显示/隐藏
+        const parent = g.node;
+        if (!this._countdownShown) {
+            parent.active = true;
+            this._countdownShown = true;
+        }
+    }
+
+    /** 隐藏倒计时(不在决策中时调用) */
+    private _hideCountdown(): void {
+        if (!this._countdownShown) return;
+        this._countdownG?.clear();
+        if (this._countdownLabel) this._countdownLabel.string = '';
+        const n = this._countdownG?.node;
+        if (n) n.active = false;
+        this._countdownShown = false;
     }
 
     /**
@@ -810,20 +1344,24 @@ export class Main extends Component {
     /** 依据当前阶段/座位更新中央转盘指针的指向 */
     private _refreshTurnPointer(): void {
         const gm = GameManager.instance;
-        const turnPhase = !!gm && (gm.phase === GamePhase.PLAYER_TURN || gm.phase === GamePhase.AI_TURN);
+        const turnPhase = !!gm && gm.isTurnRunning;
         const seat = turnPhase ? gm!.currentSeat : -1;
         if (seat < 0) return; // 非进行中(发牌/结算)保持上一次指向
         this._pointerTargetAngle = this.POINTER_ANGLES[seat] ?? 0;
     }
 
-    /** 用牌背小图拼成牌墙,直观表示剩余张数(不再使用文字) */
-    private _refreshWall(): void {
+    /**
+     * 用牌背小图拼出牌墙, 直观表示剩余张数(不再使用文字)
+     * @param countOverride 指定要显示的张数(发牌动画用: 让牌墙看起来在一张张被取走);
+     *                      不传则用真实的 wallRemaining
+     */
+    private _refreshWall(countOverride?: number): void {
         const g = this._wallG;
         const node = this._wallNode;
         if (!g || !node) return;
         g.clear();
 
-        const count = GameManager.instance?.wallRemaining ?? 0;
+        const count = countOverride ?? GameManager.instance?.wallRemaining ?? 0;
         if (count <= 0) return;
 
         const cols = 12;
@@ -864,11 +1402,16 @@ export class Main extends Component {
     }
 
     /**
-     * 绘制麻将桌: 复杂木质边框 + 绿色毡布台面 + 中央黑白方向盘
+     * 绘制麻将桌: 深胡桃木边框 + 深墨绿毡布台面(带光照渐变)
+     *
+     * 【为什么不用平涂色块】原先台面是纯色填充,一眼就是"卡通"。
+     * 真实桌面的观感来自**光**: 木框上亮下暗、毡布中心受光而四周沉暗。
+     * 这里用多层渐变带(每层几十个色阶)模拟这种光照, 介于动画与写实之间,
+     * 同时保持纯 Graphics 绘制(不引入贴图, 换分辨率也不会糊)。
      *
      * 木质边框层次(由外到内):
-     *  投影 → 深木外边 → 主木框 → 镶嵌凹槽(深线) → 镶嵌高光(浅线)
-     *  → 内沿亮边 → 内沿沉槽阴影 → 绿色毡布 → 毡布内沿装饰线
+     *  投影 → 深木外边 → 主木框(木纹) → 镶嵌凹槽 → 镶嵌高光
+     *  → 内沿亮边 → 内沿沉槽 → 毡布(带径向明暗)
      */
     private _buildTable(): void {
         // 可重入: onLoad 里先建节点,首帧之后由 _drawStaticGraphics 重画一次
@@ -905,6 +1448,49 @@ export class Main extends Component {
             if (mode === 'fill') g.fill(); else g.stroke();
         };
 
+        /**
+         * 在梯形内画一组横向色带, 由远及近做亮度插值 —— 这是"光照渐变"的实现。
+         *
+         * 真实桌面的光来自上方, 所以**远端(上)偏亮、近端(下)偏暗**;
+         * 每条色带按它所处的纵向位置取亮度, 于是整体形成一道柔和的明暗过渡。
+         * 纯色块做不到这个, 这也是原先"一眼卡通"的主因。
+         *
+         * @param hwb 近端半宽  @param hh 近端半高
+         * @param colFar 远端颜色  @param colNear 近端颜色
+         * @param bands 色带条数(越多越平滑, 60~80 肉眼已无色阶)
+         */
+        const drawTrapBands = (
+            hwb: number, hh: number,
+            colFar: Color, colNear: Color,
+            bands = 72,
+        ): void => {
+            const hwt = hwb * FAR_RATIO;
+            const hhn = hh;
+            const hhf = hh * (FAR_HH / NEAR_HH);
+            const bandH = (hhn + hhf) / bands;
+            for (let i = 0; i < bands; i++) {
+                // i=0 在最远端, i=bands-1 在最近端
+                const t = i / (bands - 1);
+                const yTop = hhf - (i + 1) * bandH;
+                const yBot = hhf - i * bandH;
+                g.fillColor = new Color(
+                    Math.round(colFar.r + (colNear.r - colFar.r) * t),
+                    Math.round(colFar.g + (colNear.g - colFar.g) * t),
+                    Math.round(colFar.b + (colNear.b - colFar.b) * t),
+                    255,
+                );
+                // 每条色带自身也是梯形(按所在位置的半宽), 侧边才不会溢出木框
+                const wTop = hwb + (hwt - hwb) * ((yTop + hhn) / (hhn + hhf));
+                const wBot = hwb + (hwt - hwb) * ((yBot + hhn) / (hhn + hhf));
+                g.moveTo(-wBot, yBot);
+                g.lineTo(wBot, yBot);
+                g.lineTo(wTop, yTop);
+                g.lineTo(-wTop, yTop);
+                g.close();
+                g.fill();
+            }
+        };
+
         // ===== 木质边框(梯形层次,由外到内,每层向内缩进) =====
         // 1. 外层投影(落地阴影)
         g.fillColor = new Color(18, 10, 4, 200);
@@ -914,48 +1500,55 @@ export class Main extends Component {
         g.fillColor = new Color(54, 32, 16, 255);
         drawTrap(820, 556, 'fill');
 
-        // 3. 主木框(暖棕色,边框主体)
-        g.fillColor = new Color(124, 78, 42, 255);
-        drawTrap(814, 550, 'fill');
+        // 3. 主木框: 改用渐变带, 上亮下暗, 模拟侧光落在胡桃木框上
+        //    (原为平涂 124,78,42 —— 这正是"卡通感"的主要来源)
+        drawTrapBands(814, 550, new Color(158, 104, 58, 255), new Color(104, 64, 34, 255));
 
         // 4. 镶嵌凹槽(深色线,仿真实麻将桌木框嵌线)
-        g.strokeColor = new Color(58, 34, 16, 255);
+        g.strokeColor = new Color(52, 30, 14, 255);
         g.lineWidth = 2;
         drawTrap(804, 544, 'stroke');
 
         // 5. 镶嵌高光(浅色线,凹槽内侧反光)
-        g.strokeColor = new Color(170, 114, 64, 255);
+        g.strokeColor = new Color(186, 132, 78, 255);
         g.lineWidth = 1;
         drawTrap(800, 540, 'stroke');
 
         // 6. 内沿亮边(浅木色,木框向毡布过渡的提亮)
-        g.fillColor = new Color(156, 102, 56, 255);
+        g.fillColor = new Color(150, 98, 54, 255);
         drawTrap(794, 534, 'fill');
 
         // 7. 内沿沉槽阴影(深色,毡布下沉的暗边)
-        g.fillColor = new Color(64, 40, 22, 255);
+        g.fillColor = new Color(58, 36, 20, 255);
         drawTrap(790, 530, 'fill');
 
-        // ===== 绿色毡布台面 =====
-        // 8. 主毡布(深绿,带描边)
-        g.fillColor = new Color(28, 78, 50, 255);
-        g.strokeColor = new Color(15, 52, 32, 255);
+        // ===== 毡布台面 =====
+        // 8. 主毡布: 深墨绿渐变(远端受光偏亮 → 近端沉暗), 不再是平涂
+        //    色相取 ~135° 正绿(原先 ~148° 偏青), 去蓝提绿后的暗绿护眼色调;
+        //    明度/饱和度刻意保持原档位 —— 更暗更饱和会发闷, 亮起来反而刺眼
+        drawTrapBands(786, 526, new Color(36, 72, 45, 255), new Color(19, 42, 26, 255));
+        g.strokeColor = new Color(12, 28, 22, 255);
         g.lineWidth = 2;
-        drawTrap(786, 526, 'fill');
         drawTrap(786, 526, 'stroke');
 
-        // 9. 毡布内沿装饰线(浅绿,双层视觉)
-        g.strokeColor = new Color(60, 130, 80, 120);
-        g.lineWidth = 1;
-        drawTrap(766, 514, 'stroke');
+        // 8b. 四边暗角: 沿毡布内侧再压一圈半透明黑, 模拟绒布被木框挡光后的自然阴影。
+        //     平涂色块没有这个, 桌面会显得"贴"在框上而不是"嵌"进去。
+        //     线宽取小值(6/3): Cocos 的 lineWidth 是像素单位, 画粗了会变成一圈黑边。
+        g.strokeColor = new Color(0, 0, 0, 52);
+        g.lineWidth = 14;
+        drawTrap(776, 521, 'stroke');
+        g.strokeColor = new Color(0, 0, 0, 44);
+        g.lineWidth = 6;
+        drawTrap(779, 523, 'stroke');
 
-        // ===== 中央出牌河区域(梯形,与桌面同向透视) =====
-        // 10. 中央出牌河(浅绿)
-        g.fillColor = new Color(42, 102, 66, 255);
-        g.strokeColor = new Color(22, 72, 42, 255);
+        // 9. 毡布内沿装饰线(极淡的金绿细线, 只勾一圈轮廓, 不再填充浅绿色块)
+        //    【原先这里有一块 Color(42,102,66) 的浅绿"中央出牌河"色块, 已按要求去掉】
+        //    原因: 平涂浅绿压在深绿上形成一块突兀的色斑, 既像卡通,
+        //    又把中央转盘那一圈的地色抬高, 显得桌面"脏"。
+        //    改为只用细线勾边, 台面保持整块连续, 视觉上更接近真实绒布。
+        g.strokeColor = new Color(132, 158, 124, 40);
         g.lineWidth = 1;
-        drawTrap(460, 320, 'fill');
-        drawTrap(460, 320, 'stroke');
+        drawTrap(768, 515, 'stroke');
 
         // 中央转盘(罗盘样式)由 _buildTurnDisc 单独绘制:
         // 它需要按回合旋转指针,必须是独立节点,故不再并入桌面 Graphics。
@@ -995,19 +1588,35 @@ export class Main extends Component {
         gm.onPhaseChanged = () => this._refreshInfo();
         gm.onAIHandChanged = (idx) => this._refreshAIHand(idx);
         gm.onAIDiscard = (idx) => this._refreshAIDiscard(idx);
-        gm.onMeld = (seat, meld) => this._refreshMelds(seat, meld);
+        // 副露播报: 吃/碰/杠统一在这里发声(自家与 AI 都会走到 onMeld)
+        gm.onMeld = (seat, meld) => {
+            playMeldVoice(meld.type);
+            this._refreshMelds(seat, meld);
+        };
         gm.onPlayerMeldChoice = (request) => this._showMeldPrompt(request);
         gm.onTenpai = (tiles) => this._showTenpai(tiles);
         gm.onTenpaiChanged = (seat) => this._refreshTenpaiMarkers();
         gm.onNotice = (msg) => this._showToast(msg);
         gm.onHu = (msg) => this._showHuToast(msg);
         gm.onReveal = (winnerSeat, msg) => this._onGameEndReveal(winnerSeat, msg);
-        gm.onSettle = (data) => this._onSettle(data);
+        gm.onSettle = (data) => {
+            // 胡牌语音已按需求取消, 这里只走结算面板
+            this._onSettle(data);
+        };
+        // AI 提示: 玩家点"提示"才会回调; 局面一变(出牌/选副露)GM 会给 null 让 UI 收起
+        gm.onHint = (hint) => {
+            if (hint) this._showHint(hint);
+            else this._hideHint();
+        };
     }
 
     // ==================== 刷新 UI ====================
 
-    private _refreshHand(): void {
+    /**
+     * 重建自家手牌
+     * @param limit 最多显示几张(发牌动画用: 只画已揭示的那几张);不传=全画
+     */
+    private _refreshHand(limit?: number): void {
         if (!this._handContainer) return;
         // 手牌整体重建,旧节点即将销毁,先清掉选中态避免索引指向已销毁的牌
         this._selectedIndex = -1;
@@ -1017,10 +1626,13 @@ export class Main extends Component {
         const player = gm?.player;
         if (!player) return;
 
-        const count = player.hand.length;
+        // 发牌动画期间只显示前 limit 张,且不按"刚摸到的牌"处理(那时还没到玩家回合)
+        const dealing = limit !== undefined && this._dealing;
+        const fullCount = player.hand.length;
+        const count = dealing ? Math.min(limit as number, fullCount) : fullCount;
         const step = this.TILE_W + this.TILE_GAP;
         // 刚摸到的牌挂在手牌末尾(未理牌),单独放到最右侧并做金色标注
-        const hasDrawn = !!gm?.playerDrawnTile && count > 0;
+        const hasDrawn = !dealing && !!gm?.playerDrawnTile && count > 0;
         const normalCount = hasDrawn ? count - 1 : count;
         const sep = 0; // 摸到的牌与手牌之间不再留额外间隔(仅靠金色标注区分)
         const blockW = normalCount > 0 ? normalCount * step - this.TILE_GAP : 0;
@@ -1030,7 +1642,9 @@ export class Main extends Component {
         // 上一帧的手牌槽位: 同一张牌这一帧换了位置就滑过去,而不是瞬移
         const prevSlots = this._handSlots.get(0);
         const nextSlots = new Map<number, Vec3>();
-        this._handNodes = new Array(count).fill(null);
+        // 用"等长空洞"而不是 fill(null): Node[] 里塞 null 会让"元素为空"和
+        // "节点已销毁"两种状态混在一起, 排查时很难看出是哪一种
+        this._handNodes = new Array<Node>(count);
         for (let i = 0; i < normalCount; i++) {
             const tile = player.hand[i];
             const x = startX + i * step;
@@ -1052,6 +1666,10 @@ export class Main extends Component {
             this._handNodes[count - 1] = node;
         }
         this._storeHandSlots(0, nextSlots);
+        // 手牌是整体重建的, 之前贴的提示标记随旧节点一起没了 —— 按记录的下标补回来。
+        // 局面没变(玩家只是点开提示看了看)时这一步是无感的;
+        // 局面真变了的话 GameManager 已经把提示清空, 这里也一并收起。
+        if (this._hintedTileIndex >= 0 && GameManager.instance?.hint) this._reapplyHintMark();
         this._refreshInfo();
     }
 
@@ -1119,10 +1737,12 @@ export class Main extends Component {
         const grew = tiles.length === this._riverCount[seat] + 1;
         this._riverCount[seat] = tiles.length;
         if (!grew || tiles.length === 0) return;
-        // 出牌音效: 四家的牌河都是从这里长出来的,统一在这一处播
-        playDiscard();
 
         const tile = tiles[tiles.length - 1];
+        // 出牌播报: 四家的牌河都是从这里长出来的,统一在这一处播,
+        // 播的是这张牌**各自的**人声(如"五万"), 而非统一落牌声 —— 听声辨牌
+        playTileVoice(tile);
+
         const node = container.children[container.children.length - 1];
         if (!node) return;
         flyToSlot(node, container, {
@@ -1132,7 +1752,11 @@ export class Main extends Component {
         });
     }
 
-    private _refreshAIHand(idx: number): void {
+    /**
+     * 重建某家 AI 的手牌
+     * @param limit 最多显示几张(发牌动画用);不传=全画
+     */
+    private _refreshAIHand(idx: number, limit?: number): void {
         const container = this._aiHandContainers[idx];
         if (!container) return;
         this._clearChildren(container);
@@ -1140,7 +1764,9 @@ export class Main extends Component {
         const ai = GameManager.instance?.getAIPlayer(idx);
         if (!ai) return;
 
-        const count = ai.hand.length;
+        // 发牌动画期间只显示前 limit 张
+        const dealing = limit !== undefined && this._dealing;
+        const count = dealing ? Math.min(limit as number, ai.hand.length) : ai.hand.length;
         // 牌局结束后亮牌: 三家手牌由牌背改为牌面(位置/尺寸/朝向完全沿用原有排布)
         const reveal = this._revealAll;
         const seat = idx + 1;
@@ -1290,12 +1916,33 @@ export class Main extends Component {
         }
     }
 
-    /** 刷新状态显示: 回合提示用座位发光(图形),剩余张数用牌墙小图(图形),不再输出文字 */
+    /** 刷新状态显示: 回合提示用转盘指针,剩余张数用牌墙小图,按钮按时机亮灭 */
     private _refreshInfo(): void {
         this._refreshTurnPointer();
         this._refreshWall();
         this._refreshRiichiButton();
+        this._refreshHintButton();
         this._refreshTenpaiMarkers();
+    }
+
+    /**
+     * "提示"按钮: 只在玩家**真的要做决定**时亮
+     *
+     * 亮着的判据直接问 GameManager(`canHint`), 不在 UI 里另写一套阶段比较 ——
+     * 那类重复判断迟早会漏掉某个新状态(参见 AGENTS.md 里 DISCARDING 的教训)。
+     */
+    private _refreshHintButton(): void {
+        const btn = this._hintBtn;
+        if (!btn) return;
+        const show = this._sceneState === SceneState.PLAYING
+            && !this._dealing
+            && !!GameManager.instance?.canHint;
+        if (btn.active === show) return;
+        btn.active = show;
+        // 原生平台: 藏过再亮的 Graphics 会只剩文字, 亮出来时补画一次底框
+        if (show) repaintButtons(btn);
+        // 玩家已不能决定(出牌了/轮到 AI)时, 收起还开着的提示面板
+        if (!show) this._hideHint();
     }
 
     /** 听牌按钮: 只有"轮到自己 + 听牌 + 没宣告过 + 门清"时才亮出来 */
@@ -1350,9 +1997,8 @@ export class Main extends Component {
         for (let i = 0; i < 3; i++) this._refreshAIHand(i);
         const who = winnerSeat >= 0 ? `${SEAT_NAMES[winnerSeat]} 胡牌` : '流局';
         this._showMessage(`【${who}】四家手牌已亮出`, 4);
-        // 牌局结束: 确保两个牌桌按钮都在(正常对局中它们也一直亮着)
-        this._restartVisible = true;
-        this._showTableButtons();
+        // 牌局结束: 确保设置按钮还在(正常对局中它一直亮着)
+        this._showSettingsButton();
         console.log(`[结束] ${message} → 亮出四家手牌`);
     }
 
@@ -1488,6 +2134,15 @@ export class Main extends Component {
         const gm = GameManager.instance;
         if (!gm) return;
         if (this._sceneState !== SceneState.PLAYING) return;
+        // 发牌动画期间: 静默忽略点击。
+        // 不弹"还没轮到你出牌" —— 那是在提示玩家"操作无效", 而发牌时本来就不该操作,
+        // 弹提示反而像出错了(玩家此时可能正在看发牌动画)。
+        if (this._dealing) return;
+        // 设置弹窗开着: 一律静默吞掉牌桌输入。
+        // 遮罩本身已经拦截触摸, 这里再拦一道是因为"事件会不会穿透到下层节点"
+        // 取决于引擎的派发顺序, 不能想当然 —— 万一穿透, 玩家在弹窗上点两下
+        // 就会把手牌打出去, 那是最难复现也最难解释的一类 bug。
+        if (this._settingsOpen()) return;
         if (gm.phase !== GamePhase.PLAYER_TURN || !gm.canDiscard || gm.awaitingPlayerMeld) {
             this._showToast(gm.awaitingPlayerMeld ? '先选择吃/碰/杠或过' : '还没轮到你出牌');
             return;
@@ -1509,13 +2164,17 @@ export class Main extends Component {
         const gm = GameManager.instance;
         if (!gm) return false;
         if (this._sceneState !== SceneState.PLAYING) return false;
+        // 发牌动画期间一律不响应拖拽(与 _onTileClick 同样静默, 不弹提示)
+        if (this._dealing) return false;
+        // 设置弹窗开着: 同样静默吞掉(理由见 _onTileClick)
+        if (this._settingsOpen()) return false;
         if (gm.phase !== GamePhase.PLAYER_TURN || !gm.canDiscard || gm.awaitingPlayerMeld) {
             this._showToast(gm.awaitingPlayerMeld ? '先选择吃/碰/杠或过' : '还没轮到你出牌');
             return false;
         }
         // 弃牌动画从"松手的位置"起飞,这样牌是顺着甩出去的方向落到牌河里的
         const node = this._handNodes[index];
-        this._dropFromWorld = node ? centerOf(node) : null;
+        this._dropFromWorld = (node && node.isValid) ? centerOf(node) : null;
         this._setSelection(-1);
         const ok = gm.playTile(index);
         if (!ok) this._dropFromWorld = null;
@@ -1529,26 +2188,36 @@ export class Main extends Component {
     }
 
     private _setSelection(index: number): void {
+        // `?.` 只防数组越界,不防"元素是已销毁的节点" —— 故两处都判 isValid
         if (this._selectedIndex >= 0) {
-            this._handNodes[this._selectedIndex]?.getComponent(TileView)?.setSelected(false);
+            const prev = this._handNodes[this._selectedIndex];
+            if (prev && prev.isValid) prev.getComponent(TileView)?.setSelected(false);
         }
         this._selectedIndex = index;
         if (index >= 0) {
-            this._handNodes[index]?.getComponent(TileView)?.setSelected(true);
+            const n = this._handNodes[index];
+            if (n && n.isValid) n.getComponent(TileView)?.setSelected(true);
         }
     }
 
     private _onRestartClick(): void {
         this._setSelection(-1);
         this._hideMeldPrompt();
+        // 上一局可能正处在发牌动画中: 先归零发牌状态。
+        // 必须清 **Main 自己**排队的帧 —— GameManager.startGame() 里的
+        // unscheduleAllCallbacks() 作用在 GameManager 上, 清不到 Main 的发牌链;
+        // 漏清会让上一局残留的 _finishDealing 在新局中途触发, 提前 beginPlay。
+        this.unscheduleAllCallbacks();
+        this._abortDealing();
         // 新一局: 收回亮出的手牌(三家恢复牌背),按当前规则重新开局
         this._revealAll = false;
-        this._restartVisible = false;
+        // 设置弹窗若还开着先收起(从弹窗进来时已关, 从结算面板进来时它本来就没开)
+        this._closeSettings();
         GameManager.instance?.cancelPendingMeld();
         this._clearTable();
-        GameManager.instance?.startGame(GAME_RULES.rules);
-        // 重开后两个按钮仍然可用(重开期间它们的显示状态可能被改过)
-        this._showTableButtons();
+        this._startDealing();
+        // 重开后设置按钮仍然可用(重开期间它的显示状态可能被改过)
+        this._showSettingsButton();
     }
 
     /** 点"听牌": 宣告本局已听牌(亮给对手看, 胡牌时加 1 番) */
@@ -1576,6 +2245,8 @@ export class Main extends Component {
         if (!panel || !row) return;
         this._setSelection(-1);
         this._clearChildren(row);
+        // 换了一批候选 → 之前的提示已经对不上, 先收起来(点"提示"会重新给)
+        this._hideHint();
 
         const items = request.items;
         const isRon = request.kind === 'ron';
@@ -1610,16 +2281,22 @@ export class Main extends Component {
 
         panel.setPosition(0, this._meldPanelY, 0);
         panel.active = true;
+        // 副露面板弹出后玩家多半要重新判断, 提示按钮的可点性随之变化 → 刷一次
+        this._refreshHintButton();
     }
 
     private _hideMeldPrompt(): void {
         if (this._meldPanel) this._meldPanel.active = false;
+        this._hideHint();
+        this._refreshHintButton();
     }
 
     /** index 指向可选副露项;"过"为最后一项 → 传 -1 */
     private _onMeldChoiceClick(index: number): void {
         if (!this._meldPanel?.active) return;
         this._hideMeldPrompt();
+        // "过"给一声反馈, 让玩家知道系统收到的是放弃而不是没点到
+        if (index < 0) playPassVoice();
         GameManager.instance?.resolvePlayerMeld(index);
     }
 
@@ -1668,11 +2345,11 @@ function drawTurnDisc(g: Graphics, R: number): void {
     g.circle(0, 0, rRimIn);
     g.fill();
 
-    // 3. 玉色盘身(与桌面同色系,呼应桌面)
-    g.fillColor = new Color(38, 96, 64, 255);
+    // 3. 玉色盘身(与桌面同色系,呼应桌面; 色相跟着毡布一起往正绿调, 别出现两种绿)
+    g.fillColor = new Color(41, 98, 57, 255);
     g.circle(0, 0, rBodyOut);
     g.fill();
-    g.fillColor = new Color(50, 114, 78, 255);
+    g.fillColor = new Color(53, 116, 71, 255);
     g.circle(0, 0, rBodyIn);
     g.fill();
 
