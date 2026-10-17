@@ -9,7 +9,7 @@ import { SettingsPanel } from './ui/SettingsPanel';
 import { Hint, HintAdvisor } from './game/HintAdvisor';
 import { GAME_RULES } from './game/GameRules';
 import { preloadTileImages } from './ui/TileImage';
-import { preloadSounds, playTileVoice, playMeldVoice, playPassVoice, playBgm, playButtonClick } from './audio/Sound';
+import { preloadSounds, playTileVoice, playMeldVoice, playPassVoice, playBgm, playButtonClick, syncAudioSettings } from './audio/Sound';
 import { vibrateHu, vibrateMeld } from './feedback/Haptics';
 import {
     ANIM, centerOf, ensureOpacity, flashBurst, flyToSlot, gatherIn, glideTo, popIn, slideIn, stopTweensDeep, toWorld,
@@ -567,6 +567,11 @@ export class Main extends Component {
     }
 
     start(): void {
+        // 规则 / 音量的本地存档: 先主动读一次再开工(BGM 要按存档的音量起播)。
+        // 原生平台存储是异步就绪的, 读不到就交给 _tryRestoreRules 敲几次重试。
+        if (!GAME_RULES.ensureLoaded()) this.schedule(this._tryRestoreRules, 0.2, 24);
+        // 读到存档的那一刻再把音量补同步一次(播放器可能已按默认音量播起来了)
+        GAME_RULES.onLoaded(() => syncAudioSettings());
         // 先把牌面图片预加载好,点"开始游戏"时首手牌即为图片牌面
         preloadTileImages(() => {
             this._tileImagesReady = true;
@@ -578,6 +583,20 @@ export class Main extends Component {
         // 静态矢量图形必须等首帧之后才画(原因见 _staticGraphicsDrawn 注释)。
         // scheduleOnce(0) 把绘制推到下一帧,此时渲染管线已就绪。
         this.scheduleOnce(() => this._drawStaticGraphics(), 0);
+    }
+
+    /**
+     * 规则存档重试(每 0.2s 一次, 最多 5 秒)
+     *
+     * 【为什么需要】原生(JSB)平台的 `sys.localStorage` 是引擎启动过程中异步挂上去的,
+     * `start()` 时可能还不存在。`GAME_RULES.rules` 每次访问都会自己重试读盘,
+     * 但"读到之后要把音量同步到播放器上"没有触发点 —— 于是这几帧内敲一下,
+     * 读到立刻停(之后由 `onLoaded` 的回调负责补同步)。
+     */
+    private _tryRestoreRules(): void {
+        if (!GAME_RULES.ensureLoaded()) return;
+        this.unschedule(this._tryRestoreRules);
+        syncAudioSettings();
     }
 
     /**

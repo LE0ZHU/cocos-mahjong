@@ -165,19 +165,20 @@ const RULES_ROW_PITCH = 108;
 const RULES_ROW_TOP = -40;
 const RULES_ROW_COUNT = 9;
 const RULES_TIPS_W = 1000;
-/** 底部说明块: 3 行 × 字号 26(行高 38) */
-const RULES_TIPS_LINES = 3;
+/** 底部说明块: 4 行 × 字号 26(行高 38) */
+const RULES_TIPS_LINES = 4;
 const RULES_TIPS_LINE_H = 38;
 const RULES_TIPS_H = RULES_TIPS_LINES * RULES_TIPS_LINE_H;
 /**
- * 底部补充说明的正文(3 行)
+ * 底部补充说明的正文(4 行)
  *
  * 行数与 RULES_TIPS_LINES / RULES_TIPS_H 绑定, 改行数必须同步改并重跑 rules-layout-test;
  * 每行都要放得下 RULES_TIPS_W(校验脚本逐行断言, 超了就该拆行而不是让 SHRINK 压小)。
  */
 const RULES_TIPS_TEXT = '计分: 底分 1 分, 每 1 番翻一倍, 8 番封顶(256 分); 结算面板里逐条列出番型。\n'
     + 'AI 满能力档: 出牌与吃碰杠有 20 秒; 超时自动处理(打掉刚摸的牌, 副露默认过)。\n'
-    + '音效与背景音乐改完立刻生效; 番型与计分口径见主菜单「玩法说明」。';
+    + '音效与背景音乐改完立刻生效; 番型与计分口径见主菜单「玩法说明」。\n'
+    + '所有设置都自动保存在本机, 退出游戏后重新打开仍是这一套规则。';
 /** 末行 → 说明块 / 内容底部留白 */
 const RULES_TIPS_GAP = 30;
 const RULES_CONTENT_BOTTOM = 26;
