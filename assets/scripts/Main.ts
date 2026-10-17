@@ -1,15 +1,16 @@
 import { _decorator, Component, Node, Color, Label, Graphics, UITransform, Vec3, view, Canvas, Camera, UIOpacity, tween } from 'cc';
-import { GameManager, GamePhase, MeldPromptItem, MeldPromptRequest, SEAT_NAMES } from './managers/GameManager';
-import { createTileNode, createTileBackNode, createLabelNode, createButtonNode, createIconButton, repaintButtons, setTileBgColor, getFrontBand, applyDesignResolution, BTN_COLOR_GREY, ButtonStyle, bindSafeClick } from './ui/UIFactory';
-import { TileView } from './ui/TileView';
+import { GameManager, GamePhase, MeldPromptItem, MeldPromptRequest, seatLabel, TenpaiInfo } from './managers/GameManager';
+import { createTileNode, createTileBackNode, createLabelNode, createButtonNode, createIconButton, repaintButtons, setTileBgColor, applyDesignResolution, BTN_COLOR_GREY, ButtonStyle, bindSafeClick } from './ui/UIFactory';
+import { TileView, tileRadius } from './ui/TileView';
 import { MenuUI } from './ui/MenuUI';
 import { SettlementPanel } from './ui/SettlementPanel';
 import { HintPanel } from './ui/HintPanel';
 import { SettingsPanel } from './ui/SettingsPanel';
-import { Hint } from './game/HintAdvisor';
+import { Hint, HintAdvisor } from './game/HintAdvisor';
 import { GAME_RULES } from './game/GameRules';
 import { preloadTileImages } from './ui/TileImage';
 import { preloadSounds, playTileVoice, playMeldVoice, playPassVoice, playBgm } from './audio/Sound';
+import { vibrateHu, vibrateMeld } from './feedback/Haptics';
 import {
     ANIM, centerOf, ensureOpacity, flashBurst, flyToSlot, gatherIn, glideTo, popIn, slideIn, stopTweensDeep, toWorld,
 } from './ui/Anim';
@@ -52,6 +53,115 @@ const HINT_BREATH = 8;
  * 取"只有首选 + 一条次选"的典型高度: 顶部队落 + 首选 + 理由 + 分隔 + 1 条次选 + 上下内边距。
  */
 const HINT_PANEL_FALLBACK_H = 26 + 6 + 46 + 4 + 28 + 18 + 26 + 44;
+
+// ==================== 对局信息常驻显示(比分条 / 听牌详情) ====================
+//
+// 【为什么要有这两块常驻信息】以前"现在比分多少"只在结算面板里, 连打多局时必须
+// 打完一局才知道谁领先; "听什么、还剩几张"要主动点「提示」才看得到 ——
+// 而这两条恰恰是打牌时一直要瞄一眼的信息。它们都放在**牌桌边角的净空里**,
+// 不占任何出牌区域(手牌/牌河/副露/按钮行), 也不会被浮动面板压住。
+
+/** 比分芯片: 高度 / 字号 / 芯片内左右内边距 / 芯片间距 */
+const SCORE_CHIP_H = 40;
+const SCORE_FONT = 22;
+const SCORE_CHIP_PAD = 14;
+const SCORE_CHIP_GAP = 6;
+/** 比分条与齿轮按钮之间的横向间距 */
+const SCORE_STRIP_GAP = 12;
+/** 比分条与"上家手牌最宽情形"之间留出的空隙(14 张牌的那一侧) */
+const SCORE_HAND_GAP = 8;
+
+/** 听牌详情芯片: 高度 / 字号 / 芯片内左右内边距 */
+const TENPAI_CHIP_H = 38;
+const TENPAI_FONT = 22;
+const TENPAI_CHIP_PAD = 14;
+/** 听牌芯片右缘到屏幕右缘的距离(让开右侧"你·听"标记) */
+const TENPAI_CHIP_RIGHT = 134;
+/** 听牌芯片与手牌之间至少留出的空隙(文案太长时整体缩放, 也不压牌) */
+const TENPAI_HAND_GAP = 6;
+/** 信息芯片的缩放下限: 再小就看不清了(极端多面听 + 四位数比分才会触发) */
+const CHIP_MIN_SCALE = 0.62;
+
+/** 信息芯片配色: 深墨绿底 + 金边, 与"听"标记 / 副露来源标记同一套视觉语言 */
+const CHIP_BG = new Color(24, 58, 40, 235);
+const CHIP_EDGE = new Color(214, 176, 96, 190);
+const CHIP_EDGE_SELF = new Color(244, 200, 108, 245);
+const CHIP_TEXT = new Color(255, 236, 190, 255);
+/** 听牌"余 0 张"(四张都明在桌上, 等不到了)用警示色, 提醒别干等 */
+const CHIP_TEXT_WARN = new Color(236, 134, 90, 255);
+/** 比分正/负配色与结算面板的得失分同源(正=暖金, 负=珊瑚红) */
+const SCORE_GAIN = new Color(250, 208, 118, 255);
+const SCORE_LOSS = new Color(238, 138, 124, 255);
+const SCORE_ZERO = new Color(200, 216, 198, 255);
+
+// ==================== AI 台词气泡(拟人化) ====================
+//
+// 【为什么气泡贴在自己手牌上, 而不是浮在桌心】牌桌中间那条纵向带在横屏下只有
+// 10~100px(硬约束 2), 浮在那里必然压到牌河或中央转盘; 而各家自己的手牌是一整排
+// 牌背, 上面没有任何"正在变化的信息"。气泡盖住自己那几张牌背一两秒, 既不会挡住
+// 玩家要看的东西, 位置本身又带出"是这家在说话" —— 主语不用写在气泡里也看得懂。
+/** 气泡字号 / 高度 / 左右内边距 */
+const SPEECH_FONT = 22;
+const SPEECH_H = 40;
+const SPEECH_PAD = 16;
+/** 气泡停留秒数 / 收起淡出秒数 */
+const SPEECH_HOLD = 1.6;
+const SPEECH_FADE = 0.25;
+/**
+ * 左右两家的气泡再往"桌外"挪一点(负 x 对左家、正 x 对右家)
+ *
+ * 侧边那两列手牌的内侧就是自己的弃牌河: 残局堆到第三排时, 牌河的外沿已经快贴到
+ * 手牌列了。往外挪 60px 后气泡让开牌河(实测最坏情况仍留 18px 空隙), 手牌列那点
+ * 偏移不影响"是这家在说话" —— 气泡仍压在自己那排牌背上。
+ */
+const SPEECH_SIDE_DX = 60;
+/** 气泡配色: 与信息芯片同一套深墨绿 + 金边, 字用暖白 */
+const SPEECH_BG = new Color(24, 58, 40, 240);
+const SPEECH_EDGE = new Color(236, 200, 118, 235);
+const SPEECH_TEXT = new Color(255, 240, 210, 255);
+
+/**
+ * 文本宽度估算: CJK/全角按字号, 数字/空格/中点按半角
+ *
+ * 与 HintPanel / SettlementPanel 的同名函数一致 —— 芯片宽度必须按文案算,
+ * 给小了 `Label.Overflow.SHRINK` 会把字压扁(硬约束 4)。
+ */
+function textWidth(text: string, font: number): number {
+    let w = 0;
+    for (const ch of text) {
+        w += ch.codePointAt(0)! >= 0x2e80 ? font : font * 0.5;
+    }
+    return w;
+}
+
+/** 画台词气泡底框(深墨绿 + 金边, 带一点落地投影把它从牌面上托起来) */
+function paintSpeechBubble(g: Graphics, w: number, h: number): void {
+    g.clear();
+    const r = Math.min(14, h / 2);
+    g.fillColor = new Color(0, 0, 0, 96);
+    g.roundRect(-w / 2 + 3, -h / 2 - 3, w, h, r);
+    g.fill();
+    g.fillColor = SPEECH_BG;
+    g.roundRect(-w / 2, -h / 2, w, h, r);
+    g.fill();
+    g.strokeColor = SPEECH_EDGE;
+    g.lineWidth = 2;
+    g.roundRect(-w / 2, -h / 2, w, h, r);
+    g.stroke();
+}
+
+/** 画信息芯片底框(深墨绿 + 金边); highlight=自己的芯片, 金边更亮 */
+function paintInfoChip(g: Graphics, w: number, h: number, highlight = false): void {
+    g.clear();
+    const r = Math.min(10, h / 2);
+    g.fillColor = CHIP_BG;
+    g.roundRect(-w / 2, -h / 2, w, h, r);
+    g.fill();
+    g.strokeColor = highlight ? CHIP_EDGE_SELF : CHIP_EDGE;
+    g.lineWidth = highlight ? 2 : 1.5;
+    g.roundRect(-w / 2, -h / 2, w, h, r);
+    g.stroke();
+}
 
 /**
  * 中央转盘的盘面半径(钳制范围)
@@ -151,6 +261,29 @@ export class Main extends Component {
     private _hintedTileIndex = -1;
     /** 玩家手牌的上沿 y(提示面板绝不能压到这里, 由 _applyLayout 更新) */
     private _handTopY = 0;
+    // ---- 对局信息常驻显示: 四家比分条 + 听牌详情芯片 ----
+    /** 累计比分条容器(左上角齿轮按钮右侧, 常驻) */
+    private _scoreStrip: Node | null = null;
+    /** 比分条内容的"变更指纹": 分数只在结算时变, 用指纹挡住无谓的重建 */
+    private _scoreSig = '';
+    /** 比分条的可用横向区间(由 _applyLayout 按齿轮与上家手牌算)与中心 x */
+    private _scoreStripX = 0;
+    private _scoreStripMaxW = 0;
+    /** 听牌详情芯片(自家手牌右侧常驻; 未听牌时隐藏) */
+    private _tenpaiChip: Node | null = null;
+    /** 听牌芯片的未缩放宽度(转屏重排时按它 + 缩放算右对齐位置) */
+    private _tenpaiChipW = 0;
+    /** 手牌行的 y(听牌芯片与手牌同一排, 由 _applyLayout 更新) */
+    private _handRowY = 0;
+    // ---- AI 台词气泡(拟人化) ----
+    /** 三家 AI 的气泡(索引 0/1/2 = 座位 1/2/3);常驻节点,只切显示与文字 */
+    private _aiBubbles: (Node | null)[] = [null, null, null];
+    /** 气泡"完全显示"的剩余秒数(>0 才在显示) */
+    private _aiBubbleHold: number[] = [0, 0, 0];
+    /** 气泡淡出的剩余秒数(>0 = 正在淡出) */
+    private _aiBubbleFade: number[] = [0, 0, 0];
+    /** 三家手牌的中心: 气泡贴在这里(由 _applyLayout 更新) */
+    private _aiBubblePos: Vec3[] = [new Vec3(), new Vec3(), new Vec3()];
     // ---- 需要按屏幕比例动态定位的零散节点 ----
     /**
      * 设置按钮(齿轮图标, 固定屏幕左上角)
@@ -230,6 +363,24 @@ export class Main extends Component {
     private readonly TILE_W = 63;
     /** 玩家(底部)手牌高度: 与宽度成 3:4(63×84) */
     private readonly TILE_H = 84;
+
+    // ---- 牌桌几何(内容坐标系) ----
+    // 这三个数同时被 `_buildTable()` 的绘制和"牌位能摆多高"的上限使用,
+    // 改桌面大小必须一起改, 否则平板上的牌会摆到桌外(见 _applyLayout)。
+    /** 桌面近端半高(梯形下沿) */
+    private readonly TABLE_NEAR_HH = 560;
+    /** 桌面远端半高: 比近端略小, 形成"低头看桌"的透视压缩 */
+    private readonly TABLE_FAR_HH = 530;
+    /**
+     * 毡布上真正能放牌的上/下半高(桌面坐标)。
+     *
+     * 毡布梯形是 **-526 ~ +497.75** —— 近端(下半)比远端更低, 上下不对称,
+     * 所以两个边各留 6px 分别夹: 上 492、下 520。
+     * 可见半高 ≤ 它们时(`halfH = 840 / 宽高比`, 16:9 是 472)完全用不到;
+     * 只有平板 3:2(560)、iPad 4:3(630)这种更"方"的屏幕才会把牌位夹住。
+     */
+    private readonly FELT_TILE_TOP = 492;
+    private readonly FELT_TILE_BOTTOM = 520;
 
     // ---- 玩家(底部)手牌 ----
     /** 牌间距: 0 = 牌与牌紧贴排成一整条 */
@@ -336,11 +487,42 @@ export class Main extends Component {
         this._buildTurnPointer();
         this._refreshWall();
         this._menu?.redrawBackdrop();
+        // 比分条与牌桌同理: onLoad 期间画的 Graphics 在原生平台上下不来,
+        // 清掉指纹强制重建一次(重画是幂等的)
+        this._scoreSig = '';
+        this._refreshScoreStrip(true);
         // 按钮同理: onLoad 期间画的底框在原生平台上下不来(只剩文字),
         // 菜单与牌桌上所有按钮都在这里补画一次,之后由各处"显示时补画"维持。
         repaintButtons(this.node);
     }
 
+    /**
+     * 补画牌桌类的一次性静态图形(牌桌 / 中央转盘 / 剩余牌墙)
+     *
+     * 【为什么需要它】这三个都是"画一次就不管"的 Graphics: `_buildTable()` /
+     * `_buildTurnPointer()` / `_refreshWall()` 只在首帧后(`_drawStaticGraphics`)
+     * 各画一遍。而返回主页面会把 `_gameRoot` 整个隐藏,原生(JSB)平台上节点
+     * 隐藏 → 再显示之后,Graphics 已上传的顶点不会回来 —— 于是"返回主页面 →
+     * 再开始游戏"时牌桌(乃至中央转盘)整块消失,只剩相机的深木色清屏色,
+     * 而牌面(图片)、按钮、文字一切正常(它们有自己的补画/刷新入口)。
+     *
+     * 【为什么不用 `_drawStaticGraphics` 整体重画】那里面还含菜单底板、
+     * 比分条强制重建与全树按钮补画,每次进对局都跑一遍太重;这里只补牌桌这一类。
+     *
+     * 【幂等性】三个绘制函数都按名字复用节点、内部先 `clear()` 再画,
+     * 重复调用无副作用;`_buildTurnPointer()` 只在**首次创建**时重置指针角度,
+     * 补画不会把指向甩回上家。
+     */
+    private _redrawTableGraphics(): void {
+        // 首帧之前画同样会丢,那一遍交给 _drawStaticGraphics
+        if (!this._staticGraphicsDrawn) return;
+        if (!this._gameRoot) return;
+        this._buildTable();
+        this._buildTurnPointer();
+        this._refreshWall();
+    }
+
+    /** 屏幕比例变化时重新适配 */
     private _onResize(): void {
         this._applyAdaptation();
         this._menu?.adapt();
@@ -368,8 +550,15 @@ export class Main extends Component {
             this._menu?.showHome();
         }
         if (this._gameRoot) this._gameRoot.active = playing;
-        // 原生平台: 牌桌被隐藏过之后,表上的按钮(重新开始/返回主页面)只剩文字,开局时补画
-        if (playing) repaintButtons(this._gameRoot);
+        if (playing) {
+            // 原生平台: 牌桌/转盘/牌墙是**一次性静态 Graphics**,只在首帧后画过一次。
+            // 返回主页面会把 _gameRoot 整个隐藏,再开局时这些顶点的渲染数据已丢
+            // (与按钮底框同一个坑,见 _staticGraphicsDrawn 注释),必须补画 ——
+            // 否则"返回主页面 → 再开始游戏"牌桌整块消失,只剩相机清屏色。
+            this._redrawTableGraphics();
+            // 牌桌被隐藏过之后,表上的按钮只剩文字,开局时补画
+            repaintButtons(this._gameRoot);
+        }
         // 节点顺序决定渲染层级: 先牌桌后菜单,菜单始终在最上层
         this._bringToFront(this._gameRoot);
         this._bringToFront(this._menu?.node ?? null);
@@ -428,6 +617,10 @@ export class Main extends Component {
         if (!gm) return;
         this._dealing = true;
         this._dealShown = 0;
+        // 比分条是常驻信息(跨局保留): 每次开局按最新累计分重画一次。
+        // 牌桌可能刚从主菜单"隐藏过再显示", 原生平台下这种节点的 Graphics 会丢,
+        // 所以这里不是"刷新"而是强制重建。
+        this._refreshScoreStrip(true);
         // 发牌期间不能沿用上一局的槽位快照:
         // 否则新发的牌会"从上一局的位置滑过来", 读起来是错位的瞬移
         this._handSlots.clear();
@@ -619,6 +812,16 @@ export class Main extends Component {
         // 新一局/返回主页面: 倒计时与提示一并收起(下一局需要时会重新起/重新要)
         this._hideCountdown();
         this._hideHint();
+        // 听牌详情芯片一并收起(常驻信息不能带着上一局的听牌张跨局)
+        this._hideTenpaiChip();
+        this._tenpaiChipW = 0;
+        // AI 台词气泡一并收起并归零计时:
+        // 不归零的话, 上一局那句"碰!"会带着剩余时间飘到下一局的牌桌上
+        this._hideAISpeech();
+        this._aiBubbleHold = [0, 0, 0];
+        this._aiBubbleFade = [0, 0, 0];
+        // 比分条指纹归零: 下一局开局时会强制重建一次(见 _startDealing)
+        this._scoreSig = '';
         // 设置弹窗一并收起(它可能开着; 收起时恢复被冻结的决策倒计时)
         this._closeSettings();
         // 发牌链被 unscheduleAllCallbacks 清掉时, toast 的自动清除也一并没了,
@@ -636,6 +839,8 @@ export class Main extends Component {
         // 倒计时不依赖转盘指针是否存在(指针没建好时也要能画),
         // 且必须在 pointer 早退之前调用
         this._refreshCountdown();
+        // AI 台词气泡的停留/淡出
+        this._updateAISpeech(dt);
         const pointer = this._turnPointer;
         if (!pointer) return;
 
@@ -680,14 +885,47 @@ export class Main extends Component {
     }
 
     /**
+     * 按可见高度把整张桌面放大, 让它永远比可见区大一圈(返回放大倍率)。
+     *
+     * 桌面是固定尺寸(近端半高 560 / 远端 530), 而可见半高 = 840 / 宽高比:
+     * 16:9 时 472 < 530 —— 桌面上下都被裁掉, 屏幕里看不到"桌子的边缘", 这正是设计意图;
+     * 平板 3:2 时 560 > 530, 整张桌子会**缩在屏幕中间**, 上下各留一条底色,
+     * 看起来像一张摆在地上的桌子, 而且贴着屏幕边排的牌就落到桌外去了。
+     *
+     * 所以屏幕比 16:9 更"方"时按比例放大: 倍率取"远端刚好越过屏幕顶边 10px"。
+     * 桌面是纯 Graphics(不是九宫格), 直接缩放节点即可, 绘制代码一行都不用改。
+     * 牌位的上限要跟着这个倍率换算, 见 `_applyLayout` 里的 `topHalf` / `bottomHalf`。
+     */
+    private _applyTableScale(halfH: number): number {
+        const k = Math.max(1, (halfH + 10) / this.TABLE_FAR_HH);
+        const table = this._gameRoot?.getChildByName('Table');
+        if (table) table.setScale(k, k, 1);
+        return k;
+    }
+
+    /**
      * 依据可见半高 halfH 定位所有 UI(内容坐标,原点为屏幕中心):
      *  - 底部由下到上: 手牌 → 副露 → 弃牌河
-     *  - 顶部由上到下: 上家手牌 → 上家副露 → 上家弃牌河(整组紧贴屏幕顶边)
+     *  - 顶部由上到下: 上家手牌 → 上家副露 → 上家弃牌河(整组紧贴可见区顶边;
+     *    平板 3:2 / 4:3 上会被毡布上沿夹住, 见下面的 topHalf)
      *  - 信息栏(临时提示)让位,放在上家牌组下方
      *  - 吃/碰选择面板浮在自家弃牌河之上
      *  - 左/右家保持竖直居中;重新开始按钮固定在屏幕左上角
      */
     private _applyLayout(halfH: number): void {
+        // 桌面先按可见高度放大 —— 平板 3:2 / 4:3 上它本来会整块缩在屏幕里(见 _applyTableScale)
+        const tableK = this._applyTableScale(halfH);
+        /**
+         * 牌位可用半高(上下各一个, 因为毡布上下不对称)。
+         *
+         * 可见半高 `halfH = 840 / 宽高比` 在屏幕比 16:9 更"方"时会大于桌面本身能放牌的范围:
+         * 平板 3:2 是 560, 而毡布上沿只到 497.75 —— 贴屏幕边摆的牌就落到桌外了
+         * (上家手牌整排压过桌沿、自家手牌坐到木框上)。
+         * 所以牌位按 min(可见半高, 毡布能放牌的半高) 排; 16:9 及更宽时它恒等于 halfH,
+         * 手机上的排版一个像素都不变。
+         */
+        const topHalf = Math.min(halfH, this.FELT_TILE_TOP * tableK);
+        const bottomHalf = Math.min(halfH, this.FELT_TILE_BOTTOM * tableK);
         const rivH = this._tileH(this.RIVER_TILE_W);
         const topTileH = this._tileH(this.TOP_TILE_W);
         // 副露行高 = 牌河牌高: 那一排的牌就用弃牌河的尺寸(见 _refreshMelds),
@@ -697,15 +935,14 @@ export class Main extends Component {
         const meldGap = MELD_MARK_GAP;
 
         // ---- 底部: 手牌 → 副露 → 弃牌河(按钮已移除) ----
-        const handY = -halfH + this.TILE_H / 2 + 8;
+        const handY = -bottomHalf + this.TILE_H / 2 + 8;
         const meldY = handY + this.TILE_H / 2 + meldH / 2 + meldGap;
         const discY = meldY + meldH / 2 + rivH / 2 + meldGap;
 
-        // ---- 顶部: 上家 → 手牌(牌背) → 副露 → 弃牌河,依次紧贴屏幕顶部 ----
-        // 亮牌时上家手牌改用正面绘制,正面牌会多出一点顶侧厚度(band),
-        // 所以整组下移 band,避免牌顶被屏幕裁掉
-        const topBand = this._revealAll ? getFrontBand(this.TOP_TILE_W, topTileH) : 0;
-        const topHandY = halfH - 8 - topBand - topTileH / 2;
+        // ---- 顶部: 上家 → 手牌(牌背) → 副露 → 弃牌河,依次紧贴可见区顶部(平板受 topHalf 约束) ----
+        // (曾因"亮牌时上家的正面牌多出立体顶侧厚度(band)"而整组下移补偿;
+        //  2026-10-16 起牌面按素材平铺、无程序化牌身, band 不存在, 补偿已删)
+        const topHandY = topHalf - 8 - topTileH / 2;
         const topMeldY = topHandY - topTileH / 2 - meldH / 2 - meldGap;
         const topDiscY = topMeldY - meldH / 2 - rivH / 2 - meldGap;
         // 信息栏仅作临时提示,让位给上家牌组,放在其下方。
@@ -732,6 +969,14 @@ export class Main extends Component {
         this._settingsBtnX = -this.CONTENT_W / 2 + 24 + 32;
         this._settingsBtnY = halfH - 8 - 32;
         this._settingsBtn?.setPosition(this._settingsBtnX, this._settingsBtnY, 0);
+        // 比分条: 齿轮右侧 → "上家手牌最宽情形"左侧之间的净空, 内容在其中居中。
+        // 上家手牌最多 14 张(13 + 刚摸到的那张)且整排居中, 故右边界按它取最坏情况;
+        // 这条带与手牌同一水平高度, 但横向完全错开(纵向撞不到任何牌区)。
+        const stripLeft = this._settingsBtnX + 32 + SCORE_STRIP_GAP;
+        const stripRight = -(14 * this.TOP_TILE_W) / 2 - SCORE_HAND_GAP;
+        this._scoreStripX = (stripLeft + stripRight) / 2;
+        this._scoreStripMaxW = stripRight - stripLeft;
+        this._scoreStrip?.setPosition(this._scoreStripX, this._settingsBtnY, 0);
         if (this._meldContainers[0]) this._meldContainers[0].setPosition(0, meldY, 0);
         if (this._discardContainer) this._discardContainer.setPosition(0, discY, 0);
         if (this._infoLabel) this._infoLabel.node.setPosition(0, infoY, 0);
@@ -742,6 +987,17 @@ export class Main extends Component {
         // 这里只更新它依赖的边界(手牌上沿; 转盘半径已在本函数里算好)。
         this._handTopY = handY + this.TILE_H / 2;
         this._placeHintPanel();
+        // 听牌详情芯片与手牌同一排(转屏/改窗口后按新的手牌行 y 重排)
+        this._handRowY = handY;
+        this._placeTenpaiChip();
+        // AI 台词气泡: 贴在各家自己的手牌上(见 SPEECH_* 那段注释)
+        this._aiBubblePos[0].set(0, topHandY, 0);
+        this._aiBubblePos[1].set(this.AI_LAYOUT[1].hx - SPEECH_SIDE_DX, 0, 0);
+        this._aiBubblePos[2].set(this.AI_LAYOUT[2].hx + SPEECH_SIDE_DX, 0, 0);
+        for (let i = 0; i < 3; i++) {
+            const b = this._aiBubbles[i];
+            if (b && b.isValid && b.active) b.setPosition(this._aiBubblePos[i]);
+        }
 
         // 听牌(立直)按钮在自家手牌左侧; "提示"按钮排在它右边同一排
         const halfW = this.CONTENT_W / 2;
@@ -825,6 +1081,10 @@ export class Main extends Component {
         // 声音设置与"重新开始 / 返回主页面"都收进它弹出的设置弹窗里
         this._buildSettingsUI();
 
+        // 对局信息常驻显示: 四家比分条(齿轮右侧) + 听牌详情芯片(手牌右侧)
+        this._buildScoreStrip();
+        this._buildTenpaiChip();
+
         this._buildAISeats();
 
         this._buildMeldAreas();
@@ -836,6 +1096,8 @@ export class Main extends Component {
         this._buildHintUI();
 
         this._buildTenpaiMarkers();
+
+        this._buildAISpeech();
 
         this._buildSettlementPanel();
 
@@ -875,10 +1137,15 @@ export class Main extends Component {
         push(this._handContainer);
 
         push(this._settingsBtn);
+        // 常驻信息(比分条 / 听牌详情)与左上角按钮同层, 压在牌面之上
+        push(this._scoreStrip);
+        push(this._tenpaiChip);
         push(this._riichiBtn);
         push(this._hintBtn);
         push(this._hintPanel?.node);
         push(this._meldPanel);
+        // AI 台词气泡压在所有牌面之上(贴在自己手牌上, 不遮别家)
+        for (const b of this._aiBubbles) push(b);
         // 设置弹窗(含遮罩)压在牌桌之上、结算面板之下:
         // 结算出现时牌局已结束, 不该再被设置弹窗盖住
         push(this._settingsPanel?.node);
@@ -983,6 +1250,151 @@ export class Main extends Component {
         return this._settingsPanel?.isOpen === true;
     }
 
+    // ==================== 对局信息常驻显示(比分条 / 听牌详情) ====================
+
+    /**
+     * 创建四家累计比分条(常驻左上角, 齿轮按钮右侧)
+     *
+     * 【为什么放在这里】牌桌四角里只有左上角有稳定净空: 右上角是剩余牌墙(高度随
+     * 张数变化)、下边两角是手牌与"听牌/提示"按钮。齿轮右侧到"上家手牌最宽情形"
+     * 之间那条横向带不会被任何牌区占用, 也不随残局变化 —— 比分正是那种
+     * **一直要看、但不能挡牌**的信息。
+     *
+     * 内容由 `_refreshScoreStrip` 重建(分数只在结算时变), 这里只建空容器。
+     */
+    private _buildScoreStrip(): void {
+        const strip = new Node('ScoreStrip');
+        strip.parent = this._gameRoot;
+        strip.addComponent(UITransform).setContentSize(1, 1);
+        this._scoreStrip = strip;
+    }
+
+    /**
+     * 重建比分芯片(分数变化时才真的重建)
+     *
+     * 刷新点跟着 `_refreshInfo` 走(每次摸牌/弃牌都会调), 用指纹挡住重复重建 ——
+     * 否则每出一张牌就把四块芯片拆了重搭一遍。
+     *
+     * @param force true=无条件重建(屏幕隐藏过再显示 / 出图补画时用)
+     */
+    private _refreshScoreStrip(force = false): void {
+        const strip = this._scoreStrip;
+        const gm = GameManager.instance;
+        if (!strip || !gm) return;
+        const scores: number[] = [];
+        const scoreTexts: string[] = [];
+        const labels: string[] = [];
+        for (let s = 0; s < 4; s++) {
+            const v = gm.getScore(s);
+            scores.push(v);
+            // 正分带 + 号: 一行四个数字里"0 和 12"很容易看混, 符号一目了然
+            scoreTexts.push(v > 0 ? `+${v}` : `${v}`);
+            // 用 AI 的名字(两个汉字, 与"上家/左家/右家"宽度一致, 版式不受影响)
+            labels.push(`${seatLabel(s)} ${scoreTexts[s]}`);
+        }
+        const sig = labels.join('|');
+        if (!force && sig === this._scoreSig) return;
+        this._scoreSig = sig;
+        this._clearChildren(strip);
+
+        const widths = labels.map(t => textWidth(t, SCORE_FONT) + SCORE_CHIP_PAD * 2);
+        let total = (widths.length - 1) * SCORE_CHIP_GAP;
+        for (const w of widths) total += w;
+        // 超长(累计到四位数)时整体缩一点, 保证不压到上家手牌
+        const scale = this._scoreStripMaxW > 0 && total > this._scoreStripMaxW
+            ? Math.max(CHIP_MIN_SCALE, this._scoreStripMaxW / total)
+            : 1;
+        strip.setScale(scale, scale, 1);
+
+        let cursor = -total / 2;
+        for (let s = 0; s < 4; s++) {
+            const w = widths[s];
+            const chip = new Node(`Score_${s}`);
+            chip.parent = strip;
+            chip.addComponent(UITransform).setContentSize(w, SCORE_CHIP_H);
+            // 自己的芯片用亮金边圈出来: 一行四个名字里最快找到的就是"你"
+            paintInfoChip(chip.addComponent(Graphics), w, SCORE_CHIP_H, s === 0);
+            // 名字与分数分成两个 Label: 分数按正负着色, 名字始终米白 ——
+            // 整块染成正负色的话, 一行四块芯片看着像四盏警报灯, 名字反倒读不出来。
+            // 两个左对齐 Label 按"字宽累加"排位(硬约束 4: 文字起点 = 节点 x − 宽度/2)
+            const nameW = textWidth(seatLabel(s), SCORE_FONT);
+            const scoreW = textWidth(scoreTexts[s], SCORE_FONT);
+            const gapW = SCORE_FONT * 0.5;   // 与 textWidth 的半角宽一致(相当于一个空格)
+            const startX = -(nameW + gapW + scoreW) / 2;
+            const color = scores[s] > 0 ? SCORE_GAIN : (scores[s] < 0 ? SCORE_LOSS : SCORE_ZERO);
+            const nameLabel = createLabelNode(seatLabel(s), SCORE_FONT, CHIP_TEXT, nameW + 4, SCORE_CHIP_H, true);
+            nameLabel.parent = chip;
+            nameLabel.setPosition(startX + nameW / 2, 0, 0);
+            const scoreLabel = createLabelNode(scoreTexts[s], SCORE_FONT, color, scoreW + 4, SCORE_CHIP_H, true);
+            scoreLabel.parent = chip;
+            scoreLabel.setPosition(startX + nameW + gapW + scoreW / 2, 0, 0);
+            chip.setPosition(cursor + w / 2, 0, 0);
+            cursor += w + SCORE_CHIP_GAP;
+        }
+    }
+
+    /**
+     * 创建听牌详情芯片(自家手牌右侧; 未听牌时隐藏)
+     *
+     * 与"你·听"标记的分工: 那个是**宣告状态**(亮给对手看), 这个是**自己的听牌详情**
+     * ("听什么、还剩几张") —— 后者的数据来自 GameManager.onTenpaiInfo, 与点「提示」
+     * 看到的是同一份算法, 不会再出现"提示一套、常驻显示另一套"。
+     */
+    private _buildTenpaiChip(): void {
+        const chip = new Node('TenpaiInfo');
+        chip.parent = this._gameRoot;
+        chip.addComponent(UITransform).setContentSize(1, 1);
+        chip.active = false;
+        this._tenpaiChip = chip;
+    }
+
+    /** 显示/刷新听牌详情芯片(每次按最新详情重建: 内容随听牌张与剩余张数变化) */
+    private _showTenpaiChip(info: TenpaiInfo): void {
+        const chip = this._tenpaiChip;
+        if (!chip) return;
+        const text = `听 ${HintAdvisor.tenpaiText(info.waiting, info.remain)}`;
+        this._clearChildren(chip);
+
+        const w = textWidth(text, TENPAI_FONT) + TENPAI_CHIP_PAD * 2;
+        chip.getComponent(UITransform)?.setContentSize(w, TENPAI_CHIP_H);
+        const g = chip.getComponent(Graphics) ?? chip.addComponent(Graphics);
+        paintInfoChip(g, w, TENPAI_CHIP_H);
+        // 余 0 张 = 听的那几张全明在桌上了(等不到), 换个警示色提醒别干等
+        const color = info.remain > 0 ? CHIP_TEXT : CHIP_TEXT_WARN;
+        const label = createLabelNode(text, TENPAI_FONT, color, w - 4, TENPAI_CHIP_H);
+        label.parent = chip;
+
+        this._tenpaiChipW = w;
+        chip.active = true;
+        this._placeTenpaiChip();
+    }
+
+    /** 隐藏听牌详情芯片(未听牌 / 牌局结束 / 清牌桌) */
+    private _hideTenpaiChip(): void {
+        if (this._tenpaiChip) this._tenpaiChip.active = false;
+    }
+
+    /**
+     * 听牌芯片贴着手牌右侧摆放(右缘固定, 文案变长时向左伸, 位置不跳)
+     *
+     * 右缘取 `halfW − TENPAI_CHIP_RIGHT`: 让开右侧的"你·听"标记(宣告听牌后会亮出来)。
+     * 左缘由 `TENPAI_HAND_GAP` 保证不压满手 14 张牌 —— 文案超长(多面听)时整体缩放兜底。
+     */
+    private _placeTenpaiChip(): void {
+        const chip = this._tenpaiChip;
+        if (!chip || !chip.active) return;
+        const halfW = this.CONTENT_W / 2;
+        const right = halfW - TENPAI_CHIP_RIGHT;
+        // 满手 14 张时手牌右缘(手牌整排居中, 张数只会更少 —— 这是最坏情况)
+        const handRight = (14 * this.TILE_W) / 2 + TENPAI_HAND_GAP;
+        const maxW = right - handRight;
+        const scale = this._tenpaiChipW > maxW && maxW > 0
+            ? Math.max(CHIP_MIN_SCALE, maxW / this._tenpaiChipW)
+            : 1;
+        chip.setScale(scale, scale, 1);
+        chip.setPosition(right - (this._tenpaiChipW * scale) / 2, this._handRowY, 0);
+    }
+
     /** 点"提示": 向 GameManager 要一份建议, 由 onHint 回调驱动显示 */
     private _onHintClick(): void {
         const gm = GameManager.instance;
@@ -1083,7 +1495,7 @@ export class Main extends Component {
      */
     private _buildTenpaiMarkers(): void {
         for (let seat = 0; seat < 4; seat++) {
-            const node = createTenpaiChip(SEAT_NAMES[seat]);
+            const node = createTenpaiChip(seatLabel(seat));
             node.parent = this._gameRoot;
             node.active = false;
             this._tenpaiMarkers[seat] = node;
@@ -1432,9 +1844,9 @@ export class Main extends Component {
         // 3D 透视: 正方形桌面经透视后视觉变扁(近端宽、远端窄)
         // 近端半宽 NEAR_HW=820(物理桌面宽1640),远端半宽按 FAR_RATIO 收缩
         // 高度 HH 也压缩(俯视投影 y 方向变短),整体呈扁梯形,符合低头看桌视角
-        const NEAR_HH = 560;          // 近端 y(半高,压缩后)
-        const FAR_RATIO = 0.78;       // 远端半宽 / 近端半宽
-        const FAR_HH = NEAR_HH - 30;  // 远端 y 略低于近端,使侧边轻微上扬
+        const NEAR_HH = this.TABLE_NEAR_HH;   // 近端 y(半高,压缩后)
+        const FAR_RATIO = 0.78;               // 远端半宽 / 近端半宽
+        const FAR_HH = this.TABLE_FAR_HH;     // 远端 y 略低于近端,使侧边轻微上扬
         const drawTrap = (hwb: number, hh: number, mode: 'fill' | 'stroke') => {
             // hh 表示近端半高;远端半高同比例收缩
             const hwt = hwb * FAR_RATIO;
@@ -1591,16 +2003,29 @@ export class Main extends Component {
         // 副露播报: 吃/碰/杠统一在这里发声(自家与 AI 都会走到 onMeld)
         gm.onMeld = (seat, meld) => {
             playMeldVoice(meld.type);
+            // 碰/杠再震一下(吃不动手): 手感与语音同源, 自家与 AI 的副露口径一致
+            if (meld.type !== 'chi') vibrateMeld();
             this._refreshMelds(seat, meld);
         };
         gm.onPlayerMeldChoice = (request) => this._showMeldPrompt(request);
-        gm.onTenpai = (tiles) => this._showTenpai(tiles);
+        // AI 台词(碰 / 杠): 在说话那家的手牌上冒一个短气泡;
+        // 胡牌与点炮那句由结算面板显示(牌桌那时已被遮罩盖住)
+        gm.onAISpeech = (seat, text) => this._showAISpeech(seat, text);
+        // 听牌: 常驻详情(状态) 与 一次性提醒(事件) 分开接 ——
+        // 详情进手牌右侧的芯片, 提醒仍走上方那行临时文字
+        gm.onTenpaiInfo = (info) => {
+            if (info) this._showTenpaiChip(info);
+            else this._hideTenpaiChip();
+        };
+        gm.onTenpai = (info) => this._showTenpai(info);
         gm.onTenpaiChanged = (seat) => this._refreshTenpaiMarkers();
         gm.onNotice = (msg) => this._showToast(msg);
         gm.onHu = (msg) => this._showHuToast(msg);
         gm.onReveal = (winnerSeat, msg) => this._onGameEndReveal(winnerSeat, msg);
         gm.onSettle = (data) => {
             // 胡牌语音已按需求取消, 这里只走结算面板
+            // 震动挂在结算回调而不是 onHu: 流局也会走 _fireHu, 挂 onHu 流局会白震一下
+            if (data.kind === 'hu') vibrateHu();
             this._onSettle(data);
         };
         // AI 提示: 玩家点"提示"才会回调; 局面一变(出牌/选副露)GM 会给 null 让 UI 收起
@@ -1923,6 +2348,8 @@ export class Main extends Component {
         this._refreshRiichiButton();
         this._refreshHintButton();
         this._refreshTenpaiMarkers();
+        // 比分条只在分数变化时真的重建(内部用指纹挡重复)
+        this._refreshScoreStrip();
     }
 
     /**
@@ -1954,6 +2381,101 @@ export class Main extends Component {
         btn.active = show;
         // 原生平台: 藏过再亮的 Graphics 会只剩文字, 亮出来时补画一次底框
         if (show) repaintButtons(btn);
+    }
+
+    // ==================== AI 台词气泡(拟人化) ====================
+
+    /**
+     * 创建三家 AI 的台词气泡(常驻节点,默认隐藏)
+     *
+     * 只在**显示时**才画 Graphics: 原生(JSB)平台上 onLoad 期间画的图形上不了屏
+     * (硬约束 6), 而气泡一律是开局之后才出现的, 那时画一定能上屏。
+     */
+    private _buildAISpeech(): void {
+        for (let i = 0; i < 3; i++) {
+            const node = new Node(`AISpeech_${i + 1}`);
+            node.parent = this._gameRoot;
+            node.addComponent(UITransform).setContentSize(1, SPEECH_H);
+            node.addComponent(Graphics);
+            node.addComponent(UIOpacity).opacity = 255;
+            node.active = false;
+            this._aiBubbles[i] = node;
+        }
+    }
+
+    /**
+     * 让某家 AI 冒一句台词(碰 / 杠)
+     *
+     * 气泡带上**名字**("老陈：碰一个。"): 牌桌上没有常驻的名字牌, 不写名字的话
+     * 玩家只知道"上家说话了", 记不住是谁。
+     *
+     * 胡牌的台词不走这里 —— 结算面板一弹出就用整屏遮罩盖住牌桌, 那句话随
+     * `SettlementData.speech` 显示在面板里。
+     */
+    private _showAISpeech(seat: number, text: string): void {
+        const idx = seat - 1;
+        const node = idx >= 0 && idx < 3 ? this._aiBubbles[idx] : null;
+        if (!node || !node.isValid) return;
+        // 结算面板已经盖住牌桌: 这时候冒气泡等于没出现过
+        if (this._settlement?.isOpen) return;
+        const full = `${seatLabel(seat)}：${text}`;
+        const w = Math.ceil(textWidth(full, SPEECH_FONT)) + SPEECH_PAD * 2;
+        node.getComponent(UITransform)?.setContentSize(w, SPEECH_H);
+        // 文字长度每次都可能不同: 只重建那一个 Label(气泡本体是常驻节点)
+        for (const child of [...node.children]) {
+            stopTweensDeep(child);
+            child.destroy();
+        }
+        const label = createLabelNode(full, SPEECH_FONT, SPEECH_TEXT, w - 8, SPEECH_H);
+        label.parent = node;
+        const g = node.getComponent(Graphics);
+        if (g) paintSpeechBubble(g, w, SPEECH_H);
+        node.setPosition(this._aiBubblePos[idx]);
+        node.active = true;
+        // 上一次的淡出可能还没走完: 先停掉旧补间并把状态拨回"刚出现"
+        stopTweensDeep(node);
+        node.setScale(1, 1, 1);
+        ensureOpacity(node).opacity = 255;
+        popIn(node, 0.18);
+        this._aiBubbleHold[idx] = SPEECH_HOLD;
+        this._aiBubbleFade[idx] = 0;
+    }
+
+    /** 收起三家气泡(清牌桌 / 返回主页面时调用) */
+    private _hideAISpeech(): void {
+        for (let i = 0; i < 3; i++) {
+            this._aiBubbleHold[i] = 0;
+            this._aiBubbleFade[i] = 0;
+            const n = this._aiBubbles[i];
+            if (!n || !n.isValid) continue;
+            stopTweensDeep(n);
+            n.active = false;
+        }
+    }
+
+    /**
+     * 逐帧推进气泡的显示与淡出
+     *
+     * 计时放在 UI 自己的数组里, **不用 scheduleOnce**: 一条台词 1.6 秒, 而牌局里
+     * 打断(重开/返回)是家常便饭, 排队的回调得逐个 unschedule 才清得干净;
+     * 用"剩余秒数"则天然跟着 `update` 走, 清牌桌时把数组归零就结束了。
+     */
+    private _updateAISpeech(dt: number): void {
+        for (let i = 0; i < 3; i++) {
+            if (this._aiBubbleHold[i] > 0) {
+                this._aiBubbleHold[i] -= dt;
+                if (this._aiBubbleHold[i] <= 0) this._aiBubbleFade[i] = SPEECH_FADE;
+                continue;
+            }
+            if (this._aiBubbleFade[i] <= 0) continue;
+            this._aiBubbleFade[i] -= dt;
+            const n = this._aiBubbles[i];
+            if (!n || !n.isValid) continue;
+            const k = Math.max(0, this._aiBubbleFade[i]) / SPEECH_FADE;
+            const op = n.getComponent(UIOpacity);
+            if (op) op.opacity = Math.round(255 * k);
+            if (this._aiBubbleFade[i] <= 0) n.active = false;
+        }
     }
 
     /** 四家"听"标记: 谁宣告了听牌就亮谁 */
@@ -1995,7 +2517,7 @@ export class Main extends Component {
         // 正面牌比牌背多出顶侧厚度,需要重排(上家手牌整组下移,避免被屏幕裁掉)
         this._applyLayout(this._halfH);
         for (let i = 0; i < 3; i++) this._refreshAIHand(i);
-        const who = winnerSeat >= 0 ? `${SEAT_NAMES[winnerSeat]} 胡牌` : '流局';
+        const who = winnerSeat >= 0 ? `${seatLabel(winnerSeat)} 胡牌` : '流局';
         this._showMessage(`【${who}】四家手牌已亮出`, 4);
         // 牌局结束: 确保设置按钮还在(正常对局中它一直亮着)
         this._showSettingsButton();
@@ -2118,9 +2640,14 @@ export class Main extends Component {
         return hand ? centerOf(hand) : null;
     }
 
-    private _showTenpai(waitingTiles: Tile[]): void {
-        const text = waitingTiles.map(t => t.displayText).join(' ');
-        this._showMessage(`【听牌】可胡: ${text}`, 4);
+    /**
+     * 听牌的一次性提醒(玩家摸牌后, 且听牌张/剩余张数真的变了)
+     *
+     * 常驻详情已经挂在手牌右侧的芯片上, 这条文字只负责"喊一声":
+     * 以前每摸一张牌都喊一遍同样的"可胡: 三萬 六萬", 有了常驻信息后那是纯噪音。
+     */
+    private _showTenpai(info: TenpaiInfo): void {
+        this._showMessage(`【听牌】${HintAdvisor.tenpaiText(info.waiting, info.remain)}`, 4);
     }
 
     // ==================== 交互处理 ====================
@@ -2501,21 +3028,26 @@ function meldMarkDir(seat: number): number {
 
 /**
  * 给"从别家吃/碰/杠来的那张牌"描一圈金边,标明这一组里哪张是触发牌
- * 光晕比牌身略大,所以不会被牌面盖住
+ *
+ * 圆角与描边位置跟 `TileView` 的高光框同一套(tileRadius + 线宽一半的外扩):
+ * 这个圈也画在牌身**之下**, 路径若压在牌边上, 内侧半个线宽会被牌面盖掉;
+ * 圆角若另取一套比例(这里曾是 0.16), 弧线在角上会离牌边而去, 露出一道缝。
  */
 function addClaimedRing(node: Node, w: number, h: number): void {
     const ring = new Node('ClaimedRing');
     ring.parent = node;
     ring.addComponent(UITransform).setContentSize(w, h);
     const g = ring.addComponent(Graphics);
-    const r = Math.max(3, Math.min(w, h) * 0.16);
+    const r = tileRadius(w, h);
+    // 外层柔光: 路径外扩 1.5 / 线宽 4 → 落在牌边 -0.5 ~ +3.5
     g.strokeColor = new Color(255, 214, 120, 110);
-    g.lineWidth = 5;
-    g.roundRect(-w / 2 - 2, -h / 2 - 2, w + 4, h + 4, r + 2);
+    g.lineWidth = 4;
+    g.roundRect(-w / 2 - 1.5, -h / 2 - 1.5, w + 3, h + 3, r + 1.5);
     g.stroke();
+    // 主体亮金: 路径外扩 0.5 / 线宽 2 → 落在牌边 -0.5 ~ +1.5
     g.strokeColor = new Color(255, 232, 152, 235);
     g.lineWidth = 2;
-    g.roundRect(-w / 2 - 2, -h / 2 - 2, w + 4, h + 4, r + 2);
+    g.roundRect(-w / 2 - 0.5, -h / 2 - 0.5, w + 1, h + 1, r + 0.5);
     g.stroke();
     ring.setSiblingIndex(0);   // 画在牌身之下,只露出外侧那一圈
 }

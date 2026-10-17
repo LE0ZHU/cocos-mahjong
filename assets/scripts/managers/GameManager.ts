@@ -8,6 +8,8 @@ import { AIBrain, AIContext } from '../game/AIBrain';
 import { Hint, HintAdvisor } from '../game/HintAdvisor';
 import { HAND_SIZE, SUIT_CHARS, CN_NUMERALS, TILE_TYPE_COUNT, tileIndexOf } from '../core/TileDefine';
 import { GameRules, GAME_RULES, difficultyOfDelay } from '../game/GameRules';
+import { aiName, speechLine, SpeechKind } from '../game/AIPersona';
+import { CAREER } from '../game/CareerStore';
 import { HuChecker } from '../core/HuChecker';
 import { ThreatInfo } from '../core/AIDefense';
 import {
@@ -52,6 +54,18 @@ const MELD_REACT_DELAY = 0.45;
 export const SEAT_NAMES = ['你', '上家', '左家', '右家'];
 
 /**
+ * 座位给玩家看的名字: 自己是"你", 三家 AI 用他们的名字
+ *
+ * 【为什么还有 SEAT_NAMES】方位词仍用在日志、以及"吃/碰/杠来源"那种只放得下一个字
+ * 的小牌子上; 给玩家看的名牌/比分条/结算行一律用这里 —— 名字与方位词都是**两个字**,
+ * 所以换成名字不会改任何版式(见 game/AIPersona.ts 的注释)。
+ */
+export function seatLabel(seat: number): string {
+    if (seat === 0) return SEAT_NAMES[0];
+    return aiName(seat) || SEAT_NAMES[seat] || SEAT_NAMES[0];
+}
+
+/**
  * 下家座位表(逆时针,与屏幕座位一一对应):
  * 自己(下) → 右家(右) → 上家(上) → 左家(左) → 自己
  * 即坐在桌边看下去逆时针轮转,而不是跨桌直连。
@@ -71,6 +85,22 @@ export interface MeldPromptRequest {
     /** 'meld'=吃/碰/杠; 'ron'=吃胡 */
     kind: 'meld' | 'ron';
     items: MeldPromptItem[];
+}
+
+/**
+ * 玩家的听牌详情(信息栏常驻显示用)
+ *
+ * 【为什么要有它】玩家以前必须主动点"提示"才知道自己听什么、还剩几张;
+ * 连打多局时这个信息一直需要, 所以由 GameManager 统一算好推给 UI。
+ * 口径必须与提示**完全一致**(AGENTS.md 硬约束 13d):
+ * 剩余张数 = Σ(4 − 可见张数) 是"实际张数", 不是有效进张种类数 ——
+ * 玩家按这个数判断"还等不等得到", 给错口径比不给更糟。
+ */
+export interface TenpaiInfo {
+    /** 当前听的所有牌型(每型一张; HuChecker.isTenpai 口径) */
+    waiting: Tile[];
+    /** 剩余可胡张数合计 = Σ(4 − 可见张数)(与提示里的"N 张进张"同一算法) */
+    remain: number;
 }
 
 /**
@@ -169,6 +199,13 @@ export class GameManager extends Component {
     private _scores: number[] = [0, 0, 0, 0];
     /** 各家连庄次数(本局胡牌后 +1, 别人胡牌或未胡则清零) */
     private _streaks: number[] = [0, 0, 0, 0];
+    /**
+     * 上次的会话是否已从存档恢复过
+     *
+     * 存档在原生平台是**异步**就绪的(`sys.localStorage` 由 `sys.init()` 挂上),
+     * 所以恢复要能重试: 没读到就当这次没恢复, 下次开局再试。
+     */
+    private _sessionRestored = false;
 
     // ---- 决策超时(自动行动) ----
     /** 玩家每次需要做决定时的时限(秒) */
@@ -188,8 +225,18 @@ export class GameManager extends Component {
      */
     private _decidePaused = false;
     // ---- AI 提示 ----
-    /** 玩家最近一次请求的提示(局面变化时清空, 避免显示过期的建议) */
+    /** 玩家最近的提示(局面变化时清空, 避免显示过期的建议) */
     private _hint: Hint | null = null;
+    // ---- 玩家听牌详情(信息栏常驻) ----
+    /** 当前听牌详情; 未听牌/发牌中/牌局结束为 null */
+    private _tenpaiInfo: TenpaiInfo | null = null;
+    /**
+     * 听牌详情的"变更指纹"(听牌张型 + 剩余张数)
+     *
+     * 每次手牌或可见牌变化都会重算一次详情, 但绝大多数时候结果没变 ——
+     * 用指纹挡住重复的 UI 通知, 否则信息栏会跟着每一次摸牌/弃牌重建。
+     */
+    private _tenpaiInfoKey = '';
 
     // ---- 常量 ----
     private readonly AI_COUNT = 3;
@@ -213,8 +260,21 @@ export class GameManager extends Component {
     onMeld: ((seat: number, meld: Meld) => void) | null = null;
     /** 玩家可吃/碰/杠/吃胡: 需要 UI 弹出选择面板,玩家决策后调用 resolvePlayerMeld */
     onPlayerMeldChoice: ((request: MeldPromptRequest) => void) | null = null;
-    /** 听牌提示(玩家): waitingTiles=听牌张 */
-    onTenpai: ((waitingTiles: Tile[]) => void) | null = null;
+    /**
+     * 听牌详情变化(玩家): 未听牌/牌局结束给 null
+     *
+     * 与 `onTenpai` 的分工: 这个是**状态**("现在听什么、还剩几张"),
+     * 只在真的变化时触发, UI 用它常驻显示; `onTenpai` 是**事件**("刚听牌/听牌变了"),
+     * 只在玩家摸牌后触发一次, UI 用它弹一条一次性提醒。
+     */
+    onTenpaiInfo: ((info: TenpaiInfo | null) => void) | null = null;
+    /**
+     * 刚听牌/听牌张变化的一次性提醒(玩家摸牌后): info=最新听牌详情
+     *
+     * 只在**详情真的变了**时触发 —— 原本每次摸牌只要听牌就提醒一次,
+     * 配上常驻信息栏后就是噪音(同一句"听 3/6萬"每巡喊一遍)。
+     */
+    onTenpai: ((info: TenpaiInfo) => void) | null = null;
     /** 听牌状态变化: seat=座位, tenpai=当前是否听牌(UI 据此显示"听"标记) */
     onTenpaiChanged: ((seat: number, tenpai: boolean) => void) | null = null;
     /** 需要给玩家一句临时提示(如"已宣告听牌,不能这样出") */
@@ -223,6 +283,13 @@ export class GameManager extends Component {
      * 牌局结算数据(有人胡牌或流局都会给): UI 用它弹出独立结算面板
      */
     onSettle: ((data: SettlementData) => void) | null = null;
+    /**
+     * AI 说了一句话(碰 / 杠): UI 在对应座位上冒一个短气泡
+     *
+     * 只给"不改变流程"的副露 —— 胡牌与点炮的台词随 `onSettle` 一起给
+     * (结算面板会立刻盖住牌桌, 那时候冒气泡是看不见的)。
+     */
+    onAISpeech: ((seat: number, text: string) => void) | null = null;
     /**
      * 提示内容已变化(玩家点了"提示"): UI 据此刷新提示面板
      *
@@ -237,10 +304,36 @@ export class GameManager extends Component {
             return;
         }
         GameManager._instance = this;
+        // 上一次没打完的会话(切后台被系统回收后重开)在这里接回来
+        this._restoreSession();
     }
 
     onDestroy(): void {
         if (GameManager._instance === this) GameManager._instance = null;
+    }
+
+    /**
+     * 从存档恢复"还没打完的那一串对局"的累计分与连庄
+     *
+     * 【为什么要存档】累计分与连庄以前只在内存里: 切后台被杀、或应用被回收,
+     * 一串打了十几局的比分就没了 —— 那正是玩家最心疼的东西。现在每局结算都落盘
+     * (见 `_endGame`), 于是**只有主动返回主页面才清零**(那里会 `clearSession`)。
+     *
+     * 【为什么能重复调用】原生平台的 `sys.localStorage` 是异步就绪的, 第一次读
+     * 可能还没挂上; 那时 `session` 为 null, 这里什么都不做, 下次开局再试。
+     */
+    private _restoreSession(): void {
+        if (this._sessionRestored) return;
+        const snap = CAREER.session;
+        if (!snap) return;
+        this._sessionRestored = true;
+        // 已经打过局的会话不再覆盖(理论上只有 onLoad 会走到这里, 保险起见)
+        if (this._scores.some(v => v !== 0) || this._streaks.some(v => v !== 0)) return;
+        this._scores = snap.scores.slice(0, 4);
+        this._streaks = snap.streaks.slice(0, 4);
+        while (this._scores.length < 4) this._scores.push(0);
+        while (this._streaks.length < 4) this._streaks.push(0);
+        console.log(`[战绩] 恢复上次未结束的比分: ${this._scores.join(' / ')}`);
     }
 
     // ==================== 游戏流程 ====================
@@ -266,6 +359,8 @@ export class GameManager extends Component {
     startGame(rules: GameRules = GAME_RULES.rules, onDealt?: () => void): void {
         this._rules = { ...rules };
         this.unscheduleAllCallbacks();
+        // 存档可能在 onLoad 那会儿还没就绪(原生平台), 开局这里再试一次
+        this._restoreSession();
         this._wall = new Wall();
         this._player = new Player();
         this._aiPlayers = [];
@@ -290,6 +385,9 @@ export class GameManager extends Component {
         }
         this._player.sortHand();
         for (const ai of this._aiPlayers) ai.sortHand();
+
+        // 新一局: 听牌详情归零(上一局的"听 3/6萬"不能留到这一局)
+        this._refreshTenpaiInfo();
 
         // 牌发完了, 但**先不进玩家回合**: 等 UI 发牌动画播完再调 beginPlay()
         onDealt?.();
@@ -320,9 +418,14 @@ export class GameManager extends Component {
         this.cancelPendingMeld();
         this._canDiscard = false;
         this._phase = GamePhase.GAME_OVER;
-        // 返回主页面 = 一个会话结束, 累计分与连庄一起清零
+        // 返回主页面 = 一个会话结束, 累计分与连庄一起清零。
+        // 存档也要一起删: 否则下次启动会把这串已经打完的比分又接回来。
+        // (生涯统计不受影响 —— 那是"打过多少局"的历史, 不随会话结束而消失)
         this._scores = [0, 0, 0, 0];
         this._streaks = [0, 0, 0, 0];
+        CAREER.clearSession();
+        // 听牌详情一并收起(常驻信息栏不能带着上一局的听牌张离场)
+        this._refreshTenpaiInfo();
     }
 
     /**
@@ -444,7 +547,8 @@ export class GameManager extends Component {
         player.sortHand();
         // 通知 UI 重建副露区(碰 → 杠多了第 4 张,必须重画;UI 会顺手做"补牌弹入"过渡)
         this._fireMeld(seat, meld);
-        console.log(`[续杠] ${SEAT_NAMES[seat]} ${meld.toString()}`);
+        console.log(`[续杠] ${SEAT_NAMES[seat]}(${seatLabel(seat)}) ${meld.toString()}`);
+        this._fireSpeech(seat, 'kan');
 
         // 补摸一张(简化: 直接从牌墙摸,非岭上牌);补摸后继续该玩家出牌
         const replacement = this._drawReplacement(seat);
@@ -931,7 +1035,9 @@ export class GameManager extends Component {
         }
 
         this._fireMeld(seat, meld);
-        console.log(`[副露] ${SEAT_NAMES[seat]} ${meld.toString()}`);
+        console.log(`[副露] ${SEAT_NAMES[seat]}(${seatLabel(seat)}) ${meld.toString()}`);
+        // 碰/杠给一句台词(吃不给: 吃的频率高得多, 每次都说话就成噪音了 —— 与震动同一口径)
+        if (meld.type === 'pon' || meld.type === 'kan') this._fireSpeech(seat, meld.type);
 
         // 碰/吃后玩家手牌已理牌,不存在单独标注的摸牌(须在刷新手牌之前清空,否则标注会错位)
         if (seat === 0) this._playerDrawnTile = null;
@@ -1065,7 +1171,7 @@ export class GameManager extends Component {
             });
             winners.push({
                 seat: e.seat,
-                name: SEAT_NAMES[e.seat],
+                name: seatLabel(e.seat),
                 hu,
                 delta: 0,
                 winTile: e.winTile,
@@ -1096,9 +1202,28 @@ export class GameManager extends Component {
             this._streaks[s] = winnerSeats.has(s) ? this._streaks[s] + 1 : 0;
         }
 
+        // 胡牌/点炮的台词: 结算面板一弹出就盖住整张牌桌, 所以这句话随结算数据
+        // 一起交给 UI(碰/杠不改流程, 走 onAISpeech 冒气泡)
+        const lines: string[] = [];
+        for (const w of winners) {
+            if (w.seat === 0) continue;
+            const line = speechLine(w.seat, w.isSelfDraw ? 'tsumo' : 'ron', Math.random());
+            if (line) lines.push(`${w.name}：${line}`);
+        }
+        // 点炮的那家也来一句(自摸没有单一的付分方, payerSeat 为 -1)
+        if (payerSeat > 0) {
+            const line = speechLine(payerSeat, 'deal', Math.random());
+            if (line) lines.push(`${seatLabel(payerSeat)}：${line}`);
+        }
+
         const { title, subtitle } = this._buildHuTitle(winners, payerSeat);
         const message = subtitle ? `${title}(${subtitle})` : title;
-        this._endGame(title, subtitle, message, winners[0].seat, this._buildSeatResults(deltas, winnerSeats), winners);
+        this._endGame(
+            title, subtitle, message, winners[0].seat,
+            this._buildSeatResults(deltas, winnerSeats), winners,
+            // 一炮多响时最多两句: 再多会把那一行撑成两行, 压到下面的分隔线上
+            lines.slice(0, 2).join('　'),
+        );
     }
 
     /** 流局: 牌墙摸空且无人胡(同样要亮牌 + 弹结算面板, 连庄不断) */
@@ -1111,7 +1236,9 @@ export class GameManager extends Component {
     }
 
     /**
-     * 收尾公共部分: 结束状态 + 提示 + 亮牌 + 结算数据
+     * 收尾公共部分: 结束状态 + 提示 + 亮牌 + 结算数据 + 战绩落盘
+     *
+     * @param speech 本局 AI 说的话(胡牌/点炮);空串表示没有
      */
     private _endGame(
         title: string,
@@ -1120,10 +1247,13 @@ export class GameManager extends Component {
         winnerSeat: number,
         seats: SeatResult[],
         winners: WinnerResult[],
+        speech = '',
     ): void {
         this._phase = GamePhase.GAME_OVER;
         this.cancelPendingMeld();
         this._canDiscard = false;
+        // 牌局结束: 收掉常驻的听牌详情(四家手牌都亮出来了, 还挂着"听 X"没有意义)
+        this._refreshTenpaiInfo();
         this._fireHu(message);
         this._firePhaseChanged();
         this.onReveal?.(winnerSeat, message);
@@ -1133,7 +1263,20 @@ export class GameManager extends Component {
             subtitle,
             winners,
             seats,
+            speech: speech || undefined,
         };
+        // 战绩: 一局结算 = 生涯 +1 局, 并把最新的累计分/连庄一起落盘。
+        // 放在推给 UI **之前**: 面板要显示的就是更新后的生涯数据。
+        const myWin = winners.find(w => w.seat === 0) ?? null;
+        CAREER.recordGame(
+            {
+                playerHu: !!myWin,
+                fan: myWin ? myWin.hu.totalFan : 0,
+                streak: this._streaks[0],
+            },
+            this._scores,
+            this._streaks,
+        );
         this.onSettle?.(data);
     }
 
@@ -1145,7 +1288,7 @@ export class GameManager extends Component {
             if (!p) continue;
             rows.push({
                 seat: s,
-                name: SEAT_NAMES[s],
+                name: seatLabel(s),
                 hand: [...p.hand].sort((a, b) => a.sortKey - b.sortKey),
                 melds: [...p.melds],
                 delta: deltas[s] ?? 0,
@@ -1174,9 +1317,9 @@ export class GameManager extends Component {
         if (w.isSelfDraw) {
             subtitle = '自摸';
         } else if (w.hu.fans.some(f => f.name === '抢杠胡')) {
-            subtitle = `抢${payerSeat === 0 ? '你' : SEAT_NAMES[payerSeat]}的杠`;
+            subtitle = `抢${payerSeat === 0 ? '你' : seatLabel(payerSeat)}的杠`;
         } else {
-            subtitle = `${payerSeat === 0 ? '你' : SEAT_NAMES[payerSeat]}点炮`;
+            subtitle = `${payerSeat === 0 ? '你' : seatLabel(payerSeat)}点炮`;
         }
         return { title, subtitle };
     }
@@ -1188,7 +1331,7 @@ export class GameManager extends Component {
      *
      * @param seat 座位 0-3
      * @param exclude 刚摸到的那张牌(未并入理牌, 参与听牌判定时要排除)
-     * @param announce true=顺带把听牌张通过 onTenpai 提示给玩家
+     * @param announce true=听牌详情发生变化时, 额外给玩家一次"刚听牌"提醒(只在玩家摸牌后传)
      */
     private _refreshTenpaiFlag(seat: number, exclude: Tile | null = null, announce = false): void {
         const player = this._getPlayer(seat);
@@ -1204,8 +1347,59 @@ export class GameManager extends Component {
             console.log(`[听牌] AI(${SEAT_NAMES[seat]}) 听: ${waiting.map(t => t.displayText).join(' ')}`);
         }
         if (changed) this.onTenpaiChanged?.(seat, isTenpai);
-        if (announce && isTenpai && seat === 0) this.onTenpai?.(waiting);
+        // 玩家自己的详情跟着刷一遍。
+        // 这里对**所有座位**都调(不只是玩家): 别家弃牌/副露会改变"可见张数",
+        // 于是自己听的那几张的剩余数量也要跟着减 —— 那是常驻信息栏的一部分。
+        this._refreshTenpaiInfo(announce && seat === 0);
     }
+
+    // ==================== 玩家听牌详情(信息栏常驻) ====================
+
+    /**
+     * 重算玩家听牌详情并广播(未变化则不打扰 UI)
+     *
+     * @param announce true=详情发生变化时, 额外走一次 onTenpai 提醒
+     */
+    private _refreshTenpaiInfo(announce = false): void {
+        const info = this._buildTenpaiInfo();
+        const key = info
+            ? `${info.remain}|${info.waiting.map(t => tileIndexOf(t.suit, t.rank)).join(',')}`
+            : '';
+        if (key === this._tenpaiInfoKey) return;
+        this._tenpaiInfoKey = key;
+        this._tenpaiInfo = info;
+        this.onTenpaiInfo?.(info);
+        if (announce && info) this.onTenpai?.(info);
+    }
+
+    /**
+     * 组装玩家听牌详情; 未听牌 / 发牌中 / 牌局结束返回 null
+     *
+     * 口径与 `_refreshTenpaiFlag` 严格一致: **刚摸到的那张不参与判定** ——
+     * "听牌"指的是"打出这张之后"的形状(摸到手上的牌还没打出去, 不算已听)。
+     */
+    private _buildTenpaiInfo(): TenpaiInfo | null {
+        if (this._phase === GamePhase.IDLE || this._phase === GamePhase.DEALING
+            || this._phase === GamePhase.GAME_OVER) return null;
+        const p = this._player;
+        if (!p) return null;
+        const drawn = this._playerDrawnTile;
+        const hand = drawn ? p.hand.filter(t => t !== drawn) : p.hand;
+        const waiting = HuChecker.isTenpai(hand, p.melds);
+        if (waiting.length === 0) return null;
+        // 剩余张数 = Σ(4 − 可见张数); "可见" = 四家弃牌 + 全部副露 + 自己手牌。
+        // 直接复用 AI 视角的可见数组 —— 玩家能看到的公开信息与 AI 完全一致,
+        // 于是信息栏的数字与提示里的"N 张进张"永远出自同一份算法(硬约束 13)。
+        const visible = this._buildAIContext(0).visible;
+        let remain = 0;
+        for (const t of waiting) {
+            remain += Math.max(0, 4 - visible[tileIndexOf(t.suit, t.rank)]);
+        }
+        return { waiting, remain };
+    }
+
+    /** 玩家听牌详情(UI 重建时读一次用) */
+    get tenpaiInfo(): TenpaiInfo | null { return this._tenpaiInfo; }
 
     /**
      * 玩家是否可以宣告听牌(立直)
@@ -1507,4 +1701,17 @@ export class GameManager extends Component {
     private _fireAIHandChanged(aiIndex: number): void { this.onAIHandChanged?.(aiIndex); }
     private _fireAIDiscard(aiIndex: number, tile: Tile): void { this.onAIDiscard?.(aiIndex, tile); }
     private _fireMeld(seat: number, meld: Meld): void { this.onMeld?.(seat, meld); }
+
+    /**
+     * 让某家 AI 说一句话(只用于碰/杠这类"不改变流程"的场合)
+     *
+     * 玩家自己(座位 0)不会有台词; 抽不到句子(设定里该场合没配)就静默跳过 ——
+     * 台词是点缀, 不该因为它把牌局流程卡住。
+     */
+    private _fireSpeech(seat: number, kind: SpeechKind): void {
+        if (seat === 0) return;
+        const text = speechLine(seat, kind, Math.random());
+        if (!text) return;
+        this.onAISpeech?.(seat, text);
+    }
 }

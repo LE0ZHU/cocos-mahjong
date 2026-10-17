@@ -3,9 +3,11 @@ import {
     createLabelNode, createButtonNode, bindSafeClick, repaintButtons,
     createTileNode, setTileBgColor, ButtonStyle,
 } from './UIFactory';
-import { TileView } from './TileView';
+import { TileView, tileRadius } from './TileView';
 import { Tile } from '../core/Tile';
 import { FanItem, SeatResult, SettlementData, WinnerResult } from '../core/HuScore';
+import { careerText } from '../game/CareerStats';
+import { CAREER } from '../game/CareerStore';
 
 const { ccclass } = _decorator;
 
@@ -42,6 +44,10 @@ const H_DIVIDER = 30;    // "四家手牌" 小标题(与分隔线同一行, 不�
 const GAP_DIVIDER = 16;
 const H_ROW = 66;        // 一行手牌(牌高 49 + 上下留白)
 const ROW_GAP = 8;
+/** 四家手牌下面那行"生涯战绩"(跨会话累积, 打完一局正好看一眼) */
+const H_CAREER = 26;
+const GAP_CAREER = 8;
+const CAREER_FONT = 20;
 const GAP_BUTTON = 12;
 const H_BUTTON = 58;
 
@@ -71,6 +77,9 @@ const DELTA_FONT = 32;
 const DELTA_Y = 16;
 const TOTAL_FONT = 20;
 const TOTAL_Y = -17;
+/** 本局 AI 台词(挂在"四家手牌"那一行的最右侧) */
+const SPEECH_FONT = 24;
+const SPEECH_TEXT = new Color(255, 226, 158, 255);
 
 // ---- 番型块 ----
 /** 块最小宽(要放得下"谁胡了什么牌" + "N番 · X分"这一行) */
@@ -99,6 +108,8 @@ interface PanelLayout {
     headerY: number;
     rowsTopY: number;
     rowH: number;
+    /** 生涯战绩行的中心 y */
+    careerY: number;
     btnY: number;
 }
 
@@ -116,8 +127,13 @@ const WINNER_EDGE = new Color(244, 200, 108, 250);
 const ROW_BG = new Color(26, 46, 38, 225);
 const DIVIDER_LINE = new Color(214, 176, 96, 105);
 
-/** 番型色阶: 番数越高颜色越暖 */
-function fanColor(fan: number): Color {
+/**
+ * 番型色阶: 番数越高颜色越暖
+ *
+ * 导出给菜单「玩法说明」页复用 —— 番数配色只能有一套定义,
+ * 两处各写一份必然出现"结算里 4 番是蓝、说明页里是绿"这类漂移。
+ */
+export function fanColor(fan: number): Color {
     if (fan <= 0) return new Color(178, 188, 178, 255);
     if (fan <= 2) return new Color(132, 206, 152, 255);
     if (fan <= 4) return new Color(126, 192, 230, 255);
@@ -145,8 +161,9 @@ function textWidth(text: string, font: number): number {
  * 自上而下:
  *  - 标题(你胡了!/一炮多响/流局) + 来源说明(自摸 / 谁点炮)
  *  - 赢家番型块: "谁胡了什么牌" + "共 N 番 · X 分" 一行, 下面一排番型芯片
- *  - "四家手牌" 小标题 + 同高度的分隔线
+ *  - "四家手牌" 小标题 + 同高度的分隔线(本局 AI 台词挂在这一行最右侧)
  *  - 四家各一行: 座位名(带"听"标记) + 手牌(和的那张金边高亮) + 副露 + 本局得失 / 累计
+ *  - 生涯战绩(跨会话累积: 总局数 / 胡牌次数 / 最高番 / 最长连庄)
  *  - 再来一局 / 返回主页面
  */
 @ccclass('SettlementPanel')
@@ -225,7 +242,8 @@ export class SettlementPanel extends Component {
         const availH = Math.max(300, halfH * 2 - EDGE_MARGIN * 2);
         const rowsH = H_ROW * 4 + ROW_GAP * 3;
         const contentH = H_TITLE + GAP_TITLE + H_SUBTITLE + GAP_SUBTITLE
-            + H_FAN + GAP_FAN + H_DIVIDER + GAP_DIVIDER + rowsH + GAP_BUTTON + H_BUTTON;
+            + H_FAN + GAP_FAN + H_DIVIDER + GAP_DIVIDER + rowsH
+            + GAP_CAREER + H_CAREER + GAP_BUTTON + H_BUTTON;
         const pad = Math.max(PAD_MIN, Math.min(PAD_MAX, (availH - contentH) / 2));
         const h = contentH + pad * 2;
         const scale = Math.min(1, availH / h);
@@ -240,10 +258,15 @@ export class SettlementPanel extends Component {
         const headerY = y - H_DIVIDER / 2;
         y -= H_DIVIDER + GAP_DIVIDER;
         const rowsTopY = y - H_ROW / 2;
-        y -= rowsH + GAP_BUTTON;
+        y -= rowsH + GAP_CAREER;
+        const careerY = y - H_CAREER / 2;
+        y -= H_CAREER + GAP_BUTTON;
         const btnY = y - H_BUTTON / 2;
 
-        return { h, scale, titleY, subtitleY, fanCY, fanH: H_FAN, headerY, rowsTopY, rowH: H_ROW, btnY };
+        return {
+            h, scale, titleY, subtitleY, fanCY, fanH: H_FAN,
+            headerY, rowsTopY, rowH: H_ROW, careerY, btnY,
+        };
     }
 
     // ==================== 骨架 ====================
@@ -315,7 +338,16 @@ export class SettlementPanel extends Component {
         const headerW = Math.ceil(textWidth(HEADER_TEXT, HEADER_FONT)) + 8;
         this._label(card, HEADER_TEXT, HEADER_FONT, TEXT_TITLE, headerW, L.headerY,
             ROW_LEFT + headerW / 2, true);
-        this._divider(card, L.headerY, ROW_LEFT + headerW + HEADER_LINE_GAP, ROW_RIGHT);
+        // 本局 AI 的台词挂在这一行最右侧(分隔线让开它的宽度), 不用再占一行高度
+        const speech = data.speech ?? '';
+        const speechW = speech ? Math.ceil(textWidth(speech, SPEECH_FONT)) + 12 : 0;
+        const divFrom = ROW_LEFT + headerW + HEADER_LINE_GAP;
+        const divTo = Math.max(divFrom + 60, ROW_RIGHT - speechW);
+        this._divider(card, L.headerY, divFrom, divTo);
+        if (speech) {
+            this._label(card, speech, SPEECH_FONT, SPEECH_TEXT, speechW, L.headerY,
+                ROW_RIGHT - speechW / 2);
+        }
 
         // 四家手牌
         for (let i = 0; i < data.seats.length; i++) {
@@ -325,6 +357,9 @@ export class SettlementPanel extends Component {
                 : null;
             this._buildSeatRow(card, seat, winTile, L.rowsTopY - i * (L.rowH + ROW_GAP));
         }
+
+        // 生涯战绩(跨会话累积): 打完一局正是想看一眼"总共打到哪了"的时候
+        this._label(card, careerText(CAREER.career), CAREER_FONT, TEXT_MUTED, CARD_W - 200, L.careerY);
 
         this._buildButtons(card);
     }
@@ -561,13 +596,17 @@ export class SettlementPanel extends Component {
         const view = node.addComponent(TileView);
         view.setData(tile, -1);
         if (highlight) {
+            // 胡牌那张牌的金边: 圆角与描边位置跟局内高光框同一套
+            // (tileRadius + 线宽一半的外扩)。这个圈画在牌身**之下**,
+            // 路径压在牌边上时内侧会被牌面盖掉, 圆角取别的值就会在角上露出缝。
             const ring = new Node('WinRing');
             ring.parent = node;
             ring.addComponent(UITransform).setContentSize(w, h);
             const g = ring.addComponent(Graphics);
+            const r = tileRadius(w, h);
             g.strokeColor = new Color(255, 206, 110, 220);
             g.lineWidth = 3;
-            g.roundRect(-w / 2 - 2, -h / 2 - 2, w + 4, h + 4, 5);
+            g.roundRect(-w / 2 - 1, -h / 2 - 1, w + 2, h + 2, r + 1);
             g.stroke();
             ring.setSiblingIndex(0);
         }

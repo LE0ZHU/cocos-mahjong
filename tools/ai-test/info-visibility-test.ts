@@ -1,0 +1,359 @@
+/**
+ * 对局信息常驻显示复核 —— 从真实源码提取常量, 跑数字
+ *
+ * 复核四组:
+ *  1. 比分条(左上角齿轮右侧)在**各屏幕比例**下: 不压齿轮、不压上家手牌/副露/"听"标记,
+ *     四条芯片的文案在最坏(四位数分)情况下仍放得下且有缩放下限
+ *  2. 听牌详情芯片(手牌右侧)在**各屏幕比例**下: 不压满手 14 张牌、不压右侧"你·听"标记,
+ *     多面听的长文案靠缩放下限兜底, 且不侵入提示面板的落位通道
+ *  3. 文案格式(HintAdvisor.tenpaiText / waitingText): 打**真实实现**, 不手抄
+ *  4. 行为约束(源码级): 听牌详情由 GameManager 统一算(口径 = Σ(4−可见张数)),
+ *     刷新点齐(摸牌/弃牌/副露/开局/结束/返回主页面), 清牌桌会收起跨局状态
+ *
+ * 【为什么要跑数字而不是"看代码觉得没问题"】这两块信息都贴在牌桌的边角净空里,
+ * 而净空大小随屏幕比例、手牌张数、副露数量变化 —— 电脑上预览 16:9 永远看不出
+ * 21:9 手机横屏或满手 14 张时的撞车。硬约束 2 的"写死高度必翻车"就是这么来的。
+ */
+import { HintAdvisor } from '../../assets/scripts/game/HintAdvisor';
+import { Tile } from '../../assets/scripts/core/Tile';
+import { TileSuit } from '../../assets/scripts/core/TileDefine';
+
+declare const require: (m: string) => any;
+declare const __dirname: string;
+declare const process: { exit(code: number): never };
+const fs = require('fs');
+const path = require('path');
+
+function findFile(rel: string): string {
+    let dir = __dirname;
+    for (let i = 0; i < 8; i++) {
+        const p = path.join(dir, ...rel.split('/'));
+        if (fs.existsSync(p)) return p;
+        dir = path.dirname(dir);
+    }
+    throw new Error(`找不到 ${rel}`);
+}
+
+const mainSrc = fs.readFileSync(findFile('assets/scripts/Main.ts'), 'utf8');
+const gmSrc = fs.readFileSync(findFile('assets/scripts/managers/GameManager.ts'), 'utf8');
+const hintPanelSrc = fs.readFileSync(findFile('assets/scripts/ui/HintPanel.ts'), 'utf8');
+
+let fails = 0;
+function check(cond: boolean, name: string, extra = ''): void {
+    if (cond) console.log(`  [OK] ${name}`);
+    else { fails++; console.log(`  [FAIL] ${name}${extra ? ' → ' + extra : ''}`); }
+}
+
+/** 从源码里取数值常量(模块级 const 与类字段都认) */
+function num(file: string, name: string): number {
+    const patterns = [
+        new RegExp(`const\\s+${name}\\s*(?::[^=]*)?=\\s*(-?[\\d.]+)`),
+        new RegExp(`readonly\\s+${name}\\s*(?::[^=]*)?=\\s*(-?[\\d.]+)`),
+        new RegExp(`^\\s*${name}\\s*(?::[^=]*)?=\\s*(-?[\\d.]+)`, 'm'),
+    ];
+    for (const re of patterns) {
+        const m = re.exec(file);
+        if (m) return Number(m[1]);
+    }
+    throw new Error(`源码里找不到常量 ${name}`);
+}
+
+/** CJK 按字号, 其余半角 —— 与 Main.textWidth / HintPanel.textWidth 一致 */
+function textWidth(text: string, font: number): number {
+    let w = 0;
+    for (const ch of text) w += ch.codePointAt(0)! >= 0x2e80 ? font : font * 0.5;
+    return w;
+}
+
+/** 剥注释后的源码(源码级断言用) */
+function strip(s: string): string {
+    return s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+
+// ---- 提取真实常量 ----
+const CONTENT_W = num(mainSrc, 'CONTENT_W');
+const TOP_TILE_W = num(mainSrc, 'TOP_TILE_W');
+const TILE_W = num(mainSrc, 'TILE_W');
+const TILE_H = num(mainSrc, 'TILE_H');
+const RIVER_TILE_W = num(mainSrc, 'RIVER_TILE_W');
+const RIVER_GAP = num(mainSrc, 'RIVER_GAP');
+const MELD_MARK_GAP = num(mainSrc, 'MELD_MARK_GAP');
+const SCORE_CHIP_H = num(mainSrc, 'SCORE_CHIP_H');
+const SCORE_FONT = num(mainSrc, 'SCORE_FONT');
+const SCORE_CHIP_PAD = num(mainSrc, 'SCORE_CHIP_PAD');
+const SCORE_CHIP_GAP = num(mainSrc, 'SCORE_CHIP_GAP');
+const SCORE_STRIP_GAP = num(mainSrc, 'SCORE_STRIP_GAP');
+const SCORE_HAND_GAP = num(mainSrc, 'SCORE_HAND_GAP');
+const TENPAI_CHIP_H = num(mainSrc, 'TENPAI_CHIP_H');
+const TENPAI_FONT = num(mainSrc, 'TENPAI_FONT');
+const TENPAI_CHIP_PAD = num(mainSrc, 'TENPAI_CHIP_PAD');
+const TENPAI_CHIP_RIGHT = num(mainSrc, 'TENPAI_CHIP_RIGHT');
+const TENPAI_HAND_GAP = num(mainSrc, 'TENPAI_HAND_GAP');
+const CHIP_MIN_SCALE = num(mainSrc, 'CHIP_MIN_SCALE');
+
+const halfW = CONTENT_W / 2;
+/** 与 Main._tileH 同比例 */
+function tileH(w: number): number { return (w * TILE_H) / TILE_W; }
+
+/** 各屏幕比例下的可见半高(见 AGENTS.md 硬约束 2) */
+const SCREENS: { name: string; halfH: number }[] = [
+    { name: '16:9  (1920×1080)', halfH: 840 / (1920 / 1080) },
+    { name: '19.5:9 (2340×1080)', halfH: 840 / (2340 / 1080) },
+    { name: '21:9  (2520×1080)', halfH: 840 / (2520 / 1080) },
+    { name: '超宽 (3440×1440)', halfH: 840 / (3440 / 1440) },
+    { name: '竖屏 (1080×2400)', halfH: 840 / (1080 / 2400) },
+];
+
+// ================================================================ 1
+console.log('\n[1] 比分条: 左上角齿轮右侧那条净空里完整放得下');
+{
+    // 齿轮按钮几何(从源码提取, 不手抄): 位置式 = -CONTENT_W/2 + pad + w/2, 尺寸 = 64×64
+    const btnRe = /_settingsBtnX\s*=\s*-this\.CONTENT_W\s*\/\s*2\s*\+\s*(\d+)\s*\+\s*(\d+)/.exec(mainSrc);
+    const btnSize = /createIconButton\(\s*'icons\/settings'\s*,\s*(\d+)\s*,\s*(\d+)/.exec(mainSrc);
+    check(!!btnRe && !!btnSize, '能从源码提取齿轮按钮的位置式与尺寸');
+    const pad = Number(btnRe![1]);
+    const btnW = Number(btnSize![1]);
+    check(Number(btnRe![2]) === btnW / 2, '位置式里的半宽项与按钮尺寸一致', `实际半宽 ${btnW / 2}`);
+
+    // 复刻 Main._applyLayout 的两条边界 + _refreshScoreStrip 的居中与缩放
+    const settingsBtnX = -CONTENT_W / 2 + pad + btnW / 2;
+    const stripLeft = settingsBtnX + btnW / 2 + SCORE_STRIP_GAP;
+    const stripRight = -(14 * TOP_TILE_W) / 2 - SCORE_HAND_GAP;
+    const maxW = stripRight - stripLeft;
+    console.log(`  齿轮右缘 ${(settingsBtnX + btnW / 2).toFixed(0)} → 比分条左界 ${stripLeft.toFixed(0)}, ` +
+        `右界 ${stripRight.toFixed(0)}(上家满手 14 张的左缘 ${(-14 * TOP_TILE_W / 2).toFixed(0)}), 预算宽 ${maxW.toFixed(0)}`);
+
+    check(stripLeft > settingsBtnX + btnW / 2, '比分条在齿轮右侧(留出间距)', `gap=${SCORE_STRIP_GAP}`);
+    check(stripRight < -(14 * TOP_TILE_W) / 2, '比分条右界在上家满手 14 张左侧(留出间距)', `gap=${SCORE_HAND_GAP}`);
+    check(stripRight <= halfW && stripLeft >= -halfW, '比分条区间不越出内容坐标系(±840)');
+    check(maxW > 300, `可用宽度 ${maxW.toFixed(0)} 够放四个芯片`);
+
+    /** 最坏文案: 累计分到四位数 + 最长的座位名("上家") */
+    const CASES: { label: string; texts: string[] }[] = [
+        { label: '开局(全 0)', texts: ['你 0', '上家 0', '左家 0', '右家 0'] },
+        { label: '常见(两三位数)', texts: ['你 +12', '上家 -4', '左家 +128', '右家 -36'] },
+        { label: '最坏(四位数)', texts: ['你 +1234', '上家 -2345', '左家 +9999', '右家 -1'] },
+    ];
+    for (const c of CASES) {
+        const widths = c.texts.map(t => textWidth(t, SCORE_FONT) + SCORE_CHIP_PAD * 2);
+        let total = (widths.length - 1) * SCORE_CHIP_GAP;
+        for (const w of widths) total += w;
+        const scale = total > maxW ? Math.max(CHIP_MIN_SCALE, maxW / total) : 1;
+        check(total * scale <= maxW + 0.5, `${c.label}: 缩放后总宽 ${(total * scale).toFixed(0)} ≤ 预算 ${maxW.toFixed(0)}`,
+            `未缩放 ${total.toFixed(0)} scale=${scale.toFixed(2)}`);
+        check(scale >= CHIP_MIN_SCALE - 1e-6, `${c.label}: 缩放不低于下限 ${CHIP_MIN_SCALE}`, `实际 ${scale.toFixed(2)}`);
+        // 芯片里是"名字 + 空格 + 分数"两个左对齐 Label 拼出来的:
+        // 两段字宽 + 一个空格宽必须正好等于整串宽(否则文字会溢出芯片内边距, 或被 SHRINK 压扁)
+        for (let i = 0; i < c.texts.length; i++) {
+            const sp = c.texts[i].indexOf(' ');
+            const nameW = textWidth(c.texts[i].slice(0, sp), SCORE_FONT);
+            const scoreW = textWidth(c.texts[i].slice(sp + 1), SCORE_FONT);
+            const gapW = SCORE_FONT * 0.5;
+            check(Math.abs(nameW + gapW + scoreW - textWidth(c.texts[i], SCORE_FONT)) < 1e-6,
+                `${c.label}: "${c.texts[i]}" 两段字宽 + 空格 = 整串宽`);
+            check(widths[i] - SCORE_CHIP_PAD * 2 - 4 >= 0,
+                `${c.label}: "${c.texts[i]}" 文本域留白足够(不贴边)`,
+                `${widths[i] - SCORE_CHIP_PAD * 2}`);
+        }
+    }
+
+    // 纵向: 比分条与齿轮同排; 该带横向与上家手牌错开, 但要防住"副露行/听标记"在纵向撞上
+    const topTileH = tileH(TOP_TILE_W);
+    const meldH = tileH(RIVER_TILE_W);
+    for (const s of SCREENS) {
+        const halfH = s.halfH;
+        const settingsBtnY = halfH - 8 - 32;
+        const stripTop = settingsBtnY + SCORE_CHIP_H / 2;
+        const stripBottom = settingsBtnY - SCORE_CHIP_H / 2;
+        check(stripTop <= halfH && stripBottom >= -halfH, `${s.name}: 比分条在可见区内`,
+            `[${stripBottom.toFixed(0)}, ${stripTop.toFixed(0)}] halfH=${halfH.toFixed(0)}`);
+        // 上家副露行上沿: 上家手牌上沿(halfH−8) → 减去牌高 → 减 MELD_MARK_GAP
+        const topMeldTop = halfH - 8 - topTileH - MELD_MARK_GAP;
+        check(stripBottom - topMeldTop > 0, `${s.name}: 比分条不压上家副露行`,
+            `gap=${(stripBottom - topMeldTop).toFixed(1)}`);
+        // 上家"听"标记: 中心 (−halfW+70, topMeldY), 尺寸 112×36
+        const topMeldY = topMeldTop - meldH / 2;
+        const chipTop = topMeldY + 18;
+        check(stripBottom - chipTop > 0, `${s.name}: 比分条不压“上家·听”标记`,
+            `gap=${(stripBottom - chipTop).toFixed(1)}`);
+    }
+    // 横向: 上家手牌最宽情形(14 张)与比分条必须错开(比分条整条都在手牌左侧)
+    check(-(14 * TOP_TILE_W) / 2 - stripRight > 0, '比分条与上家手牌横向错开',
+        `gap=${SCORE_HAND_GAP}`);
+}
+
+// ================================================================ 2
+console.log('\n[2] 听牌详情芯片: 手牌右侧那条净空里完整放得下');
+{
+    const chipRight = halfW - TENPAI_CHIP_RIGHT;
+    // 右侧"你·听"标记: 中心 halfW−70, 宽 112(与 _applyLayout / createTenpaiChip 一致)
+    const tenpaiMarkLeft = halfW - 70 - 56;
+    check(chipRight < tenpaiMarkLeft, '听牌芯片在“你·听”标记左侧', `gap=${tenpaiMarkLeft - chipRight}`);
+    // 满手 14 张时手牌右缘(最坏情况; 副露越多手牌越少)
+    const handRight = (14 * TILE_W) / 2 + TENPAI_HAND_GAP;
+    const maxW = chipRight - handRight;
+    check(maxW > 200, `可用宽度 ${maxW.toFixed(0)} 够放典型文案`);
+
+    /**
+     * 文案最坏组合(实际会出现的字符串):
+     *  - 单面/两面听是最常见的
+     *  - 三花色 + 字牌的多元听会明显更长
+     */
+    const CASES: string[] = [
+        '听 3/6萬 · 余 4 张',
+        '听 2/3/4/5/6萬 · 余 12 张',
+        '听 1/4/7條 3/6筒 · 余 8 张',
+        '听 1/4/7萬 2/5筒 东/中 · 余 9 张',
+    ];
+    for (const text of CASES) {
+        const w = textWidth(text, TENPAI_FONT) + TENPAI_CHIP_PAD * 2;
+        const scale = w > maxW ? Math.max(CHIP_MIN_SCALE, maxW / w) : 1;
+        check(w * scale <= maxW + 0.5, `"${text}" 缩放后 ${(w * scale).toFixed(0)} ≤ 预算 ${maxW.toFixed(0)}`,
+            `未缩放 ${w.toFixed(0)} scale=${scale.toFixed(2)}`);
+        check(scale >= CHIP_MIN_SCALE - 1e-6, `"${text}" 缩放不低于下限`, `实际 ${scale.toFixed(2)}`);
+        // 左缘不能压到手牌
+        const left = chipRight - w * scale;
+        check(left >= handRight - 0.5, `"${text}" 左缘 ${left.toFixed(0)} ≥ 手牌右缘 ${handRight.toFixed(0)}`);
+        check(w - 4 >= textWidth(text, TENPAI_FONT), `"${text}" 文本域够宽(不 SHRINK)`);
+    }
+
+    // 提示面板(居中的浮动卡片)与芯片的横向关系:
+    // 面板走"按钮行上方/下方"两条通道, 落位下通道时纵向会靠近手牌区,
+    // 所以必须确认它的**半宽**也够不着芯片(否则长文案的面板会横着压到芯片上)
+    const hintPadX = num(hintPanelSrc, 'PAD_X');
+    const HINT_WORST: { t: string; f: number }[] = [
+        { t: '打出 三萬', f: 40 },
+        { t: '听牌 · 8 张进张 · 危险牌, 有人可能点炮', f: 26 },
+        { t: '次选　打出 五筒　1 向听 · 12 张进张 · 安全牌', f: 24 },
+        { t: '次选　碰 五萬　手牌慢 1 档 · 会失去门清 +1 番', f: 24 },
+    ];
+    let hintContentW = 64 + 16;   // 关闭按钮占位(与 HintPanel._buildContent 一致)
+    for (const h of HINT_WORST) hintContentW = Math.max(hintContentW, textWidth(h.t, h.f) + 8);
+    const hintHalfW = (hintContentW + hintPadX * 2) / 2;
+    check(hintHalfW < handRight, '提示面板最宽情形也够不到芯片(横向错开)',
+        `面板半宽 ${hintHalfW.toFixed(0)} < 芯片左缘 ${handRight.toFixed(0)}`);
+
+    // 纵向: 与手牌同一排; 既要留在可见区内, 也不能侵入上方的副露行与提示面板落位通道
+    const rivH = tileH(RIVER_TILE_W);
+    for (const s of SCREENS) {
+        const halfH = s.halfH;
+        const handY = -halfH + TILE_H / 2 + 8;
+        const chipTop = handY + TENPAI_CHIP_H / 2;
+        const chipBottom = handY - TENPAI_CHIP_H / 2;
+        check(chipTop <= halfH && chipBottom >= -halfH, `${s.name}: 听牌芯片在可见区内`,
+            `[${chipBottom.toFixed(0)}, ${chipTop.toFixed(0)}]`);
+        // 自家副露行下沿 = handY + TILE_H/2 + MELD_MARK_GAP
+        const meldBottom = handY + TILE_H / 2 + MELD_MARK_GAP;
+        check(meldBottom - chipTop > 0, `${s.name}: 听牌芯片不压自家副露行`, `gap=${(meldBottom - chipTop).toFixed(1)}`);
+        // 提示面板落位通道下界是"手牌上沿"(handY + TILE_H/2): 芯片必须整体在它之下
+        const handTop = handY + TILE_H / 2;
+        check(handTop - chipTop > 0, `${s.name}: 听牌芯片不侵入提示面板落位通道`,
+            `gap=${(handTop - chipTop).toFixed(1)}`);
+        // 芯片与手牌同排, 纵向不越出手牌行(rivH 仅用于说明副露行与牌河同高)
+        check(TENPAI_CHIP_H <= TILE_H, `芯片高 ${TENPAI_CHIP_H} ≤ 手牌高 ${TILE_H}(不会顶到副露行)`, `riverH=${rivH.toFixed(0)}`);
+    }
+}
+
+// ================================================================ 3
+console.log('\n[3] 文案格式(打真实 HintAdvisor)');
+{
+    let id = 9000;
+    const t = (suit: TileSuit, rank: number): Tile => new Tile(id++, suit, rank);
+    const mk = (specs: string[]): Tile[] => specs.map(sp => {
+        const rank = +sp.slice(1);
+        if (sp[0] === 'm') return t(TileSuit.WAN, rank);
+        if (sp[0] === 't') return t(TileSuit.TIAO, rank);
+        if (sp[0] === 'p') return t(TileSuit.TONG, rank);
+        if (sp[0] === 'f') return t(TileSuit.FENG, rank);
+        if (sp[0] === 'j') return t(TileSuit.JIAN, rank);
+        throw new Error(`无法解析: ${sp}`);
+    });
+
+    check(HintAdvisor.waitingText(mk(['m3', 'm6'])) === '3/6萬', '两张万: 合并成 3/6萬',
+        HintAdvisor.waitingText(mk(['m3', 'm6'])));
+    check(HintAdvisor.waitingText(mk(['m6', 'm3'])) === '3/6萬', '乱序输入也按点数排序',
+        HintAdvisor.waitingText(mk(['m6', 'm3'])));
+    check(HintAdvisor.waitingText(mk(['t1', 't4', 't7'])) === '1/4/7條', '三张条: 1/4/7條',
+        HintAdvisor.waitingText(mk(['t1', 't4', 't7'])));
+    check(HintAdvisor.waitingText(mk(['f1', 'j3'])) === '东/白', '字牌逐张列: 东/白',
+        HintAdvisor.waitingText(mk(['f1', 'j3'])));
+    check(HintAdvisor.waitingText(mk(['p5', 'm2', 't9', 'j1'])) === '2萬 9條 5筒 中',
+        '混合听: 花色按 万→条→筒→字 分组', HintAdvisor.waitingText(mk(['p5', 'm2', 't9', 'j1'])));
+    check(HintAdvisor.waitingText([]) === '', '空听返回空串(调用方自己判空)');
+
+    check(HintAdvisor.tenpaiText(mk(['m3', 'm6']), 4) === '3/6萬 · 余 4 张', '完整文案(用户要求的格式)',
+        HintAdvisor.tenpaiText(mk(['m3', 'm6']), 4));
+    check(HintAdvisor.tenpaiText(mk(['f1']), 0) === '东 · 余 0 张', '余 0 张(四张都明在桌上)照实显示',
+        HintAdvisor.tenpaiText(mk(['f1']), 0));
+    // 文案里不能出现"种"这种口径词: 给玩家看的永远是实际张数(硬约束 13d)
+    const line = HintAdvisor.tenpaiText(mk(['m3']), 3);
+    check(line.indexOf('种') < 0, '文案用"张"而不是"种类"', line);
+
+    // 格式化结果必须只用半角数字 + 花色字: 常驻芯片很窄, 汉字数字会占两倍宽
+    const wide = textWidth(HintAdvisor.tenpaiText(mk(['m3', 'm6']), 4), TENPAI_FONT);
+    const narrowLimit = textWidth('听 三萬/六萬 · 余 4 张', TENPAI_FONT);
+    check(wide < narrowLimit, `阿拉伯数字写法更窄(${wide.toFixed(0)} < ${narrowLimit.toFixed(0)})`);
+}
+
+// ================================================================ 4
+console.log('\n[4] 行为约束(源码级)');
+{
+    const gm = strip(gmSrc);
+    const main = strip(mainSrc);
+
+    // ---- GameManager: 详情由它统一算, 口径与提示同源 ----
+    check(gm.includes('onTenpaiInfo'), 'GameManager 暴露 onTenpaiInfo(常驻详情的唯一数据源)');
+    check(/interface\s+TenpaiInfo/.test(gm), '有 TenpaiInfo 类型(听牌张 + 剩余张数)');
+    const flag = gm.slice(gm.indexOf('private _refreshTenpaiFlag'), gm.indexOf('private _refreshTenpaiFlag') + 1600);
+    check(flag.includes('_refreshTenpaiInfo'), '_refreshTenpaiFlag 里刷新听牌详情(摸牌/弃牌/副露都会经过)');
+    check(/this\._refreshTenpaiInfo\(announce\s*&&\s*seat\s*===\s*0\)/.test(flag),
+        '只有玩家摸牌才顺带"刚听牌"提醒(别家弃牌只静默更新剩余张数)');
+    const build = gm.slice(gm.indexOf('private _buildTenpaiInfo'), gm.indexOf('private _buildTenpaiInfo') + 1600);
+    check(build.includes('_playerDrawnTile'), '刚摸到的那张不参与听牌判定(与听牌标记同一口径)');
+    check(build.includes('_buildAIContext(0)'), '可见张数复用 AI 视角的公开信息(玩家看不到别家手牌)');
+    check(/Math\.max\(0,\s*4\s*-\s*visible\[/.test(build), '剩余张数 = Σ(4 − 可见张数)(与提示同口径)');
+    check(/GamePhase\.DEALING/.test(build) && /GamePhase\.GAME_OVER/.test(build),
+        '发牌中与牌局结束不出详情(不给没有意义的信息)');
+    check(gm.includes('_tenpaiInfoKey'), '有变更指纹去重(局面没变不重建 UI)');
+    // 刷新点必须齐: 开局 / 流局胡牌 / 返回主页面
+    const startBody = gm.slice(gm.indexOf('startGame(rules'), gm.indexOf('startGame(rules') + 2200);
+    check(startBody.includes('_refreshTenpaiInfo'), 'startGame 里清掉上一局的详情');
+    const endBody = gm.slice(gm.indexOf('private _endGame'), gm.indexOf('private _endGame') + 900);
+    check(endBody.includes('_refreshTenpaiInfo'), '_endGame 里收起详情(牌局结束后不再显示"听 X")');
+    const stopBody = gm.slice(gm.indexOf('stopGame()'), gm.indexOf('stopGame()') + 700);
+    check(stopBody.includes('_refreshTenpaiInfo'), 'stopGame(返回主页面)里收起详情');
+
+    // ---- Main: 接线 / 定位 / 跨局归零 ----
+    check(main.includes('gm.onTenpaiInfo ='), 'Main 接了 onTenpaiInfo');
+    check(/onTenpaiInfo\s*=\s*\(info\)\s*=>\s*\{[\s\S]{0,200}?_showTenpaiChip/.test(main),
+        '有详情就显示芯片');
+    check(/else\s+this\._hideTenpaiChip\(\)/.test(main), '没详情(未听牌/结束)就收起芯片');
+    const refreshInfo = main.slice(main.indexOf('private _refreshInfo()'), main.indexOf('private _refreshInfo()') + 600);
+    check(refreshInfo.includes('_refreshScoreStrip'), '_refreshInfo 里刷新比分条');
+    const clearTable = main.slice(main.indexOf('private _clearTable()'), main.indexOf('private _clearTable()') + 2600);
+    check(clearTable.includes('_hideTenpaiChip'), '_clearTable 收起听牌芯片(跨局不残留)');
+    check(/_scoreSig\s*=\s*''/.test(clearTable), '_clearTable 清比分条指纹(下一局强制重建)');
+    const applyLayout = main.slice(main.indexOf('private _applyLayout('), main.indexOf('private _applyLayout(') + 4200);
+    check(applyLayout.includes('_scoreStrip?.setPosition'), '_applyLayout 定位比分条(转屏跟着走)');
+    check(applyLayout.includes('_placeTenpaiChip'), '_applyLayout 重排听牌芯片');
+    check(/_scoreStripMaxW\s*=/.test(applyLayout), '_applyLayout 算出比分条的可用宽度(供超长缩放)');
+    const layer = main.slice(main.indexOf('private _applyLayerOrder()'), main.indexOf('private _applyLayerOrder()') + 1600);
+    check(layer.includes('push(this._scoreStrip)') && layer.includes('push(this._tenpaiChip)'),
+        '两块常驻信息都排在牌面之上');
+    // 原生平台(JSB): onLoad 期间画的 Graphics 不上屏, 首帧后必须补画一次
+    check(/_refreshScoreStrip\(true\)/.test(main), '有强制重建入口(首帧补画 / 隐藏过再显示)');
+    const drawStatic = main.slice(main.indexOf('private _drawStaticGraphics'), main.indexOf('private _drawStaticGraphics') + 900);
+    check(drawStatic.includes('_refreshScoreStrip(true)'), '首帧后补画比分条');
+    check(/CHIP_TEXT_WARN/.test(main) && /remain\s*>\s*0\s*\?\s*CHIP_TEXT\s*:\s*CHIP_TEXT_WARN/.test(main),
+        '余 0 张用警示色(等不到了, 别干等)');
+    // 硬约束 1: target 是 ES2015, 不能用 Array.prototype.includes
+    check(main.indexOf('.includes(') < 0, 'Main.ts 里没有 Array.prototype.includes(ES2015 约束)');
+
+    // 旧的一次性提醒文案已换成新格式(与常驻芯片同源, 不再各写一套)
+    const showTenpai = main.slice(main.indexOf('private _showTenpai('), main.indexOf('private _showTenpai(') + 500);
+    check(showTenpai.includes('HintAdvisor.tenpaiText'), '一次性提醒也走同一份文案(不会"说一套显示一套")');
+    check(!/可胡:/.test(showTenpai), '旧的“可胡: X Y”文案已替换');
+}
+
+console.log(`\n${fails === 0 ? '全部通过' : fails + ' 项失败'}\n`);
+process.exit(fails === 0 ? 0 : 1);

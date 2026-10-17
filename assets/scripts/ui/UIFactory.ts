@@ -1,6 +1,6 @@
 import {
     Node, Label, Graphics, UITransform, Color, Button, Sprite, SpriteFrame, resources,
-    view, screen, ResolutionPolicy, EventTouch,
+    view, screen, ResolutionPolicy, EventTouch, Vec3,
 } from 'cc';
 import { TileSuit, SUIT_BG_COLORS } from '../core/TileDefine';
 import { Tile } from '../core/Tile';
@@ -40,6 +40,17 @@ const SIDE_RIM_COLOR = new Color(244, 233, 205, 255);
 function fitRadius(w: number, h: number, r: number): number {
     return Math.max(1, Math.min(r, Math.min(w, h) / 3));
 }
+
+/**
+ * 牌面图片(assets/resources/tiles)是圆角透明 PNG, 圆角半径 = 短边 × 12%
+ * (由 `tools/make-tile-faces.py` 的 `RADIUS_RATIO` 裁剪, 75×100 → 9px;
+ * Sprite 3:4 等比铺满牌节点后, 可见圆角 = 短边 × 0.12)。
+ *
+ * ⚠️ 这个比例**只有一个出处**: `TileView.ts` 的 `tileRadius(w, h)`。
+ * 任何"勾在牌身边沿"的描边(摸牌金框/拖牌光晕/副露金边/和牌框/提示框)都必须
+ * 走它; 若描边相对牌面同心外扩 d, 则半径同步 + d, 否则圆角处会与牌面轮廓
+ * 错开、露出月牙形缝隙(2026-10-17 修过一批)。
+ */
 
 /** 凹槽内缩量(各花色牌身共用) */
 function getInset(w: number, h: number): number {
@@ -744,7 +755,7 @@ export function bindSafeClick(node: Node, callback: () => void, target?: unknown
         if (!t) return;
         // 把 UI 坐标转换成按钮的局部坐标
         const uiLoc = e.touch.getUILocation();
-        const local = t.convertToNodeSpaceAR({ x: uiLoc.x, y: uiLoc.y });
+        const local = t.convertToNodeSpaceAR(new Vec3(uiLoc.x, uiLoc.y, 0));
         if (Math.abs(local.x) > halfW || Math.abs(local.y) > halfH) {
             inside = false;
         }
@@ -793,11 +804,15 @@ export function createTileNode(width = 70, height = 100, frontView = false): Nod
     // 底色用纯白(与 tiles 里牌面图片的白底一致),否则图片四周会露出一圈米白"边框"
     drawTileBg(g, width - 2, height - 2, new Color(255, 255, 255, 255), frontView);
 
-    // ---- 牌面图片层: 凹槽内显示真实牌面图片,由 TileView 按需设置 ----
+    // ---- 牌面图片层: 素材图 1:1 铺满(叠在牌身之上),由 TileView 按需设置 ----
+    // 尺寸 = 整张牌(width × height), 素材按 3:4 等比铺满、无变形。
+    // 素材本身已裁好圆角并带透明边(tools/make-tile-faces.py 加工, 尺寸未补),
+    // 所以有图片时**不叠加任何程序化牌身装饰**——TileView 会把 Bg 隐藏,
+    // 圆角外直接透出桌面。Bg 保留只为"图片缺失"时供矢量绘制(Pattern/Label)兜底。
     const faceNode = new Node('Face');
     faceNode.parent = node;
     const faceTransform = faceNode.addComponent(UITransform);
-    faceTransform.setContentSize(faceW - 2, faceH - 2);
+    faceTransform.setContentSize(width, height);
     const faceSprite = faceNode.addComponent(Sprite);
     faceSprite.sizeMode = Sprite.SizeMode.CUSTOM;
     faceSprite.type = Sprite.Type.SIMPLE;

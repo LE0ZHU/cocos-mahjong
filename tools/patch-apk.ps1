@@ -50,16 +50,25 @@ foreach ($s in @('META-INF\CERT.SF', 'META-INF\CERT.RSA', 'META-INF\MANIFEST.MF'
 
 $py = 'C:\Users\28337\AppData\Local\Programs\Python\Python312\python.exe'
 if (-not (Test-Path $py)) { $py = 'python' }
+
+# Inject android.permission.VIBRATE into the manifest before repacking.
+# The vibration feedback (scripts/feedback/Haptics.ts) is a no-op without it,
+# and the baseline APK was produced from the engine template which omits it.
+# The script is idempotent: if the permission is already there it just says so.
+& $py (Join-Path $PSScriptRoot 'patch_manifest_vibrate.py') $unpack
+if ($LASTEXITCODE -ne 0) { throw 'patch_manifest_vibrate.py failed' }
+
 & $py (Join-Path $PSScriptRoot 'repack_apk.py') $unpack $tmpApk
 if ($LASTEXITCODE -ne 0) { throw 'repack_apk.py failed' }
 
 
 if (Test-Path $signed) { Remove-Item $signed -Force }
 # resources.arsc is already STORED by repack_apk.py; zipalign only needs to align it.
-$p = Start-Process -FilePath $zipalign `
-    -ArgumentList "-f -p 4 `"$tmpApk`" `"$signed`"" `
-    -NoNewWindow -Wait -PassThru
-if ($p.ExitCode -ne 0) { throw "zipalign failed (exit $($p.ExitCode))" }
+# 直接调用而不是 Start-Process: PS 5.1 的 Start-Process 会用大小写不敏感字典重建环境块,
+# 本机同时存在 HTTP_PROXY / http_proxy 时会抛 "已添加项..." 直接把流程打断。
+& $zipalign -f -p 4 $tmpApk $signed
+if ($LASTEXITCODE -ne 0) { throw "zipalign failed (exit $LASTEXITCODE)" }
+if (-not (Test-Path $signed)) { throw "zipalign produced no output: $signed" }
 
 & $apksigner sign --ks $ks --ks-pass pass:123456 --key-pass pass:123456 `
     --ks-key-alias debug_keystore --out $signed $signed 2>&1 | Out-Null

@@ -7,7 +7,7 @@
 ## 项目速览
 
 - Cocos Creator 3.8.8 + TypeScript，单场景（`assets/game.scene`），全部 UI 由代码构建
-- `assets/scripts` 共约 7300 行；`Main.ts`(1896) 与 `GameManager.ts`(1168) 是两个大头
+- `assets/scripts` 共约 12600 行；`Main.ts`(3054) 与 `GameManager.ts`(1717) 是两个大头
 - 分层：`core/` `game/`（纯逻辑，零 `cc` 依赖） → `managers/`（状态机） → `ui/` + `Main.ts`（表现层）
 
 ---
@@ -32,9 +32,11 @@ _gameRoot.scale = design.width / 1680        // CONTENT_W = 1680
 
 | 屏幕 | 可见半高 | 全高 |
 |---|---|---|
-| 16:9 (1920×1080) | 472 | 945 |
+| 21:9 / 2.4:1 超宽 | 350 ~ 360 | 700 ~ 720 |
 | 19.5:9 (2340×1080) | 387 | 775 |
-| 21:9 (2520×1080) | 360 | 720 |
+| 16:9 (1920×1080) | 472 | 945 |
+| 3:2 平板 | 560 | 1120 |
+| 4:3 (iPad) | 630 | 1260 |
 | 竖屏 | 1867 ~ 4200 | — |
 
 ⚠️ **别把全高当半高用**。本节早期版本只写了 945/720 那一列（全高），
@@ -47,6 +49,25 @@ _gameRoot.scale = design.width / 1680        // CONTENT_W = 1680
 ⚠️ **横屏时牌桌中间那条纵向带极窄**。21:9 下"吃/碰按钮行上沿 → 转盘下沿"
 只剩约 10px，16:9 也只有约 100px。浮动面板**不能写死高度**，
 必须按可用空间缩放（见硬约束 13b 的 `HintPanel.fit`）。
+
+⚠️ **平板（3:2 / 4:3）上"可见半高"会超过桌面本身**：桌面是固定几何
+（近端半高 560 / 远端 530），halfH=560 时整张桌子会**完整露出来**，
+而牌位是按 halfH 贴屏幕边排的 —— 上家手牌整排压过桌沿、自家手牌坐到木框上，
+看上去就是"牌摆到桌子外面"。两条必须同时成立：
+
+- `_applyTableScale(halfH)`：把桌面节点整体放大，倍率 = `(halfH + 10) / TABLE_FAR_HH`（≥1），
+  让桌面永远比可见区大一圈（和手机横屏一个观感）。桌面是纯 Graphics，缩放节点即可。
+- `_applyLayout` 里牌位用
+  `topHalf = min(halfH, FELT_TILE_TOP × 倍率)` / `bottomHalf = min(halfH, FELT_TILE_BOTTOM × 倍率)`
+  分别夹住上家手牌与自家手牌 —— **毡布上下不对称**（远端 497.75、近端 -526），
+  只用一个对称值会让底部白空一截。
+
+16:9 及更宽时这两项恒为 `1` / `halfH`，**手机排版一个像素都不变**。
+涉及常量都收在 `Main.ts` 顶部的
+`TABLE_NEAR_HH / TABLE_FAR_HH / FELT_TILE_TOP / FELT_TILE_BOTTOM`
+（`_buildTable` 与 `_applyLayout` 共用，别各写一套）。
+复核：`tools/ai-test/tablet-layout-test.ts`；出图：`python tools/preview-layout.py --tablet`
+（`tablet-preview.png`，16:9 / 3:2 / 4:3 三张叠一起，并打印"牌是否越界"）。
 
 ### 3. 纵向排版的游标写法
 
@@ -89,6 +110,13 @@ y -= H_TITLE + GAP;          // ← 必须是 y -= ...
 - 一次性静态图形：延后到 `start()` 之后的下一帧再画（见 `Main._staticGraphicsDrawn`）
 - 按钮：节点会被隐藏（切页面/开局），显示时调 `repaintButtons(node)` 补画底框
 - 页面重新显示：`MenuUI.showHome()` / `showRules()` 里已调用
+- **"隐藏过再显示"同样会丢 Graphics，不只是 `onLoad`**：
+  牌桌/中央转盘/牌墙只在首帧后画一次，而返回主页面会把 `_gameRoot` 整个
+  `active = false`，再点"开始游戏"时顶点回不来 —— 表现为**牌桌整块消失**
+  （只剩相机清屏色），而牌面/按钮/文字一切正常。
+  所以 `_showScene(PLAYING)` 里必须调 `Main._redrawTableGraphics()` 补画，
+  且要排在 `_gameRoot.active = true` **之后**（画在隐藏节点上一样丢）。
+  新增"只在开局画一次"的静态图形时，同步问一句：回主页面再进来有补画入口吗。
 
 ### 6b. 牌桌美术：台面用渐变带，禁止平涂色块
 
@@ -224,6 +252,243 @@ n?.getComponent(TileView)?.setHinted(false);
 
 复核脚本：`tools/ai-test/settings-layout-test.ts`（四组：各屏幕比例完整可见 / 段落不重叠 /
 文本域与按钮宽度 / 行为约束源码级校验）。出图：`python tools/preview-settings.py`。
+
+### 6f. 牌面：素材图 1:1 平铺，圆角裁在素材上，无程序化牌身
+
+2026-10-16 定稿。有素材图时 `TileView._applyDisplay` 会把 `Bg`（程序绘制的牌身/凹槽）
+**整个隐藏**，`Face`（素材图）按 `width × height` 铺满整张牌。要点：
+
+- **素材四角必须是"圆角 + 透明"**：`assets/resources/tiles/*.png` 不是原始素材，
+  而是 `tools/make-tile-faces.py` 从 jpg 加工的（圆角半径 = 短边 × 12%，**尺寸不变、
+  不补边**，`meta` 里 `hasAlpha=true`、`trimType=none`，uuid 沿用旧的）。
+  **换素材必须重跑该脚本**，直接丢直角 jpg 进去四角会在桌面上露出白色直角。
+- **原始 jpg 不在 assets 里**，在仓库根的 `majiang_paimian/`（34 张，75×100）。
+  改圆角 / 换素材要跑 `python tools/make-tile-faces.py --src majiang_paimian`
+  （写回 `assets/resources/tiles`，**保留已有 `*.png.meta`**，uuid 不变）。
+  就地模式（不带 `--src`）只在源目录还留着 jpg 时才有得转，别指望它。
+  改完圆角必须同步 `TileView.ts` 的 `TILE_RADIUS_RATIO`，否则高光框与牌边不同心。
+- **不要同时存在同名 `.jpg` 和 `.png`**（`resources.load('tiles/1W/spriteFrame')` 按名加载，
+  脚本会删旧 jpg，正是为了避免歧义）。
+- `Bg` 只在"图片缺失"时作矢量兜底（筒/条图案、Label 都画在它上面）；`setTileBgColor`
+  保留但图片模式下不可见。
+- 牌面不再有"立体厚度(band)/阴影"，**依赖它们的布局补偿要一起删**
+  （例：`_applyLayout` 里给上家亮牌留的 `topBand` 已删）。
+- 改 `createTileNode` / `TileView._applyDisplay` / `make-tile-faces.py` 后，
+  必须同步 `tools/preview-tile.py`（镜像牌面渲染，出 `tile-face-preview.png`），否则预览会骗人。
+
+#### 6f-2. 贴牌边画圈的（金框/青框/金边）必须共用 `tileRadius()`
+
+牌的实际圆角 = **短边 × 12%**（裁在素材图上）。所有"沿牌边画一圈"的边框都要用
+`TileView.ts` 导出的 `tileRadius(w, h)`，**不要另写一套比例**（哪怕数字碰巧相同 ——
+`UIFactory` 里曾有一份 `TILE_FACE_RADIUS_RATIO = 0.093` 的死代码，改圆角时漏改就是两套）：
+比例不同 → 角上的弧与牌边不同心 → 弧线在角的"肩部"离牌边而去，露出一道桌布色的
+缝隙（"金牌边框和牌边不契合"就是这么来的，2026-10-17 修过一批）。
+
+还有一条与画在谁之上有关：
+
+- 圈画在**牌身之下**（`setSiblingIndex(0)`）时，路径要按线宽一半**外扩**
+  （亮金 +1 / 柔光 +2.5），让整个描边落在牌边之外、内侧 0.5 藏在牌下。
+  路径压在牌边上就等于内侧半个线宽被牌面吃掉：直边只剩一条细线、角上被吃得更多，
+  看起来像"框断了"。
+- 画在牌身**之上**的（AI 提示青框）同参数即可，内侧 0.5 直接压在牌边那半像素上。
+
+涉及的五处（改一处要顺手检查其余）：`TileView.drawDrawnMark` / `drawHintMark` /
+`drawDragGlow`、`Main.addClaimedRing`（副露触发牌）、`SettlementPanel` 的 `WinRing`。
+出图：`python tools/preview-tile-highlight.py`（`tile-highlight-preview.png`，
+上排放大看几何、下排 1:1 看实际粗细）。
+
+### 6g. 对局信息常驻：比分条与听牌芯片只放在「净空」里
+
+2026-10-16 新增（用户要求：累计分不再只在结算面板出现，听牌详情不用再点「提示」）。
+两块信息都常驻牌桌边角，**不占任何出牌区域**：
+
+- **比分条**（`Main._buildScoreStrip` / `_refreshScoreStrip`）：左上角齿轮按钮右侧、与齿轮
+  同一排。那是牌桌四角里唯一稳定的净空 —— 右上角是剩余牌墙（高度随张数变）、下边两角是
+  手牌与「听牌/提示」按钮。可用宽度 = 齿轮右缘 → 上家手牌**最宽情形**（14 张）左缘 ≈ 480px，
+  累计到四位数时按 `CHIP_MIN_SCALE`(0.62) 整体缩。名字与分数是**两个 Label**（分数按正负
+  着色、名字始终米白），两段字宽 + 一个空格宽必须正好等于整串宽。
+- **听牌芯片**（`_buildTenpaiChip` / `_showTenpaiChip` / `_placeTenpaiChip`）：贴在手牌右侧、
+  与手牌同一排，**右缘固定**（`halfW − TENPAI_CHIP_RIGHT`，让开右侧「你·听」标记）→
+  文案变长时向左伸、位置不跳；左缘以满手 14 张的右缘为界，多面听长文案同样靠缩放兜底。
+  它纵向整体位于手牌上沿之下，所以不会侵入提示面板的落位通道（硬约束 13b）。
+- **数据一律由 GameManager 算**（`TenpaiInfo` + `onTenpaiInfo`）：剩余张数 = Σ(4 − 可见张数)，
+  与提示里的「N 张进张」同一算法（硬约束 13d）；可见张数直接复用
+  `_buildAIContext(0).visible`，玩家与 AI 看到的公开信息一致（硬约束 10）。
+  **不要在 UI 里自己数张数** —— 那必然与提示漂移。
+- **`onTenpaiInfo` 是状态、`onTenpai` 是事件**：前者变化才推（UI 常驻显示），后者是一次性提醒
+  （只在玩家摸牌且详情真的变了时喊）。原先每次摸牌只要听牌就喊一遍，配上常驻芯片就是噪音。
+- 刷新点挂在 `_refreshTenpaiFlag`，且**所有座位都刷** —— 别家弃牌/副露会改变「剩余张数」。
+  开局 / 结束 / 返回主页面各清一次；`_clearTable()` 里必须 `_hideTenpaiChip()` 并把
+  `_scoreSig` / `_tenpaiChipW` 归零（形状同硬约束 6c/6d 的"跨局状态归零"）。
+- **原生（JSB）**：两块信息的 Graphics 都必须在首帧之后画 —— 比分条走 `_drawStaticGraphics`
+  补画，且每次 `_startDealing()` 强制重建（牌桌可能刚从主菜单"隐藏过再显示"）；听牌芯片
+  每次显示时重建。
+
+```bash
+node "$TSC" --target ES2020 --module commonjs --strict false --skipLibCheck \
+     --outDir temp/infovis tools/ai-test/info-visibility-test.ts \
+     assets/scripts/core/{Shanten,HuChecker,HuScore,Tile,TileDefine,Meld,MeldDetector,Wall,AIDefense}.ts \
+     assets/scripts/game/{AIBrain,HintAdvisor,Player}.ts
+node temp/infovis/tools/ai-test/info-visibility-test.js
+```
+
+四组：①各屏幕比例下比分条不压齿轮/上家手牌/副露行/听标记（含四位数分的最坏文案）
+②听牌芯片不压满手 14 张牌与「你·听」标记、不侵入提示面板通道 ③文案格式**打真实
+`HintAdvisor`**（花色合并、排序、张数口径）④刷新点与跨局归零的源码级断言。
+出图：`python tools/preview-status.py`（16:9 / 21:9 / 超宽 / 竖屏）。
+
+### 6h. 菜单内容页（设置规则 / 玩法说明）：字号优先，超出就滚动
+
+主菜单的次按钮行是「设置规则 | 玩法说明」并排（各 330 宽，**纵向不多占一行**），
+`MenuUI.showRules()` / `showHelp()` 切到两个内容页。
+
+**2026-10-16 晚改版（用户反馈"文字和背景密密麻麻"）** —— 两条硬规则：
+
+1. **字号优先，超出就滚动**：标题 36 / 说明 26 / 说明页正文 28、番型表 26~30，
+   内容因此比视口高（设置页 +175px、说明页 +262px），两页共用
+   `_createScrollPage()` 的滚动视口 + 右侧滚动指示条。校验脚本断言"滚动量在
+   40~60% 屏高之间"，并卡住**字号下限**（标题 ≥34 / 说明 ≥24 / 正文 ≥26）——
+   别为了塞进一屏又把字缩回去，那是这次改版要解决的问题本身。
+2. **整页阅读底板**（`PAGE_DIM_COLOR`，alpha 175）：背景是麻将桌照片，文字直接压上去读不清。
+   注意这与硬约束 12 里被用户删掉的"上下两条黑色渐变遮罩"**不是一回事**（那是两条渐变带），
+   底板是整页均匀压暗、压在内容之下（`_addPageDim` 必须是页面的第一个子节点）。
+
+**滚动实现的三条要点**（踩过就想不起来为什么这么写的）：
+
+- **坐标系**：内容锚点取 `(0.5, 1)`、位置取视口顶边 → 内容局部 `y = 0` 就是内容顶边，
+  页面元素从 0 往下排（负数），与 Cocos ScrollView 的边界模型（按"内容顶边 vs 视口顶边"
+  判越界）一致，初始就在最上面。**别再用早期那版"把 content 原点挪到屏幕中心"的写法**
+  （那是给静态单屏用的，滚动时会一开页就看到中间）。
+- **滚动条**：位置由 `sv.getScrollOffset()`（顶=0、底=-max）与 `getMaxScrollOffset()` 反推，
+  不自己算边界；内容没超出视口时整条不画；`update()` 里只在状态变化时重画。
+- **首行不能被裁**：首行的标题上沿要 ≤ 0（内容顶边），否则会被 Mask 吃掉半截 ——
+  `RULES_ROW_TOP = -40` 就是这么定的。
+- **原生（JSB）**：阅读底板、章节分隔线、滚动条、按钮都是 Graphics/画出来的，
+  `showXxx()` 与 `redrawBackdrop()` 里都要补画一遍（补画必须 `clear()` 后再画）。
+
+**番型表的数据只能有一份**：`core/HuScore.ts` 的 `FAN_DEFS`（名称 / 番数 / 说明）
+是唯一真源 —— `computeHu` 通过 `pushFan(fans, '清一色')` 取番数，
+说明页 `buildFanRows()` 渲染同一张表。**判定里不许再出现写死的番数**
+（测试会扫 `fan:` 后面有没有数字或 `FAN_*` 常量），README 的番型表也被同一脚本逐条核对。
+连庄番数随次数变化，不进表，用导出的 `STREAK_FAN_MAX`。
+
+说明页文案在 `MenuUI.HELP_SECTIONS`（纯数据：段落 / 正文行 / 是否带番型表），
+版式只按行数往下排；`tools/preview-menu.py` **解析这份数组 + 设置页的选项组**出图 ——
+预览里的文字与真机一致（手抄一份到预览里必然漂移）。
+
+```bash
+# 说明页版式
+node "$TSC" --target ES2020 --module commonjs --strict false --skipLibCheck \
+     --outDir temp/help tools/ai-test/help-layout-test.ts \
+     assets/scripts/core/{HuChecker,HuScore,Tile,TileDefine,Meld}.ts
+node temp/help/tools/ai-test/help-layout-test.js
+# 设置规则页版式(读 MenuUI.ts, 不需要编译依赖)
+node "$TSC" --target ES2020 --module commonjs --strict false --skipLibCheck \
+     --outDir temp/l tools/ai-test/rules-layout-test.ts
+node temp/l/tools/ai-test/rules-layout-test.js
+```
+
+两个脚本都从源码提取常量后**复刻排版算术**，断言：各段间距 > 0 且与常量一致、
+内容/视口/滚动量合理、文字框逐行放得下（字号加大后最容易超宽）、
+阅读底板与滚动条到位、原生补画接线齐全（说明页还打真实 `computeHu` 对番数）。
+出图：`python tools/preview-menu.py`（主菜单 / 设置页 / 设置页滚到底 / 说明页 / 说明页竖屏）。
+
+> 写这类脚本时注意：**跨行拼接的字符串常量不能按"第一个分号"截断** ——
+> 文案里本身就有分号（`RULES_TIPS_TEXT` 就踩了），要取行尾那个分号，
+> 并且把源码里的 `\n` 转义还原成真换行，否则"三行"的断言会全部落空。
+
+### 6i. 菜单三页切换：淡出 → 淡入，只动 UIOpacity
+
+主页面 / 设置规则 / 玩法说明三页的切换统一走 `MenuUI._beginShow(to)`
+（`showHome` / `showRules` / `showHelp` 都是它 + 各自的补画），
+`PAGE_FADE_OUT = 0.12s` → `PAGE_FADE_IN = 0.16s`（总 0.28s，看得出来但不拖沓）。
+
+**三条硬规则**（踩过才知道为什么这么写）：
+
+1. **过渡只碰 `UIOpacity`，不动位置/尺寸/层级**。布局仍由各自的构建函数定稿，
+   于是"被打断 / 被跳过 / 在原生平台被隐藏"都不会留下半透明或半位移的残留。
+2. **`_currentPage` 在开始切换那一刻就更新为目标页** —— "过渡中"不需要额外标志位，
+   重复调用自然落到"已在目标页"这一支（只强制 `active=true` + `opacity=255`）。
+   首次显示（`_currentPage` 为空，启动时 `onLoad → showHome`）不播动画，第一帧就该是主页面。
+3. **每次切换递增 `_transitSeq`，回调里比对后作废过期动作**。旧补间里
+   "淡出结束后隐藏旧页"那一刀可能正指向这一次的**目标页**：
+   快速连点两次会让旧回调把刚淡入的页隐藏掉 —— 表现为"点了没反应"。
+   切换开始时还要 `Tween.stopAllByTarget()` 掉两个页面上的旧补间。
+
+`onDestroy()` 必须停掉三页上的补间（目标 UIOpacity 会随节点销毁，留着的补间会写已销毁组件）。
+
+改动后跑：
+
+```bash
+node "$TSC" --target ES2020 --module commonjs --strict false --skipLibCheck \
+     --outDir temp/v tools/ai-test/menu-fade-test.ts
+node temp/v/menu-fade-test.js
+```
+
+它用假的 `tween`/`Tween` 跑**真实的 `_beginShow` 方法体**（不是复刻排版），
+断言首显无补间、切换两条补间的时长与延迟、播完后的最终状态，
+以及连点打断 / 过期回调作废 / 三页互斥这些只在真机上手才看得见的分支。
+
+### 6j. 跨会话战绩：生涯长期保留，比分快照随会话结束清除
+
+2026-10-16 新增（用户要求：累计分/连庄退出应用即清零，生涯统计要跨会话；
+顺带解决"切后台被杀后比分丢失"）。
+
+数据分两层，**生命周期不同，别混为一谈**：
+
+| 数据 | 内容 | 什么时候写 | 什么时候清 |
+|---|---|---|---|
+| 生涯统计（`CareerStats`） | 总局数 / 胡牌次数 / 最高番 / 最高连庄 | 每局结算 | 永不（除非加"清空战绩"入口） |
+| 会话快照（`SessionSnapshot`） | 四家累计分 + 连庄 | 每局结算 | **只有** `stopGame()`（返回主页面） |
+
+要点：
+
+- **落盘点只有一个**：`GameManager._endGame()`（胡牌与流局都走它），且必须在
+  `onSettle` **之前** —— 结算面板显示的就是更新后的生涯。
+- **恢复要能重试**：`onLoad` 与 `startGame` 各调一次 `_restoreSession()`。
+  原生平台的 `sys.localStorage` 是 `sys.init()` 里**异步**挂上去的（之前它是个空对象，
+  `getItem` 根本不存在），`onLoad` 那会儿多半还没就绪。`_restoreSession` 里"已经打过局
+  就不再覆盖"的守卫不能删 —— 否则中途恢复会把这一局的分冲掉。
+- **主动退出才清零**：切后台被杀、应用被回收都不算"结束会话"，所以只有
+  `stopGame()` 调 `clearSession()`。这也正是这次要解决的问题本身。
+- **存档"只读不写"的守卫不能删**：`CareerStore._ready()`。存储没就绪时 `_save()`
+  必须直接返回 —— 否则会用内存里的空战绩**覆盖真存档**，历史成绩静默丢失且不报错。
+  同理 `_ensureLoaded()` 只有在 `_ready()` 为真时才置 `_loaded`。
+- **生涯统计是玩家口径**：只记"你"。流局涨局数，但不涨胡牌次数与最高番
+  （没胡的一局 `fan` 传 0，不该把纪录刷成 0）。
+- 一分两层：`CareerStats.ts` 只管"怎么算 / 怎么编解码"（纯函数，能 node 直跑），
+  `CareerStore.ts` 只管"存到哪"（import `sys`，与 `GameRules.ts` 同一条分层例外）。
+
+```bash
+node "$TSC" --target ES2020 --module commonjs --strict false --skipLibCheck \
+     --outDir temp/career tools/ai-test/career-persona-test.ts \
+     assets/scripts/game/CareerStats.ts assets/scripts/game/AIPersona.ts
+node temp/career/tools/ai-test/career-persona-test.js
+```
+
+### 6k. AI 拟人化：名字只能两个字，胡牌台词走结算面板
+
+三家 AI 有名字与口头禅（`game/AIPersona.ts`，纯数据）。**只影响表现层**，
+不参与任何决策计算 —— AI 强度恒为满能力档（硬约束 11）。
+
+- **名字必须是 2 个汉字**。凡是显示座位名的地方（比分条四枚芯片、`xx·听` 标记、
+  结算名牌）都是按"上家 / 左家 / 右家"这两个字的宽度排的，换成两字人名宽度分毫不差；
+  三个字就会把比分条撑到整体缩放。名字出口只有 `GameManager.seatLabel()`，
+  方位词 `SEAT_NAMES` 只留给日志与"吃/碰/杠来源"那种单字小牌子。
+- **碰 / 杠 → 气泡，胡 / 点炮 → 结算面板**。牌桌气泡走 `onAISpeech`；但胡牌那一刻
+  结算面板立刻用整屏遮罩盖住牌桌，此时冒气泡 = 闪一下就没了，所以那句台词随
+  `SettlementData.speech` 显示在面板的"四家手牌"那一行右侧
+  （`_showAISpeech` 里 `if (this._settlement?.isOpen) return` 是同一件事的另一半）。
+- **吃不给台词**（频率高得多，每次都说话就是噪音；与震动同一口径）。
+- **气泡贴在自己手牌上**：牌桌中间那条纵向带在横屏只有 10~100px（硬约束 2），
+  浮过去必然压牌河或转盘；自己那排牌背上没有"正在变化的信息"，盖一两秒无妨，
+  而且位置本身就是主语。左右两家再往外挪 `SPEECH_SIDE_DX`（60px）——
+  侧边手牌的内侧就是自家弃牌河，残局第三排时牌河外沿已经快贴到手牌列了。
+  `career-persona-test` 的 B4 组按最坏文案逐比例算过这些间隙。
+- **计时用数组而不是 `scheduleOnce`**：一条台词 1.6 秒，而重开/返回随时会打断，
+  排队的回调得逐个 `unschedule` 才清得干净；用"剩余秒数"跟着 `update` 走，
+  `_clearTable()` 里把 `_aiBubbleHold` / `_aiBubbleFade` 归零就结束了
+  （这两个字段已加进 `state-cleanup-test` 的 A 组字段表）。
 
 ### 7. 牌对象是引用，不是拷贝
 
@@ -383,7 +648,55 @@ node temp/v/voice-timing-test.js
 副露→下一张牌名不重叠，外加状态机完整性断言。
 **换一批更长的语音就会重新叠上**，而这在编辑器里看不出来，必须真机听。
 
+### 11d. 震动反馈：碰杠震一下，胡牌重一点，流局不震
+
+反馈在 `assets/scripts/feedback/Haptics.ts`（只依赖 `cc` 的 `sys`，无节点依赖），
+两个入口：`vibrateMeld()` 30ms、`vibrateHu()` 60ms。接线点同样在 `Main.ts`：
+
+| 事件 | 回调 | 条件 |
+|---|---|---|
+| 碰/杠（自家与 AI 都震，与语音同口径） | `onMeld` | `meld.type !== 'chi'` |
+| 胡牌 | `onSettle` | `data.kind === 'hu'` |
+
+**四个必须记住的点**：
+
+1. **胡牌震动不能挂 `onHu`** —— 与 11b 同理，流局也会走 `_fireHu`。
+2. **吃牌不震**：吃只在下家，频率高于碰杠，每次都震会变成噪音；
+   "改变局面"的是碰杠（抢别人的牌）与胡牌。
+3. **原生接口收"秒"，Web 收"毫秒"**：`cc::Device::vibrate(float seconds)`，
+   所以模块里用毫秒定义、调用处 `ms / 1000`。iOS 上引擎 3.8 的 Vibrator 是空实现，
+   照常调用、不特判。
+4. **jsb 上 `Device`/`device` 两种大小写都要探测**：引擎各版本绑定名不一致，
+   且 `temp/declarations/jsb.d.ts` 里**没有** `vibrate` 的类型声明 ——
+   只能运行期探测，谁有 `vibrate` 用谁，都没有就静默跳过，全程 `try/catch`。
+
+**Android 必须声明 `android.permission.VIBRATE`，否则真机不会震（也不报错）**：
+引擎 Java 侧把 `SecurityException` 吞了，而 baseline APK 是从引擎模板出的，
+模板清单里**没有**这条权限。所以：
+
+- `native/engine/android/app/AndroidManifest.xml` 已补上（走完整构建时用得到）；
+- 快迭代（`tools/patch-apk.ps1`）解包后、repack **之前**调
+  `tools/patch_manifest_vibrate.py` 往**二进制 AXML**里注入（幂等，已有则跳过）。
+  顺序不能反，否则打包的还是旧清单。
+
+改动后跑：
+
+```bash
+node "$TSC" --target ES2020 --module commonjs --strict false --skipLibCheck \
+     --outDir temp/v tools/ai-test/haptics-test.ts
+node temp/v/haptics-test.js
+```
+
+它复核平台守卫、时长口径、Main 接线（含"流局不震"）、权限链顺序，
+并在 `temp/apkpatch/` 有产物时**直接读二进制 manifest**核对 VIBRATE 与根 chunk 尺寸。
+**权限漏了在电脑上看不出任何异常**，只有真机不震 —— 必须机器复查。
+
 ### 12. 设置页是全屏 + 滚动，没有居中面板
+
+> **2026-10-16 晚补充**：用户随后反馈"文字和背景密密麻麻"，于是这一页**改成了可滚动**
+> （字号 30→36 / 20→26，内容比视口高 175px）并加了整页阅读底板 —— 见硬约束 6h。
+> 下面这段"9 行一屏就装得下"的历史结论**只说明当时的取舍**，别再拿它当"必须一屏装下"的依据；
+> 但"不要居中深色面板"这条仍然有效（面板白吃上下各 50px，滚动也救不回那种浪费）。
 
 规则页**不要**再画居中深色面板。曾经的 `PANEL_H=940` 装在 `MENU_CONTENT_H=1040` 里，
 内部可用纵向只有 703px，导致 9 个"标题+说明"的选项（每行 76px，需 998px）根本排不下 ——
@@ -645,6 +958,7 @@ node <out>/temp/hutest/main.js
 | `strategy-test.ts` | 难度分档行为 + 三档强度对比 | 全部通过；强档胜快档 >5pt 且场均分更高 |
 | `perf-test.ts` | 单回合决策耗时 | expert ≈ 0.3ms（远小于最短延时 220ms） |
 | `timeout-test.ts` | 20 秒决策超时与自动动作 | 全部通过（从真实源码提取 `update()` 执行） |
+| `career-persona-test.ts` | 生涯统计口径 / 存档编解码 / AI 名字台词 / 战绩与台词的接线与气泡落位 | 全部通过 |
 
 跑法（`TSC` 路径同上）：
 
@@ -667,7 +981,7 @@ node temp/aitest/tools/ai-test/perf-test.js
 GameManager 持有牌局状态与规则，通过 onXxx 回调通知 UI：
   onHandChanged / onDiscardChanged / onPhaseChanged / onAIHandChanged / onAIDiscard
   onMeld / onPlayerMeldChoice / onTenpai / onTenpaiChanged / onNotice
-  onHu / onReveal / onSettle
+  onHu / onReveal / onSettle / onAISpeech
 ```
 
 改玩法逻辑**只动 `GameManager`**，不要在 UI 里写规则。新增回调记得在 `Main._registerEvents()` 里接上。
@@ -681,9 +995,14 @@ GameManager 持有牌局状态与规则，通过 onXxx 回调通知 UI：
 
 ### 计分口径
 
-- 番型在 `core/HuScore.ts`，底分 1 分、每番翻倍、8 番封顶
+- 番型在 `core/HuScore.ts`：**`FAN_DEFS` 是唯一真源**（名称 / 番数 / 说明），
+  `computeHu` 通过 `pushFan` 从中取番数，玩法说明页渲染同一张表（见硬约束 6h）；
+  底分 1 分、每番翻倍、8 番封顶（= 256 分），连庄最多 `STREAK_FAN_MAX`(3) 番
+- 支付：自摸 = 三家各付一份；点炮 / 抢杠 = 付分方一次付清（一炮多响时付给每个赢家）；
+  流局不得分且连庄不中断
 - `HuChecker.analyze()` 返回牌型拆解，**同一手牌多种拆法时优先返回对对胡**（番数更高）
-- `_scores` / `_streaks`（累计分 / 连庄）**跨局保留**，只有 `stopGame()` 清零 —— 单局内不可能有第二次连庄
+- `_scores` / `_streaks`（累计分 / 连庄）**跨局保留**，只有 `stopGame()` 清零 —— 单局内不可能有第二次连庄。
+  2026-10-16 起每次结算还会落盘，下次启动自动恢复（详见硬约束 6j）
 
 ---
 
@@ -697,7 +1016,7 @@ GameManager 持有牌局状态与规则，通过 onXxx 回调通知 UI：
 node <workspace>/node_modules/typescript/bin/tsc --noEmit --skipLibCheck -p tsconfig.json
 ```
 
-`UIFactory.ts:757` 有一处**历史遗留**报错（`{x,y}` 传给要 `Vec3` 的参数），不是新引入的。
+当前**全绿**（历史遗留的 `UIFactory` 类型错误已于 2026-10-16 修复）。
 
 **2. 视改动类型选验证方式**
 

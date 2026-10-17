@@ -80,8 +80,9 @@ export const SUIT_SORT_WEIGHT: Record<number, number> = {
 };
 
 /** 各花色背景色 (R, G, B)
- *  统一为纯白: 牌面图片(resources/tiles 下的 jpg, 75×100=3:4)底色就是纯白,
- *  牌身与图片同色后, 图片四周那一圈牌身不再显出"米白边框", 整张牌看起来没有边框 */
+ *  统一为纯白: 与牌面素材(resources/tiles 下的 png, 75×100=3:4)的白底一致。
+ *  ⚠️ 2026-10-16 起牌面按素材 1:1 平铺(图片模式会隐藏程序化牌身), 这组颜色
+ *  只在**图片缺失的兜底模式**下可见(矢量图案/文字画在白色牌身上)。 */
 export const SUIT_BG_COLORS: Record<number, [number, number, number]> = {
     [TileSuit.WAN]:  [255, 255, 255],
     [TileSuit.TIAO]: [255, 255, 255],

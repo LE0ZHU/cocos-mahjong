@@ -2,6 +2,7 @@ import { AIContext, AIBrain, DiscardEval, MeldEval } from './AIBrain';
 import { MeldCandidate } from '../core/MeldDetector';
 import { Tile } from '../core/Tile';
 import { Shanten } from '../core/Shanten';
+import { SUIT_CHARS, TileSuit } from '../core/TileDefine';
 
 /**
  * AI 提示(玩家求助) —— 纯逻辑, 不依赖引擎
@@ -158,6 +159,45 @@ export class HintAdvisor {
             }],
             tone: 'good',
         };
+    }
+
+    // ==================== 听牌详情文案(信息栏常驻) ====================
+
+    /**
+     * 听牌详情一行文案: "3/6萬 1/4條 · 余 5 张"(不含"听"字前缀, 由调用方拼)
+     *
+     * 【为什么用"实际剩余张数"而不是有效进张种类数】见硬约束 13d:
+     * 玩家问"还有几张能等"时想听的永远是张数。单钓只剩 2 张时种类数是 1,
+     * 说"1 张进张"会让玩家按错误的数判断 —— 这里与 `DiscardEval.ukeireTiles`
+     * 是同一个口径, 由 GameManager 统一算好传进来。
+     *
+     * @param waiting 听牌张(HuChecker 口径, 每型一张)
+     * @param remain 剩余可胡张数 = Σ(4 − 可见张数)
+     */
+    static tenpaiText(waiting: Tile[], remain: number): string {
+        return `${HintAdvisor.waitingText(waiting)} · 余 ${remain} 张`;
+    }
+
+    /**
+     * 听牌张的紧凑文字: "3/6萬 1/4條 东/中"
+     *
+     * 数牌按花色分组(万→条→筒, 与理牌顺序一致), 组内点数用阿拉伯数字 + 斜杠 ——
+     * 常驻信息栏很窄(手牌右侧那条), 全用汉字("三萬六萬")会占两倍宽度;
+     * 字牌没有点数可合并, 逐张列。
+     */
+    static waitingText(waiting: Tile[]): string {
+        const groups: string[] = [];
+        for (const suit of [TileSuit.WAN, TileSuit.TIAO, TileSuit.TONG]) {
+            const ranks: number[] = [];
+            for (const t of waiting) if (t.suit === suit) ranks.push(t.rank);
+            if (ranks.length === 0) continue;
+            ranks.sort((a, b) => a - b);
+            groups.push(`${ranks.join('/')}${SUIT_CHARS[suit]}`);
+        }
+        const honors: string[] = [];
+        for (const t of waiting) if (!t.isNumberTile) honors.push(t.displayText);
+        if (honors.length > 0) groups.push(honors.join('/'));
+        return groups.join(' ');
     }
 
     // ==================== 文案组织 ====================

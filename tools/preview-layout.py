@@ -11,7 +11,7 @@
 """
 import math
 import os
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 # ===== Main.ts 中与尺寸无关的常量 =====
 CONTENT_W = 1680
@@ -97,15 +97,35 @@ class Variant:
         return min(full, (usable_half * 2) / ((count - 1) * cos))
 
 
+# ===== 桌面几何与"牌能摆多高"(镜像 Main.ts 的 TABLE_* / FELT_TILE_HALF) =====
+TABLE_FAR_HH = 530
+FELT_TILE_TOP = 492       # 毡布上沿 497.75 再留 6
+FELT_TILE_BOTTOM = 520    # 毡布下沿 -526 再留 6
+
+
+def table_scale(half_h):
+    """镜像 Main._applyTableScale: 屏幕比 16:9 更方时桌面按比例放大, 永远比可见区大一圈"""
+    return max(1.0, (half_h + 10) / TABLE_FAR_HH)
+
+
 OLD = Variant('before', 36, 7, (34, 22, 26), (2, 1, 2), 68, False, 86 / 68, 3,
               ai_layout=OLD_AI_LAYOUT)
 NEW = Variant('after', 44, 9, (42, 28, 32), (3, 1, 2), 52, True, 1.27, 1,
               meld_matches_river=True, river_squash=1.0, side_river_inward=False, side_river_cols=7)
+# 当前 Main.ts 的真实参数(上家牌 36 宽、牌间距 0、副露同牌河), 专门给平板适配对照用
+CURRENT = Variant('current', 44, 9, (44, 44, 44), (0, 0, 0), 52, True, 1.27, 1,
+                  meld_matches_river=True, river_squash=1.0, side_river_inward=False,
+                  side_river_cols=7, top_tile_w=36, top_tile_gap=0, side_tile_gap=0)
 
 def resolve_layout(v, design_w, design_h):
     """复刻 _applyAdaptation + _applyLayout,返回内容坐标下的排版结果"""
     scale = design_w / CONTENT_W
     half_h = (design_h / 2) / scale
+    k = table_scale(half_h)
+    # 牌位可用半高: 屏幕越方, 可见半高越大, 但桌面只有那么大 —— 必须夹住, 否则牌摆到桌外。
+    # 毡布上下不对称(近端更低), 所以上下各夹一次
+    top_half = min(half_h, FELT_TILE_TOP * k)
+    bottom_half = min(half_h, FELT_TILE_BOTTOM * k)
 
     riv_h = tile_h(v.river_w)
     top_tile_h = tile_h(v.top_tile_w)
@@ -113,11 +133,11 @@ def resolve_layout(v, design_w, design_h):
     top_meld_h = tile_h(v.meld_width(1)) if not v.meld_matches_river else riv_h
     gap = MELD_MARK_GAP
 
-    hand_y = -half_h + TILE_H / 2 + 8
+    hand_y = -bottom_half + TILE_H / 2 + 8
     meld_y = hand_y + TILE_H / 2 + meld_h / 2 + gap
     disc_y = meld_y + meld_h / 2 + riv_h / 2 + gap
 
-    top_hand_y = half_h - 8 - top_tile_h / 2
+    top_hand_y = top_half - 8 - top_tile_h / 2
     top_meld_y = top_hand_y - top_tile_h / 2 - top_meld_h / 2 - gap
     top_disc_y = top_meld_y - top_meld_h / 2 - riv_h / 2 - gap
     # 临时提示(听牌/胡牌)给上家牌河让位几行
@@ -129,7 +149,8 @@ def resolve_layout(v, design_w, design_h):
     avail = min(-bottom_river_top, top_river_bottom) - 6
     v.disc_r = max(v.disc_r_min, min(v.disc_r_max, avail)) if v.disc_adaptive else v.disc_r_max
 
-    return dict(scale=scale, half_h=half_h, riv_h=riv_h, meld_h=meld_h, top_meld_h=top_meld_h,
+    return dict(scale=scale, half_h=half_h, top_half=top_half, bottom_half=bottom_half, table_k=k,
+                riv_h=riv_h, meld_h=meld_h, top_meld_h=top_meld_h,
                 hand_y=hand_y, meld_y=meld_y, disc_y=disc_y,
                 top_hand_y=top_hand_y, top_meld_y=top_meld_y, top_disc_y=top_disc_y,
                 info_y=info_y, disc_r=v.disc_r, tip=v.disc_r * v.tip_ratio)
@@ -194,21 +215,25 @@ class Painter:
         self.poly(pts, fill=fill, outline=outline, width=width)
 
 
-def draw_table(p, v):
+def draw_table(p, v, k=1.0):
     """镜像 Main.ts 的 _buildTable()。
 
     桌面倒角/毡布用横向色带做光照渐变(远端受光偏亮、近端沉暗),
     台面不再有平涂浅绿色块。改 Main.ts 时必须同步改这里, 否则预览会骗人。
+
+    k = 桌面整体缩放(镜像 Main._applyTableScale): 所有梯形尺寸连同线宽一起乘 k。
     """
     NEAR_HH, FAR_RATIO, FAR_HH = 560, 0.78, 530
 
     def trap(hwb, hh, fill=None, outline=None, width=1):
+        hwb, hh, width = hwb * k, hh * k, width * k
         hwt = hwb * FAR_RATIO
         hhf = hh * (FAR_HH / NEAR_HH)
         p.poly([(-hwb, -hh), (hwb, -hh), (hwt, hhf), (-hwt, hhf)], fill=fill, outline=outline, width=width)
 
     def trap_bands(hwb, hh, col_far, col_near, bands=72):
         """在梯形内画横向色带, 由远及近插值 —— 光照渐变"""
+        hwb, hh = hwb * k, hh * k
         hwt = hwb * FAR_RATIO
         hhf = hh * (FAR_HH / NEAR_HH)
         band_h = (hh + hhf) / bands
@@ -385,7 +410,7 @@ def render(v, design_w, design_h, discards, filename):
     lay = resolve_layout(v, design_w, design_h)
     img = make_canvas(design_w, design_h)
     p = Painter(img, lay['scale'], design_w, design_h)
-    draw_table(p, v)
+    draw_table(p, v, lay['table_k'])
 
     # 中央转盘
     R = draw_disc(p, v, lay)
@@ -411,6 +436,91 @@ def render(v, design_w, design_h, discards, filename):
 
     img.save(filename)
     return lay
+
+
+# ===== 平板适配对照(3:2 / 4:3) =====
+FELT_NEAR_Y, FELT_FAR_Y = -526.0, 526.0 * (530 / 560)    # 毡布梯形上下沿(桌面坐标)
+
+
+def felt_half_width(y_table):
+    """毡布在桌面坐标 y 处的半宽(与 _buildTable 的梯形一致)"""
+    near_w, far_w = 786.0, 786.0 * 0.78
+    t = (y_table - FELT_NEAR_Y) / (FELT_FAR_Y - FELT_NEAR_Y)
+    return near_w + (far_w - near_w) * t
+
+
+def _corners(cx, cy, w, h, ang):
+    """矩形四角(与 Painter.rect_rot 同一套旋转约定)"""
+    a = math.radians(ang)
+    ca, sa = math.cos(a), math.sin(a)
+    return [(cx + dx * ca - dy * sa, cy + dx * sa + dy * ca)
+            for dx, dy in ((-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2))]
+
+
+def check_fit(lay, discards=14):
+    """所有牌是否有角跑到毡布外: 返回 (最大溢出px, 出处; <=0 表示全在桌上)"""
+    k = lay['table_k']
+    worst, where = -1e9, '全部在桌上'
+    for seat in range(4):
+        for cx, cy, w, h, ang in (hand_tiles(seat, CURRENT, lay, 13)
+                                  + river_tiles(seat, CURRENT, lay, discards)
+                                  + meld_tiles(seat, CURRENT, lay)):
+            for x, y in _corners(cx, cy, w, h, ang):
+                ty, tx = y / k, x / k
+                if ty > FELT_FAR_Y:
+                    over = (ty - FELT_FAR_Y) * k
+                elif ty < FELT_NEAR_Y:
+                    over = (FELT_NEAR_Y - ty) * k
+                else:
+                    over = (abs(tx) - felt_half_width(ty)) * k
+                if over > worst:
+                    worst, where = over, f'seat{seat} @({x:.0f},{y:.0f})'
+    return worst, where
+
+
+def edge_margins(lay):
+    """上家手牌上沿 / 自家手牌下沿 到毡布上下沿的余量(屏幕像素)"""
+    k = lay['table_k']
+    top_h = tile_h(CURRENT.top_tile_w) / 2
+    top = (FELT_FAR_Y - (lay['top_hand_y'] + top_h) / k) * k
+    bottom = lay['hand_y'] - TILE_H / 2 - FELT_NEAR_Y * k
+    return top, bottom
+
+
+def main_tablet():
+    """平板(3:2)与 iPad(4:3)的适配对照: 桌面是否溢出屏幕、牌是否还在桌上"""
+    cases = [('16:9 参照 (1680x945)', 1680, 945),
+             ('3:2 平板 (1680x1120)', 1680, 1120),
+             ('4:3 iPad (1680x1260)', 1680, 1260)]
+    f_label = ImageFont.truetype('C:/Windows/Fonts/msyh.ttc', 22)
+    rows = []
+    for label, dw, dh in cases:
+        f = f'tools/.preview-aspect-{dh}.png'
+        lay = render(CURRENT, dw, dh, 14, f)
+        over, where = check_fit(lay)
+        top_m, bot_m = edge_margins(lay)
+        print(f'[{label}] 可见半高={lay["half_h"]:.0f} 桌面缩放={lay["table_k"]:.3f} '
+              f'牌位半高={lay["top_half"]:.0f}/{lay["bottom_half"]:.0f} 盘半径={lay["disc_r"]:.0f} | '
+              f'上沿余量={top_m:.1f} 下沿余量={bot_m:.1f} | 越界={over:+.1f}px {where}')
+        img = Image.open(f).convert('RGB')
+        os.remove(f)
+        rows.append((label, img))
+
+    scale = 0.5
+    gap, pad_top = 12, 34
+    panels = [(t, im.resize((int(im.width * scale), int(im.height * scale)), Image.LANCZOS))
+              for t, im in rows]
+    tw = max(im.width for _, im in panels) + gap * 2
+    th = sum(im.height + pad_top + gap for _, im in panels)
+    out = Image.new('RGB', (tw, th), (18, 20, 24))
+    d = ImageDraw.Draw(out)
+    y = gap
+    for title, im in panels:
+        d.text((gap, y), title, font=f_label, fill=(232, 236, 240))
+        out.paste(im, (gap, y + pad_top))
+        y += im.height + pad_top + gap
+    out.save('tablet-preview.png')
+    print('saved tablet-preview.png', out.size)
 
 
 def main():
@@ -441,4 +551,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    import sys
+    if '--tablet' in sys.argv:
+        main_tablet()
+    else:
+        main()

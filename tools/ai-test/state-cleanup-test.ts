@@ -73,7 +73,14 @@ console.log('\n=== 跨局状态归零复核 ===\n');
 console.log('[A] 清牌桌时归零跨局状态');
 const clearTable = methodBody(mainCode, 'private _clearTable(');
 check(clearTable.length > 0, '_clearTable() 能定位到');
-for (const field of ['_handSlots', '_prevHandSlots', '_riverCount', '_handNodes', '_hintedTileIndex']) {
+for (const field of [
+    '_handSlots', '_prevHandSlots', '_riverCount', '_handNodes', '_hintedTileIndex',
+    // 2026-10-16 新增的两块常驻信息(比分条指纹 / 听牌芯片宽度):
+    // 不归零的话, 下一局会"指纹相同就不重建"或按上一局的宽度定位
+    '_scoreSig', '_tenpaiChipW',
+    // 2026-10-16 新增的 AI 台词气泡计时: 不清的话上一局那句"碰!"会飘到下一局
+    '_aiBubbleHold', '_aiBubbleFade',
+]) {
     // 必须**赋值**归零, 而不是只读一遍(读一遍等于没清)
     const assigned = new RegExp(`this\\.${field}\\s*(\\.clear\\(\\)|=)`).test(clearTable);
     check(assigned, `_clearTable() 归零了 ${field}`);
@@ -129,6 +136,30 @@ console.log('\n[D] 手牌数组保持纯 Node[]');
 check(
     !/_handNodes\s*=\s*new Array\([^)]*\)\.fill\(/.test(mainCode),
     '_handNodes 不用 fill(null)(用等长空洞)',
+);
+
+// ---------------------------------------------------------------- E 组
+// 牌桌类静态 Graphics: 只在首帧后画一次, 节点隐藏(回主页面)→ 再显示(再开局)
+// 之后顶点在原生平台会丢, 必须在进对局时补画(否则牌桌整块消失)
+console.log('\n[E] 返回主页面 → 再开局时补画牌桌静态图形');
+const showScene = methodBody(mainCode, 'private _showScene(');
+check(showScene.length > 0, '_showScene() 能定位到');
+check(
+    showScene.includes('_redrawTableGraphics'),
+    '_showScene() 进入对局时补画牌桌静态图形',
+);
+// 顺序: 必须先 active=true 再画 —— 画完再激活等于画在隐藏节点上, 同样会丢
+const activeAt = showScene.indexOf('_gameRoot.active = playing');
+const redrawAt = showScene.indexOf('_redrawTableGraphics()');
+check(activeAt >= 0 && redrawAt > activeAt, '补画排在 _gameRoot 激活之后');
+const redrawBody = methodBody(mainCode, 'private _redrawTableGraphics(');
+for (const call of ['_buildTable()', '_buildTurnPointer()', '_refreshWall()']) {
+    check(redrawBody.includes(call), `_redrawTableGraphics() 重画了 ${call}`);
+}
+// 首帧之前画同样会丢, 那一遍归 _drawStaticGraphics
+check(
+    redrawBody.includes('_staticGraphicsDrawn'),
+    '_redrawTableGraphics() 有 _staticGraphicsDrawn 守卫(首帧前不抢画)',
 );
 
 console.log(`\n${fails === 0 ? '全部通过' : fails + ' 项失败'}\n`);

@@ -58,6 +58,7 @@ export class TileView extends Component {
     private _labelWan: Label | null = null;    // 万子"萬"字
     private _pattern: Graphics | null = null;  // 矢量图案层(筒子/条子)
     private _face: Sprite | null = null;       // 真实牌面图片
+    private _bg: Node | null = null;           // 程序化牌身(仅图片缺失时兜底显示)
     private _imageMode = false;                // 是否使用图片牌面
     private _mark: Node | null = null;         // 刚摸到的牌高亮标注
     private _hintMark: Node | null = null;     // AI 建议打出的牌高亮标注
@@ -115,6 +116,7 @@ export class TileView extends Component {
         this._labelWan = this.node.getChildByName('LabelWan')?.getComponent(Label) ?? null;
         this._pattern = this.node.getChildByName('Pattern')?.getComponent(Graphics) ?? null;
         this._face = this.node.getChildByName('Face')?.getComponent(Sprite) ?? null;
+        this._bg = this.node.getChildByName('Bg') ?? null;
     }
 
     onDestroy(): void {
@@ -236,7 +238,7 @@ export class TileView extends Component {
         const patternNode = this._pattern ? this._pattern.node : null;
         const isPatternSuit = tile.suit === TileSuit.TONG || tile.suit === TileSuit.TIAO;
 
-        // ---- 牌面图片层: 有图片时使用真实牌面,并隐藏矢量图案与文字 ----
+        // ---- 牌面图片层: 有图片时完全按素材显示,并隐藏程序化牌身与文字 ----
         const sf = getTileSpriteFrame(tile);
         this._imageMode = !!sf && !!this._face;
         if (this._imageMode) {
@@ -244,12 +246,16 @@ export class TileView extends Component {
                 this._face.spriteFrame = sf;
                 this._face.node.active = true;
             }
+            // 素材图自带圆角透明边(tools/make-tile-faces.py 裁好), 程序化牌身必须让位:
+            // 否则四角会露出牌身的白底, 看起来像"给素材加了白边框"
+            if (this._bg) this._bg.active = false;
             if (patternNode) patternNode.active = false;
             if (labelNode) labelNode.active = false;
             if (labelWanNode) labelWanNode.active = false;
             return;
         }
-        // 无图片: 隐藏图片层,回退到原有矢量/文字绘制
+        // 无图片: 隐藏图片层, 恢复牌身, 回退到原有矢量/文字绘制
+        if (this._bg) this._bg.active = true;
         if (this._face) this._face.node.active = false;
 
         // ---- 图案层(筒子/条子) ----
@@ -484,25 +490,47 @@ export class TileView extends Component {
 }
 
 /**
+ * 牌面圆角比例 —— **必须与 `tools/make-tile-faces.py` 的 `RADIUS_RATIO` 相同**。
+ *
+ * 牌面是素材图 1:1 铺满整张牌, 牌的实际圆角就是"短边 × 12%"(那圈圆角是裁剪在
+ * 图片里的; 素材 75×100 → 9px, 手牌 63 宽时约 7.6px)。所以任何"沿着牌边画"的
+ * 东西(高光框 / 提示框 / 拖牌光晕)都必须用同一个比例, 否则角上的弧与牌边不同心:
+ * 弧线会在角的两侧"肩部"离牌边而去, 露出一道桌布色的缝隙 ——
+ * 看起来就是"金框和牌边不契合"。
+ */
+const TILE_RADIUS_RATIO = 0.12;
+
+/** 牌的实际圆角半径(与牌面素材的裁剪半径同一比例, 不要另取一套数字) */
+export function tileRadius(w: number, h: number): number {
+    return Math.min(w, h) * TILE_RADIUS_RATIO;
+}
+
+/**
  * 绘制"刚摸到"的牌的高亮标注:
  * 金色柔光底 + 外层发光描边 + 主体亮金描边,全部与牌身同心
  * (牌身已是平面牌面,这里若向下延伸会看着像立体底座,故四周对称外扩)
+ *
+ * 【描边为什么整个画在牌边之外】标注节点是牌的第一个子节点(画在牌身**之下**),
+ * 若路径正好压在牌边上, 内侧半个线宽会被不透明的牌面盖掉 —— 直边上只剩一条
+ * 1.5px 的细线, 而角上因为圆角不同心还会被吃掉更多, 于是框看起来"断开、有缝"。
+ * 现在路径按线宽的一半外扩(亮金 +1 / 柔光 +2.5), 描边落在牌边 -0.5 ~ +5.5,
+ * 内侧那 0.5 藏在牌下 → 描边看起来正好从牌边起笔, 一圈严丝合缝。
  */
 function drawDrawnMark(g: Graphics, w: number, h: number): void {
-    const r = Math.max(4, Math.min(w, h) * 0.12);
+    const r = tileRadius(w, h);
     // 金色柔光底(四周各外扩 5,与牌身同心)
     g.fillColor = new Color(255, 206, 96, 46);
     g.roundRect(-w / 2 - 5, -h / 2 - 5, w + 10, h + 10, r + 5);
     g.fill();
-    // 外层柔光描边
+    // 外层柔光描边: 路径外扩 2.5 / 线宽 6 → 落在牌边 -0.5 ~ +5.5
     g.strokeColor = new Color(255, 208, 110, 120);
-    g.lineWidth = 7;
-    g.roundRect(-w / 2, -h / 2, w, h, r + 2);
+    g.lineWidth = 6;
+    g.roundRect(-w / 2 - 2.5, -h / 2 - 2.5, w + 5, h + 5, r + 2.5);
     g.stroke();
-    // 主体亮金描边
+    // 主体亮金描边: 路径外扩 1 / 线宽 3 → 落在牌边 -0.5 ~ +2.5
     g.strokeColor = new Color(255, 232, 150, 255);
     g.lineWidth = 3;
-    g.roundRect(-w / 2, -h / 2, w, h, r + 2);
+    g.roundRect(-w / 2 - 1, -h / 2 - 1, w + 2, h + 2, r + 1);
     g.stroke();
 }
 
@@ -513,36 +541,40 @@ function drawDrawnMark(g: Graphics, w: number, h: number): void {
  *  - 金色柔光底已经是"刚摸到这张牌"的语言, 两者叠加就分不清了;
  *  - 建议牌往往正是刚摸到的那张, 两个标记同时出现是常态。
  * 青蓝是牌桌上没有的第三种信号色, 一眼能区分"系统说的"与"我刚摸的"。
+ *
+ * 圆角与描边位置和 `drawDrawnMark` 同一套(tileRadius + 线宽一半的外扩):
+ * 只是这个框画在牌身**之上**, 内侧 0.5 不会被牌面盖住, 直接压在牌边那半像素上。
  */
 function drawHintMark(g: Graphics, w: number, h: number): void {
-    const r = Math.max(4, Math.min(w, h) * 0.12);
+    const r = tileRadius(w, h);
     // 外层柔光(青蓝)
     g.strokeColor = new Color(110, 226, 224, 120);
-    g.lineWidth = 7;
-    g.roundRect(-w / 2 - 2, -h / 2 - 2, w + 4, h + 4, r + 3);
+    g.lineWidth = 6;
+    g.roundRect(-w / 2 - 2.5, -h / 2 - 2.5, w + 5, h + 5, r + 2.5);
     g.stroke();
     // 主体亮边
     g.strokeColor = new Color(178, 244, 240, 255);
     g.lineWidth = 3;
-    g.roundRect(-w / 2 - 2, -h / 2 - 2, w + 4, h + 4, r + 3);
+    g.roundRect(-w / 2 - 1, -h / 2 - 1, w + 2, h + 2, r + 1);
     g.stroke();
 }
 
 /**
  * 绘制拖牌时的"甩出去"提示光晕: 牌身外围一圈金色描边
- * (与 drawDrawnMark 的区别: 这里只画描边、不做柔光底,因为牌是悬空被拖着的)
+ * (与 drawDrawnMark 的区别: 这里只画描边、不做柔光底,因为牌是悬空被拖着的;
+ *  光圈比"刚摸到"再宽一点, 牌被抬起来之后才够显眼)
  */
 function drawDragGlow(g: Graphics, w: number, h: number): void {
-    const r = Math.max(4, Math.min(w, h) * 0.12);
-    // 外层柔光
+    const r = tileRadius(w, h);
+    // 外层柔光: 路径外扩 3 / 线宽 7 → 落在牌边 -0.5 ~ +6.5
     g.strokeColor = new Color(255, 214, 120, 110);
-    g.lineWidth = 8;
-    g.roundRect(-w / 2 - 1, -h / 2 - 1, w + 2, h + 2, r + 3);
+    g.lineWidth = 7;
+    g.roundRect(-w / 2 - 3, -h / 2 - 3, w + 6, h + 6, r + 3);
     g.stroke();
-    // 主体亮金描边
+    // 主体亮金描边: 路径外扩 1 / 线宽 3 → 落在牌边 -0.5 ~ +2.5
     g.strokeColor = new Color(255, 236, 168, 255);
     g.lineWidth = 3;
-    g.roundRect(-w / 2 - 1, -h / 2 - 1, w + 2, h + 2, r + 3);
+    g.roundRect(-w / 2 - 1, -h / 2 - 1, w + 2, h + 2, r + 1);
     g.stroke();
 }
 
