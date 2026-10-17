@@ -53,8 +53,8 @@ def const(name):
 
 
 CONTENT_W = const('CONTENT_W')
-TILE_W = const('BASE_TILE_W')
-TILE_H = const('BASE_TILE_H')
+TILE_W = const('BASE_TILE_W') * const('HAND_SCALE')   # 手牌额外放大(只作用于自家)
+TILE_H = const('BASE_TILE_H') * const('HAND_SCALE')
 TOP_TILE_W = const('BASE_TOP_TILE_W')
 RIVER_TILE_W = const('BASE_RIVER_TILE_W')
 MELD_MARK_GAP = const('MELD_MARK_GAP')

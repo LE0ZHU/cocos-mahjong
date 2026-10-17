@@ -56,8 +56,8 @@ def const(src, name):
 
 
 CONTENT_W = const(MAIN, 'CONTENT_W')
-TILE_W = const(MAIN, 'BASE_TILE_W')
-TILE_H = const(MAIN, 'BASE_TILE_H')
+TILE_W = const(MAIN, 'BASE_TILE_W') * const(MAIN, 'HAND_SCALE')   # 手牌额外放大(只作用于自家)
+TILE_H = const(MAIN, 'BASE_TILE_H') * const(MAIN, 'HAND_SCALE')
 TOP_TILE_W = const(MAIN, 'BASE_TOP_TILE_W')
 DISC_R_MAX = const(MAIN, 'TURN_DISC_R_MAX')
 

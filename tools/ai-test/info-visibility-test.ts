@@ -70,13 +70,37 @@ function strip(s: string): string {
     return s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 }
 
+/**
+ * 按大括号配平截取一个方法体。
+ *
+ * 别再用"从方法名起切固定长度"—— `_applyLayout` 每加一段就让后面的断言看不见,
+ * 表现出来是"功能明明还在却 FAIL"(2026-10-17 就踩过一次: 加了平板按钮分支后
+ * `_placeSeatPlates` 落到 4600 字符之外)。
+ */
+function bodyOf(code: string, signature: string): string {
+    const i = code.indexOf(signature);
+    if (i < 0) return '';
+    let depth = 0, started = false;
+    for (let j = code.indexOf('{', i); j < code.length; j++) {
+        const ch = code[j];
+        if (ch === '{') { depth++; started = true; }
+        else if (ch === '}') {
+            depth--;
+            if (started && depth === 0) return code.slice(code.indexOf('{', i), j + 1);
+        }
+    }
+    return '';
+}
+
 // ---- 提取真实常量 ----
 // 牌尺寸取 BASE_*(基准值): 本脚本校验的是**手机(倍率 1)**的排版。
 // 平板把牌按 TILE_SCALE_MAX 放大之后的净空由 tablet-layout-test.ts 的 E 组负责。
+// 手牌还要再乘 HAND_SCALE(只作用于自家手牌), 名牌 / 芯片的净空都按它算。
 const CONTENT_W = num(mainSrc, 'CONTENT_W');
+const HAND_SCALE = num(mainSrc, 'HAND_SCALE');
 const TOP_TILE_W = num(mainSrc, 'BASE_TOP_TILE_W');
-const TILE_W = num(mainSrc, 'BASE_TILE_W');
-const TILE_H = num(mainSrc, 'BASE_TILE_H');
+const TILE_W = num(mainSrc, 'BASE_TILE_W') * HAND_SCALE;
+const TILE_H = num(mainSrc, 'BASE_TILE_H') * HAND_SCALE;
 const RIVER_TILE_W = num(mainSrc, 'BASE_RIVER_TILE_W');
 const RIVER_GAP = num(mainSrc, 'RIVER_GAP');
 const MELD_MARK_GAP = num(mainSrc, 'MELD_MARK_GAP');
@@ -89,7 +113,8 @@ const SCORE_HAND_GAP = num(mainSrc, 'SCORE_HAND_GAP');
 const TENPAI_CHIP_H = num(mainSrc, 'TENPAI_CHIP_H');
 const TENPAI_FONT = num(mainSrc, 'TENPAI_FONT');
 const TENPAI_CHIP_PAD = num(mainSrc, 'TENPAI_CHIP_PAD');
-const TENPAI_CHIP_RIGHT = num(mainSrc, 'TENPAI_CHIP_RIGHT');
+const CHIP_EDGE_PAD = num(mainSrc, 'CHIP_EDGE_PAD');
+const TENPAI_MARK_H = num(mainSrc, 'TENPAI_MARK_H');
 const TENPAI_HAND_GAP = num(mainSrc, 'TENPAI_HAND_GAP');
 const CHIP_MIN_SCALE = num(mainSrc, 'CHIP_MIN_SCALE');
 
@@ -185,12 +210,15 @@ console.log('\n[1] 比分条: 左上角齿轮右侧那条净空里完整放得�
 }
 
 // ================================================================ 2
-console.log('\n[2] 听牌详情芯片: 手牌右侧那条净空里完整放得下');
+console.log('\n[2] 听牌详情芯片: 手牌右上角那条净空里完整放得下');
 {
-    const chipRight = halfW - TENPAI_CHIP_RIGHT;
-    // 右侧"你·听"标记: 中心 halfW−70, 宽 112(与 _applyLayout / createTenpaiChip 一致)
-    const tenpaiMarkLeft = halfW - 70 - 56;
-    check(chipRight < tenpaiMarkLeft, '听牌芯片在“你·听”标记左侧', `gap=${tenpaiMarkLeft - chipRight}`);
+    // 芯片右缘贴内容右边缘(见 Main._placeTenpaiChip; 手牌被 HAND_SCALE 放大后必须让位)
+    const chipRight = halfW - CHIP_EDGE_PAD;
+    // 与右侧"你·听"标记靠**纵向**错开: 芯片中心距手牌行中心 = max(TILE_H/2−7, 标记半高+芯片半高+8)
+    const chipDy = Math.max(TILE_H / 2 - 7, TENPAI_MARK_H / 2 + TENPAI_CHIP_H / 2 + 8);
+    const markTop = TENPAI_MARK_H / 2;
+    const chipBottom = chipDy - TENPAI_CHIP_H / 2;
+    check(chipBottom > markTop, '听牌芯片抬在“你·听”标记上方', `gap=${(chipBottom - markTop).toFixed(1)}`);
     // 满手 14 张时手牌右缘(最坏情况; 副露越多手牌越少)
     const handRight = (14 * TILE_W) / 2 + TENPAI_HAND_GAP;
     const maxW = chipRight - handRight;
@@ -335,7 +363,7 @@ console.log('\n[4] 行为约束(源码级)');
     const clearTable = main.slice(main.indexOf('private _clearTable()'), main.indexOf('private _clearTable()') + 2600);
     check(clearTable.includes('_hideTenpaiChip'), '_clearTable 收起听牌芯片(跨局不残留)');
     check(/_scoreSig\s*=\s*''/.test(clearTable), '_clearTable 清比分条指纹(下一局强制重建)');
-    const applyLayout = main.slice(main.indexOf('private _applyLayout('), main.indexOf('private _applyLayout(') + 4200);
+    const applyLayout = bodyOf(main, 'private _applyLayout(');
     check(applyLayout.includes('_scoreStrip?.setPosition'), '_applyLayout 定位比分条(转屏跟着走)');
     check(applyLayout.includes('_placeTenpaiChip'), '_applyLayout 重排听牌芯片');
     check(/_scoreStripMaxW\s*=/.test(applyLayout), '_applyLayout 算出比分条的可用宽度(供超长缩放)');
@@ -450,8 +478,7 @@ console.log('\n[5] 座位名牌(三家 AI: 名字 + 连庄角标): 贴着各自�
     const clearTable2 = code.slice(code.indexOf('private _clearTable()'),
         code.indexOf('private _clearTable()') + 3000);
     check(/_seatPlateSig\s*=\s*''/.test(clearTable2), '_clearTable 清名牌指纹(跨局不残留)');
-    const applyLayout2 = code.slice(code.indexOf('private _applyLayout('),
-        code.indexOf('private _applyLayout(') + 4600);
+    const applyLayout2 = bodyOf(code, 'private _applyLayout(');
     check(applyLayout2.includes('_placeSeatPlates') && applyLayout2.includes('_topHandY'),
         '_applyLayout 重摆名牌(转屏跟着走)');
     check(!/createLabelNode\([^)]*'你'/.test(code), '没有"你"的名牌(自己不需要身份提示)');

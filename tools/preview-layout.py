@@ -17,7 +17,8 @@ from PIL import Image, ImageDraw, ImageFont
 CONTENT_W = 1680
 BASE_W, BASE_H = 1920, 1080
 TILE_H_RATIO = 4 / 3             # 所有牌统一宽高比 3:4(与 Main.ts 一致)
-TILE_W, TILE_H, TILE_GAP = 63, 84, 4          # 自家手牌(三家 AI 手牌现在同尺寸)
+TILE_W, TILE_H, TILE_GAP = 63, 84, 4          # 自家手牌基准(实际还有 HAND_SCALE)
+HAND_SCALE = 1.13                              # 镜像 Main.HAND_SCALE: 只手牌再放大一圈
 MELD_MARK_GAP = 24
 DEFAULT_AI_LAYOUT = [               # [hx, 横向, dx]
     (0, True, 0),                   # 上家
@@ -105,7 +106,7 @@ FELT_TILE_BOTTOM = 520    # 毡布下沿 -526 再留 6
 
 # ===== 牌尺寸的屏幕比例适配(镜像 Main._applyTileScale) =====
 TILE_REF_HALF_H = 472.5   # 牌尺寸 1:1 的基准可见半高(= 16:9 的 840 × 9/16)
-TILE_SCALE_MAX = 1.14     # 上限: 满手 14 张要让开"提示"按钮右缘
+TILE_SCALE_MAX = 1.4      # 上限: 卡在"9 张牌河不撞左右家牌河"上(见 Main.TILE_SCALE_MAX)
 
 
 def tile_scale(half_h):
@@ -132,9 +133,10 @@ def resolve_layout(v, design_w, design_h):
     scale = design_w / CONTENT_W
     half_h = (design_h / 2) / scale
     k = table_scale(half_h)
-    # 牌尺寸也跟着可见高度放大(平板), 否则牌相对被放大的桌面会明显偏小
+    # 牌尺寸也跟着可见高度放大(平板), 否则牌相对被放大的桌面会明显偏小;
+    # 自家手牌再乘 HAND_SCALE, 三家 AI / 牌河 / 副露都只看 tk
     tk = tile_scale(half_h)
-    tile_w, tile_h_full = TILE_W * tk, TILE_H * tk
+    tile_w, tile_h_full = TILE_W * tk * HAND_SCALE, TILE_H * tk * HAND_SCALE
     # 牌位可用半高: 屏幕越方, 可见半高越大, 但桌面只有那么大 —— 必须夹住, 否则牌摆到桌外。
     # 毡布上下不对称(近端更低), 所以上下各夹一次
     top_half = min(half_h, FELT_TILE_TOP * k)
