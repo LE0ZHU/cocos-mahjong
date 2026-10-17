@@ -261,6 +261,14 @@ export class GameManager extends Component {
     /** 玩家可吃/碰/杠/吃胡: 需要 UI 弹出选择面板,玩家决策后调用 resolvePlayerMeld */
     onPlayerMeldChoice: ((request: MeldPromptRequest) => void) | null = null;
     /**
+     * 副露选择面板经**非点击**路径关闭时通知 UI 收面板
+     *
+     * 面板是 UI 弹的, 逻辑层"自动过"了它不会自己消失 —— 超时分支与
+     * `cancelPendingMeld`(重开/返回主页都经过它)都会触发;
+     * 玩家点按钮的路径 UI 自己就收了, 这里再收一次是幂等的。
+     */
+    onMeldPromptClosed: (() => void) | null = null;
+    /**
      * 听牌详情变化(玩家): 未听牌/牌局结束给 null
      *
      * 与 `onTenpai` 的分工: 这个是**状态**("现在听什么、还剩几张"),
@@ -924,18 +932,24 @@ export class GameManager extends Component {
         });
     }
 
-    /** 副露牌面文字: 触发牌 + 所用的手牌,按点数排序,如 "三四万"、"五筒" */
+    /**
+     * 副露牌面文字: 触发牌 + 所用的手牌,按点数排序,如 "三四萬"、"五筒"
+     *
+     * 【碰/杠只报一张】碰/杠的几张牌**完全相同**, "五萬五萬五萬"又长又重复,
+     * 还会把选择按钮撑出边框(2026-10-17 用户反馈); 吃才需要报整组点数
+     * ("三四五萬" —— 几种吃法就靠它区分)。
+     */
     private _meldTilesText(candidate: MeldCandidate, sourceTile: Tile | null): string {
         const all = sourceTile ? [...candidate.handTiles, sourceTile] : [...candidate.handTiles];
         if (all.length === 0) return '';
         const first = all[0];
         const sorted = all.slice().sort((a, b) => a.rank - b.rank);
-        // 数牌(万/条/筒)简化成 "点数+花色",如 三四万 / 五筒;字牌直接用单字
-        if (first.isNumberTile) {
-            const nums = sorted.map(t => CN_NUMERALS[t.rank - 1]).join('');
-            return `${nums}${SUIT_CHARS[first.suit]}`;
+        if (!first.isNumberTile) return sorted[0].displayText;
+        if (candidate.type !== 'chi') {
+            return `${CN_NUMERALS[first.rank - 1]}${SUIT_CHARS[first.suit]}`;
         }
-        return sorted.map(t => t.displayText).join('');
+        const nums = sorted.map(t => CN_NUMERALS[t.rank - 1]).join('');
+        return `${nums}${SUIT_CHARS[first.suit]}`;
     }
 
     /**
@@ -1014,6 +1028,9 @@ export class GameManager extends Component {
     cancelPendingMeld(): void {
         this._awaitingPlayerMeld = false;
         this._clearPendingChoice();
+        // 挂起作废 = 面板也该撤下(重开/返回主页/副露确定都经过这里),
+        // 通知 UI 收面板; 面板没开时这是一次幂等空操作
+        this.onMeldPromptClosed?.();
         // 面板撤下就不再需要倒计时了
         // (副露者接着出牌时, 会由 _continueAfterKanDraw 重新起一次 discard 计时)
         this._clearDecisionTimer();
@@ -1341,8 +1358,11 @@ export class GameManager extends Component {
         const isTenpai = waiting.length > 0;
         const changed = player.tenpai !== isTenpai;
         player.tenpai = isTenpai;
-        // AI 一旦听牌就自动亮明"听", 让玩家知道对手在等牌
-        if (seat !== 0 && isTenpai && !player.declaredTenpai) {
+        // AI 一旦听牌就自动亮明"听", 让玩家知道对手在等牌。
+        // 【必须与玩家同一条件】玩家点「听牌」要求门清(`canRiichi` 里
+        // `melds.length > 0` 直接拒), 这里若不卡门清, 副露过的 AI 会白拿
+        // 立直的 1 番(分值翻倍) —— 那是 AI 独占的规则优势, 不是难度。
+        if (seat !== 0 && isTenpai && !player.declaredTenpai && player.melds.length === 0) {
             player.declaredTenpai = true;
             console.log(`[听牌] AI(${SEAT_NAMES[seat]}) 听: ${waiting.map(t => t.displayText).join(' ')}`);
         }
@@ -1543,12 +1563,24 @@ export class GameManager extends Component {
         if (kind === 'meld') {
             if (this._awaitingPlayerMeld) {
                 console.log('[超时] 副露选择超过 20 秒, 自动"过"');
+                // 先收面板再"过": 面板不会因为逻辑层决定了就自己消失,
+                // 不通知 UI 的话玩家回来会看到一块盖在对局上的死面板
+                this.onMeldPromptClosed?.();
+                this.onNotice?.('超时，已自动「过」');
                 this.resolvePlayerMeld(-1);
             }
             return;
         }
         // 出牌超时
         if (this._phase === GamePhase.PLAYER_TURN && this._canDiscard && !this._awaitingPlayerMeld) {
+            // 【2026-10-17】发呆也不许白白少拿 1 番: AI 一摸到听牌就自动宣告立直,
+            // 玩家不点就少一番(2^番 计分 = 分数直接减半)。超时这种"人不在"的情况,
+            // 先替他宣告再打出刚摸的那张 —— 那张一定保听, 不会撞上立直锁。
+            // (正常操作时不自动宣告: 宣告会把出牌锁成"必须保听", 玩家可能想换听)
+            if (this.canRiichi) {
+                console.log('[超时] 门清听牌, 自动宣告"听牌"以保住 +1 番');
+                this.declareTenpai();
+            }
             const drawn = this._playerDrawnTile;
             const idx = drawn ? this._player.hand.indexOf(drawn) : -1;
             if (idx >= 0) {

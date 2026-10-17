@@ -358,23 +358,38 @@ n?.getComponent(TileView)?.setHinted(false);
   手牌与「听牌/提示」按钮。可用宽度 = 齿轮右缘 → 上家手牌**最宽情形**（14 张）左缘 ≈ 480px，
   累计到四位数时按 `CHIP_MIN_SCALE`(0.62) 整体缩。名字与分数是**两个 Label**（分数按正负
   着色、名字始终米白），两段字宽 + 一个空格宽必须正好等于整串宽。
-- **听牌芯片**（`_buildTenpaiChip` / `_showTenpaiChip` / `_placeTenpaiChip`）：贴在手牌右侧、
-  与手牌同一排，**右缘固定**（`halfW − TENPAI_CHIP_RIGHT`，让开右侧「你·听」标记）→
-  文案变长时向左伸、位置不跳；左缘以满手 14 张的右缘为界，多面听长文案同样靠缩放兜底。
-  它纵向整体位于手牌上沿之下，所以不会侵入提示面板的落位通道（硬约束 13b）。
+- **听牌芯片**（`_buildTenpaiChip` / `_showTenpaiChip` / `_placeTenpaiChip`）：
+  **右缘固定**（`halfW − CHIP_EDGE_PAD`，贴内容右边缘）→ 文案变长时向左伸、位置不跳；
+  左缘以满手 14 张的右缘为界，多面听长文案同样靠缩放兜底。
+  纵向**抬到手牌行上方**（`dy = max(TILE_H/2 − 7, 标记半高 + 芯片半高 + 8)`），
+  与「你·听」标记靠纵向错开（同一排会互相顶），也不会侵入提示面板的落位通道（硬约束 13b）。
 - **座位名牌**（`_buildSeatPlates` / `_refreshSeatPlates` / `_placeSeatPlates`，2026-10-17）：
-  **只给三家 AI 做**（自己坐哪不用提示，四角净空也都占满了）。内容 = `seatLabel` + 连庄角标
-  `×N`，**不带分数** —— 分数只在比分条里，两处各写一份必然出现"改名忘了改分"的漂移。
-  角标口径 = `GameManager.getStreak(seat)`（连续胡牌 ≥ 2 才显示），与结算面板的 `连庄×N` 同源。
+  **只给三家 AI 做**（自己坐哪不用提示，四角净空也都占满了）。内容 = `seatLabel` + 听牌标签
+  `·听` + 连庄角标 `×N`，**不带分数** —— 分数只在比分条里，两处各写一份必然出现
+  "改名忘了改分"的漂移。连庄口径 = `GameManager.getStreak(seat)`（连续胡牌 ≥ 2 才显示），
+  与结算面板的 `连庄×N` 同源；听牌口径 = `isTenpaiDeclared(seat)`，并已并入**名牌指纹**
+  `_seatPlateSig`（否则报了听不会重建）。
+  【2026-10-17 用户要求】哪报听就直接在**它自己的名字后面**加"·听"，四角不再单独挂
+  "xx·听"小牌重复名字。于是：只有玩家还保留独立的「你·听」（它没有名牌），
+  三家 AI 的小牌被删除，**左右家名牌回到桌沿列的纵向中线（y=0）**。
   位置：上家挂**手牌行右端之外**（按 14 张最宽取位）；左右家挂**桌沿外侧那一列**
-  （x = ±(halfW − `TENPAI_MARK_INSET`)），落在「xx·听」标记**下方** —— 手牌列下端看着更近，
-  但 21:9 上那条带只剩 ~94px，而听牌/提示按钮就咬在那儿，30px 高的名牌塞不进去（实测撞车）。
+  （x = ±(halfW − `TENPAI_MARK_INSET`)）。手牌列下端看着更近，但 21:9 上那条带只剩
+  ~94px，而听牌/提示按钮就咬在那儿，30px 高的名牌塞不进去（实测撞车）。
 - **数据一律由 GameManager 算**（`TenpaiInfo` + `onTenpaiInfo`）：剩余张数 = Σ(4 − 可见张数)，
   与提示里的「N 张进张」同一算法（硬约束 13d）；可见张数直接复用
   `_buildAIContext(0).visible`，玩家与 AI 看到的公开信息一致（硬约束 10）。
   **不要在 UI 里自己数张数** —— 那必然与提示漂移。
 - **`onTenpaiInfo` 是状态、`onTenpai` 是事件**：前者变化才推（UI 常驻显示），后者是一次性提醒
   （只在玩家摸牌且详情真的变了时喊）。原先每次摸牌只要听牌就喊一遍，配上常驻芯片就是噪音。
+- **吃/碰/杠/过按钮**（`_showMeldPrompt` / `_buildMeldButton`，2026-10-17 重做）：
+  **信息芯片样式**（深墨绿底 + 金边，与比分条/名牌同一套语言），文字拆两段 ——
+  动作字（金，`MELD_ACTION_FONT`=26）+ 说明（米白，`MELD_SUB_FONT`=21）。
+  宽度按 `textWidth` **实测**再加内边距 —— 原先按"字数×20"拍脑袋再夹到 210，
+  "碰 五萬五萬五萬"会直接撑出边框。配套两处：
+  `GameManager._meldTilesText` 里碰/杠只报一张（几张牌本来就相同，吃才报整组点数）；
+  "过"按钮按契约传 **-1** 给 `resolvePlayerMeld`（原先传的是 items 下标，靠数组越界返回
+  undefined 才当成"过"，顺带把 `playPassVoice` 也弄丢了）。按钮底框走
+  `registerButtonPainter` 注册进 `repaintButtons`（面板"隐藏过再显示"时补画，硬约束 6）。
 - 刷新点挂在 `_refreshTenpaiFlag`，且**所有座位都刷** —— 别家弃牌/副露会改变「剩余张数」。
   开局 / 结束 / 返回主页面各清一次；`_clearTable()` 里必须 `_hideTenpaiChip()` 并把
   `_scoreSig` / `_tenpaiChipW` 归零（形状同硬约束 6c/6d 的"跨局状态归零"）。
@@ -531,10 +546,10 @@ node temp/career/tools/ai-test/career-persona-test.js
 三家 AI 有名字与口头禅（`game/AIPersona.ts`，纯数据）。**只影响表现层**，
 不参与任何决策计算 —— AI 强度恒为满能力档（硬约束 11）。
 
-- **名字必须是 2 个汉字**。凡是显示座位名的地方（比分条四枚芯片、`xx·听` 标记、
-  结算名牌）都是按"上家 / 左家 / 右家"这两个字的宽度排的，换成两字人名宽度分毫不差；
-  三个字就会把比分条撑到整体缩放。名字出口只有 `GameManager.seatLabel()`，
-  方位词 `SEAT_NAMES` 只留给日志与"吃/碰/杠来源"那种单字小牌子。
+- **名字必须是 2 个汉字**。凡是显示座位名的地方（比分条四枚芯片、座位名牌含
+  报听后的"·听"标签、结算名牌）都是按"上家 / 左家 / 右家"这两个字的宽度排的，
+  换成两字人名宽度分毫不差；三个字就会把比分条撑到整体缩放。名字出口只有
+  `GameManager.seatLabel()`，方位词 `SEAT_NAMES` 只留给日志与"吃/碰/杠来源"那种单字小牌子。
 - **碰 / 杠 → 气泡，胡 / 点炮 → 结算面板**。牌桌气泡走 `onAISpeech`；但胡牌那一刻
   结算面板立刻用整屏遮罩盖住牌桌，此时冒气泡 = 闪一下就没了，所以那句台词随
   `SettlementData.speech` 显示在面板的"四家手牌"那一行右侧
@@ -601,6 +616,28 @@ node temp/career/tools/ai-test/career-persona-test.js
 不参与任何计算量控制 —— 也不存在"因为时间不够而少算"的逻辑，
 AI 每次决策都是一次性算完（实测 0.31ms/回合）。
 
+⚠️ **"满能力档" ≠ "顶级"**：它指的是现有三档里最高的那一档。2026-10-17 的
+评估结论是"牌效精确、战略层薄弱"（出牌完全不看番、无押し引き、无搜索），
+那一轮补的是打点与押し引き（见 13 的"打点"一节），搜索/蒙特卡洛仍未做。
+
+⚠️ **AI 宣告听牌（立直）必须与玩家同一条件：门清**。
+`GameManager._refreshTenpaiFlag` 里曾漏掉 `melds.length === 0` 的判断，
+副露过的 AI 会白拿立直的 1 番（分值翻倍）—— 那是 AI 独占的规则优势，不是难度。
+玩家侧的条件在 `canRiichi`（`melds.length > 0` 直接拒）。
+
+⚠️ **玩家侧的立直提醒（2026-10-17）**：AI 是一摸到听牌就自动宣告的，玩家只能自己点。
+2^番 计分下这 1 番 = 分数直接翻倍，忘了点就是白亏一半，所以补了三处：
+1. **按钮要当场出现**：`_playerDraw` 的顺序是"手牌变了（→`_refreshInfo`）→ 再判听牌"，
+   那次刷新时 `player.tenpai` 还是旧值 —— `onTenpaiChanged` 里必须补一次
+   `_refreshRiichiButton()`，否则按钮晚一拍才亮，正好错过宣告时机；
+2. **提示说清代价**：`_showTenpai` 在还能宣告时补一句「点「听牌」+1 番」；
+   按钮本体在 `update` 里持续脉冲（`_updateRiichiPulse`，1.0↔1.12）—— 只弹一次字容易被无视；
+3. **超时兜底**：`GameManager.update` 的出牌超时分支里，若 `canRiichi` 就先
+   `declareTenpai()` 再打出刚摸的那张（那张一定保听，不撞立直锁）。人不在也不亏番。
+不做"自动宣告"是因为宣告后出牌会被锁成必须保听，玩家可能想换听；
+超时那条路走的是"人不在"，锁住无所谓。
+验证：`tools/ai-test/riichi-prompt-test.ts`（10 项接线断言）+ `timeout-test.ts` 第 9 组。
+
 **决策超时**（`GameManager.DECIDE_LIMIT = 20`）：
 只在**玩家需要做决定**时计时，AI 回合不计时（AI 本来就自己走）。
 
@@ -608,7 +645,12 @@ AI 每次决策都是一次性算完（实测 0.31ms/回合）。
 |---|---|---|
 | 玩家摸完牌要出牌 | `_playerDraw` 末尾 | `playTile(_playerDrawnTile 的下标)` —— 直接打掉**刚摸的那张** |
 | 杠后补摸要出牌 | `_continueAfterKanDraw(0)` | 同上 |
-| 副露选择面板弹出 | 三处 `_awaitingPlayerMeld = true` | `resolvePlayerMeld(-1)` 一律"过" |
+| 副露选择面板弹出 | 三处 `_awaitingPlayerMeld = true` | 先 `onMeldPromptClosed?.()` + `onNotice('超时，已自动「过」')` 通知 UI **收面板**，再 `resolvePlayerMeld(-1)` 一律"过" |
+
+⚠️ **逻辑层"过"了面板不会自己消失**：面板是 UI 弹的，超时/取消挂起这类
+非点击路径必须经 `onMeldPromptClosed` 通知 Main 调 `_hideMeldPrompt()`
+（`cancelPendingMeld` 里也触发，重开/返回主页/副露确定都经过它，幂等）。
+玩家点按钮的路径 UI 自己就收了，重复收一次无害。
 
 **计时状态只有一份**：`GameManager` 持有，Main 的倒计时显示只读 `decideRemain`/`decideLimit`，
 不要在 UI 侧再存一份计时器（两套会走偏）。
@@ -814,6 +856,24 @@ static rankMelds(ctx, candidates, tile): MeldEval[]
   玩家只额外知道自己的手牌 —— 等于把 AI 的思考过程透明讲出来, 不是让 AI 透视玩家手牌。
 - **立直锁同样生效**：`rankDiscards` 在 `declaredTenpai` 时只保留"打完仍听牌"的候选。
 
+**听牌保护（2026-10-17）**：没宣告立直也一样 —— 只要存在"打完仍听牌、且不是死听"
+的候选，`rankDiscards` 就把拆听的候选全部淘汰（死听 = `ukeire === 0`，那种听牌没价值）。
+起因是用户报的 bug：**已经听牌、摸到一张被判定很危险的中张时，提示会建议拆听打安全牌**。
+根因是量级的边界效应：防守项最多扣 90 分，而"未听牌"那一支的进张奖励
+（`12√种类`，1 向听常给 +34~48）正好把 100 分的向听台阶补平 —— 差值只有 2~9 分，
+纯属数值毛刺，不是"该弃和"的判断。实测未加锁时拆听率：三家普通 2%、有人立直 3%、
+有人像断幺 9%、断幺+立直 20%。**这不是给提示另写一套逻辑**，AI 走的是同一个过滤器。
+
+**打点（2026-10-17）**：出牌评分原先只有"向听 + 进张 + 危险度"，**完全不知道番数**，
+而本作 `points = 2^番`（清一色 4 番 = 16 分 vs 平胡 4 分），快不等于值钱。
+现在 `HandValue.estimateHandValue()` 给出"打点潜力"，`AIBrain` 里三处用它：
+- 出牌：`score += (multiplier - 1) * VALUE_STEP(45)` —— 加成**必须小于 1.5 个向听台阶**，
+  否则 AI 会为了做牌一路降速（实测直接改成 `EV = 和率 × 点数` 时流局率从 6% 飙到 25%~58%）；
+- 防守：危险度折扣 `× 1/multiplier`（押し引き：值钱的手顶着打，便宜手躲）；
+- 副露：门清代价 `base(150/90/50) × multiplier`。
+`HandValue` 的番值必须与 `HuScore.FAN_DEFS` 同口径，`tools/ai-test/hand-value-test.ts` 逐条核对；
+潜力牌型还要按向听打折（`PATTERN_CERTAINTY`），不打折 = 整局追空头。
+
 **提示必须随局面失效**：`GameManager._clearDecisionTimer` 里调 `clearHint()`。
 出牌/选副露/结束牌局都经过 `_clearDecisionTimer`, 所以只挂这一处就够。
 留着旧提示 = 显示过期的"建议打 X", 比不显示更糟。
@@ -827,6 +887,9 @@ node "$TSC" --target ES2020 --module commonjs --strict false --skipLibCheck \
      assets/scripts/game/{AIBrain,HintAdvisor,Player}.ts
 node temp/hint/tools/ai-test/hint-test.js
 ```
+
+打点/听牌保护另有 25 项：
+`node temp/hv/hand-value-test.js`（同样从真实源码跑，番值与 `FAN_DEFS` 对拍）。
 
 > 写这类测试时注意**牌的张数口径**：立直用例必须造 **14 张**
 > （打出后 13 张才是合法的"待摸形状"）。用 13 张去测, `rest` 变成 12 张,

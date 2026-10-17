@@ -236,7 +236,9 @@ console.log('\n[B3] 战绩的展示');
     // 比分条用名字而不是方位词
     const strip = methodBody(mainSrc, 'private _refreshScoreStrip(');
     check(strip.includes('seatLabel(s)') && !strip.includes('SEAT_NAMES'), '比分条用 AI 名字');
-    check(mainSrc.includes('createTenpaiChip(seatLabel(seat))'), '"听"标记用 AI 名字');
+    // 2026-10-17 起四角"xx·听"小牌已并入座位名牌(名字后面加"·听"),
+    // 只剩玩家自己的标记还用 createTenpaiChip(玩家没有名牌)
+    check(mainSrc.includes('createTenpaiChip(seatLabel(0))'), '"听"标记只剩玩家的, 且用 seatLabel 出名字');
 }
 
 // ---------------------------------------------------------------- B4

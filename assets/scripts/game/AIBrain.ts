@@ -5,6 +5,7 @@ import { HuChecker } from '../core/HuChecker';
 import { Shanten } from '../core/Shanten';
 import { AIDefense, ThreatInfo } from '../core/AIDefense';
 import { TILE_TYPE_COUNT, TileSuit, tileIndexOf } from '../core/TileDefine';
+import { estimateHandValue, HandValue } from './HandValue';
 
 /**
  * AI 难度档位 —— 由 GameRules.aiDelay(思考延时)换算
@@ -100,6 +101,16 @@ const PROFILES: Record<AIDifficulty, Profile> = {
 const SHANTEN_STEP = 100;
 
 /**
+ * 打点加成: 每"一倍价值"(见 `HandValue.multiplier`)折算多少分
+ *
+ * 清一色级别的手 → 倍率 4 → +3×45 = +135 分, 约 1.35 个向听台阶 ——
+ * **刻意略大于一档**: 这样"1 向听的清一色"能压过"听牌的平胡"之外的大多数取舍,
+ * 但又追不过 2 档。上限定成这个量级是硬要求: 加成若再大, AI 会为了做牌一路降速
+ * (试过把牌效整段换成 `EV = 和率 × 点数`, 流局率从 6% 升到 25%~58%)。
+ */
+const VALUE_STEP = 45;
+
+/**
  * 单张出牌候选的评估明细
  *
  * 【为什么要把明细暴露出来】玩家的"提示"功能必须与 AI 真实的选择**同源**:
@@ -112,17 +123,20 @@ export interface DiscardEval {
     index: number;
     /** 要打出的那张牌 */
     tile: Tile;
-    /** 综合评分(越高越该打) */
+    /**
+     * 综合评分(越高越该打)
+     *
+     * 量纲是"牌效分": **一个向听台阶 = 100 分**(`SHANTEN_STEP`), 进张奖励、
+     * 打点加成(`VALUE_STEP`)、危险度惩罚都以它为尺度。分数本身没有绝对意义,
+     * 只在同一手牌的候选之间可比。
+     */
     score: number;
     /** 打出之后的向听数(-1=已和牌, 0=听牌) */
     shanten: number;
     /**
      * 打出之后的有效进张**种类数**(不进 fast 档时为 0)
      *
-     * 评分用的就是这个口径(见 `_scoreDiscard` 的 `ukeire` 项):
-     * 权重 `×10` / `sqrt(×12)` 是按种类数的量级调的, 换成张数会连带改变
-     * "牌效 vs 防守"的平衡, 需要重新调参 —— 实测(交换座位 A/B)换口径并无胜率收益,
-     * 所以评分保持原样。
+     * 评分里"未听牌"那一支用的就是它(`12 × √种类`), 与下面按张数的显示口径分开。
      */
     ukeire: number;
     /**
@@ -134,6 +148,10 @@ export interface DiscardEval {
     ukeireTiles: number;
     /** 该牌当前的被点炮危险度 0~100 */
     danger: number;
+    /** 打出之后这手牌的估计番数(含门清/立直; 快档不估, 为 0) */
+    fan: number;
+    /** 打点倾向文案(如 "清一色方向"), 没有明显倾向时为空串 */
+    valueTag: string;
 }
 
 /** 单个副露候选的评估明细(与 `DiscardEval` 同理: 提示与 AI 同源) */
@@ -190,12 +208,28 @@ export class AIBrain {
         // 立直锁: 宣告听牌后只能打"打完仍然听牌"的牌。
         // 已在分数序上, 于是**首个保听牌的就是答案**, 通常一次 isTenpai 就够
         // (原先是无条件逐张试, 这里顺带快了)。
-        if (!ctx.declaredTenpai) return list;
-        const legal = list.filter(e => HuChecker.isTenpai(
-            hand.filter((_, k) => k !== e.index), ctx.melds).length > 0);
-        // 理论上一个合法候选都没有(不该发生: 刚摸到的那张永远打得出去)。
-        // 兜底成"自由评估", 保证调用方拿到的下标一定可打出, 与旧行为一致。
-        return legal.length > 0 ? legal : list;
+        if (ctx.declaredTenpai) {
+            const legal = list.filter(e => HuChecker.isTenpai(
+                hand.filter((_, k) => k !== e.index), ctx.melds).length > 0);
+            // 理论上一个合法候选都没有(不该发生: 刚摸到的那张永远打得出去)。
+            // 兜底成"自由评估", 保证调用方拿到的下标一定可打出, 与旧行为一致。
+            return legal.length > 0 ? legal : list;
+        }
+
+        // ---- 听牌保护(2026-10-17) ----
+        // 【为什么没立直也要保听】原先只有 declaredTenpai 才有锁, 于是"已经听牌但没点
+        // 「听牌」"的局面走自由评估, 分数是这样的(以单钓对上一张危险中张为例):
+        //   保听候选: 0 + 1 种进张×10 − 危险 90×0.9      ≈ −80
+        //   拆听候选: −100 + 12×√12种 + 留牌价值           ≈ −59
+        // 拆听反而更高 —— 差值只有几分到二十几分, 纯属"向听台阶 vs 进张奖励"的
+        // 量纲边界效应, 不是"该弃和"的判断。实测未加锁时拆听率: 三家普通 2%、
+        // 有人立直 3%、有人像断幺 9%、断幺+立直 20%。所以这里直接锁死:
+        // 只要能保听就不许拆, **除了死听**(剩 0 张能胡, 那种听牌本身没有价值)。
+        if (profile.useEfficiency) {
+            const keeping = list.filter(e => e.shanten === Shanten.TENPAI && e.ukeire > 0);
+            if (keeping.length > 0) return keeping;
+        }
+        return list;
     }
 
     /**
@@ -212,12 +246,13 @@ export class AIBrain {
     ): DiscardEval {
         // ---- 牌效 ----
         // 两套口径: 快档退回原型版"保留价值"启发式, 另外两档才算向听与进张。
-        // 分数尺度不同没关系, 因为每档只在自己的档位内部横向比较。
         let score: number;
         // 打出后的向听数, 防守与细分都要用, 算一次就够
         let shantenAfter = 0;
         let ukeire = 0;
         let ukeireTiles = 0;
+        /** 打完之后的打点潜力(快档不估, 保持原型行为) */
+        let value: HandValue = { fan: 0, points: 1, tag: '', multiplier: 1 };
         if (profile.useEfficiency) {
             // 注意所有候选的 rest 都是 13 张, 口径一致可直接比较;
             // 不能拿"打出后的 13 张"去减"现在的 14 张", 两者公式口径不同(14 张多算一张)。
@@ -236,19 +271,29 @@ export class AIBrain {
                 // 未听牌: 进张越多越好但收益递减(4 张与 8 张差别没那么大)
                 score += Math.sqrt(ukeire) * 12;
             }
+            // 【打点(2026-10-17)】这作是 2^番 计分(清一色 16 分 vs 平胡 4 分),
+            // 只看"谁快"会把大牌全拆了。这里按手牌的**打点潜力**给加成:
+            // 倍率 1(两番手)= 不加分, 4(清一色级别)= +VALUE_STEP×3。
+            // 加成必须**有上限且小于一个向听台阶**, 否则 AI 会为了做牌无限降速,
+            // 实测(直接换成 EV = 和率×点数)流局率会从 6% 炒到 25%~58%。
+            value = estimateHandValue(rest, ctx.melds,
+                ctx.declaredTenpai || shantenAfter === Shanten.TENPAI, shantenAfter);
+            score += (value.multiplier - 1) * VALUE_STEP;
         } else {
             // 原型启发式: 分值越大越该留, 所以取负号当"越该打"用
             score = -AIBrain._legacyKeepValue(rest, tile) * SHANTEN_STEP / 40;
         }
 
         // ---- 防守 ----
+        // 押し引き: 手牌越值钱越不肯弃和(危险度的折扣越小), 便宜手照旧躲。
         const tileDanger = danger[tileIndexOf(tile.suit, tile.rank)];
         if (profile.defenseWeight > 0) {
-            score -= tileDanger * profile.defenseWeight;
+            const push = profile.useEfficiency ? 1 / value.multiplier : 1;
+            score -= tileDanger * profile.defenseWeight * push;
             // 牌墙快见底时再加权一次(自己已听牌则不必怕)
             if (!profile.useEfficiency) shantenAfter = Shanten.calc(rest, meldCount);
             if (ctx.wallRemaining < 30 && shantenAfter > Shanten.TENPAI) {
-                score -= tileDanger * profile.defenseWeight * 0.4;
+                score -= tileDanger * profile.defenseWeight * 0.4 * push;
             }
         }
 
@@ -258,7 +303,10 @@ export class AIBrain {
         // ---- 随机噪声(快档更"莽") ----
         if (profile.noise > 0) score += (Math.random() - 0.5) * profile.noise * 2;
 
-        return { index: -1, tile, score, shanten: shantenAfter, ukeire, ukeireTiles, danger: tileDanger };
+        return {
+            index: -1, tile, score, shanten: shantenAfter, ukeire, ukeireTiles,
+            danger: tileDanger, fan: value.fan, valueTag: value.tag,
+        };
     }
 
     /**
@@ -448,10 +496,17 @@ export class AIBrain {
         if (delta > 0) score -= (1 - profile.meldAggression) * 40;
 
         // ---- 门清价值 ----
-        // 副露 = 永久失去 +1 番(门清), 也失去立直的资格 → 手牌越好越舍不得
+        // 副露 = 永久失去 +1 番(门清), 也失去立直的资格 → 手牌越好越舍不得。
+        // 【2026-10-17】代价跟着"打点潜力"放大: 门清+立直 = +2 番 = 4 倍分,
+        // 所以一手在做清一色(4 番)的牌亮一副露, 亏的是 16 分而不是 4 分 ——
+        // 固定 45 分的代价会让 AI 随手把大牌碰散。
         let menzenCost = 0;
         if (profile.keepsMenzen && meldCount === 0) {
-            menzenCost = before <= Shanten.TENPAI ? 45 : before === 1 ? 28 : 15;
+            const base = before <= Shanten.TENPAI ? 150 : before === 1 ? 90 : 50;
+            // 立直同样按"够得着就算": 门清手一旦听牌就能宣告, 那 1 番基本是白拿的
+            const v = estimateHandValue(ctx.hand, [],
+                ctx.declaredTenpai || before <= Shanten.TENPAI, before);
+            menzenCost = base * v.multiplier;
             score -= menzenCost;
         }
 

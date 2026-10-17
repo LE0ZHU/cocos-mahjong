@@ -202,12 +202,11 @@ export class HintAdvisor {
 
     // ==================== 文案组织 ====================
 
-    /** 出牌理由: 先说牌效(向听/进张), 再说防守 */
+    /** 出牌理由: 先说牌效(向听/进张), 再说打点方向, 最后说防守 */
     private static _discardReason(e: DiscardEval): string {
         const parts: string[] = [];
         // 进张一律讲**实际剩余张数**: 玩家问"还有几张能摸"时想听的就是这个数。
-        // (评分内部用的是种类数, 见 DiscardEval.ukeire 的说明 —— 两者在极少数
-        //  同分场景下排序可能略有出入, 但向听是主判据, 显示不会与建议矛盾。)
+        // (评分内部的和牌率另按张数算, 见 AIBrain._winRate。)
         const n = e.ukeireTiles;
         if (e.shanten === Shanten.WIN) {
             parts.push('打这张就能胡');
@@ -216,6 +215,8 @@ export class HintAdvisor {
         } else {
             parts.push(`${e.shanten} 向听 · ${n} 张进张`);
         }
+        // 打点方向: 只报"已经在做"的牌型; 门清/立直这类状态玩家自己看得见, 不占位置
+        if (e.valueTag) parts.push(e.valueTag);
         if (e.danger >= DANGER_BAD) parts.push('危险牌, 有人可能点炮');
         else if (e.danger >= DANGER_WARN) parts.push('偏危险, 留意别家听牌');
         else if (e.danger <= 5) parts.push('安全牌');

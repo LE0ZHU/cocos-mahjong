@@ -198,11 +198,8 @@ console.log('\n[1] 比分条: 左上角齿轮右侧那条净空里完整放得�
         const topMeldTop = halfH - 8 - topTileH - MELD_MARK_GAP;
         check(stripBottom - topMeldTop > 0, `${s.name}: 比分条不压上家副露行`,
             `gap=${(stripBottom - topMeldTop).toFixed(1)}`);
-        // 上家"听"标记: 中心 (−halfW+70, topMeldY), 尺寸 112×36
-        const topMeldY = topMeldTop - meldH / 2;
-        const chipTop = topMeldY + 18;
-        check(stripBottom - chipTop > 0, `${s.name}: 比分条不压“上家·听”标记`,
-            `gap=${(stripBottom - chipTop).toFixed(1)}`);
+        // (原先这里还查"比分条不压 上家·听 标记": 2026-10-17 起三家的听牌状态
+        //  并进了各自的名牌, 四角不再挂独立的"xx·听"小牌, 这条自然失效)
     }
     // 横向: 上家手牌最宽情形(14 张)与比分条必须错开(比分条整条都在手牌左侧)
     check(-(14 * TOP_TILE_W) / 2 - stripRight > 0, '比分条与上家手牌横向错开',
@@ -393,15 +390,15 @@ console.log('\n[5] 座位名牌(三家 AI: 名字 + 连庄角标): 贴着各自�
     const SEAT_PLATE_PAD = num(mainSrc, 'SEAT_PLATE_PAD');
     const SEAT_PLATE_GAP = num(mainSrc, 'SEAT_PLATE_GAP');
     const MARK_W = num(mainSrc, 'TENPAI_MARK_W');
-    const MARK_H = num(mainSrc, 'TENPAI_MARK_H');
     const MARK_INSET = num(mainSrc, 'TENPAI_MARK_INSET');
     const HINT_BTN_H = num(mainSrc, 'HINT_BTN_H');
 
-    // 名牌宽度: 名字(2 汉字, AIPersona 的硬约束) + 可选角标 ×N + 内边距
+    // 名牌宽度: 名字(2 汉字, AIPersona 的硬约束) + 可选"·听"标签 + 可选角标 ×N + 内边距
     const nameW = textWidth('老陈', SEAT_PLATE_FONT);
+    const tagW = textWidth('·听', SEAT_PLATE_FONT);          // 报听后才有
     const badgeW = textWidth('×9', SEAT_PLATE_FONT);          // 最坏一位数角标; 两位再宽 10px
     const gapW = SEAT_PLATE_FONT * 0.3;
-    const plateW = nameW + badgeW + gapW + SEAT_PLATE_PAD * 2;
+    const plateW = nameW + tagW + badgeW + gapW + SEAT_PLATE_PAD * 2;
     check(nameW > 0, `名牌文字宽 ${nameW.toFixed(0)}px(2 汉字 @ ${SEAT_PLATE_FONT})`);
 
     const stripLeft = -CONTENT_W / 2 + (() => {
@@ -419,14 +416,11 @@ console.log('\n[5] 座位名牌(三家 AI: 名字 + 连庄角标): 贴着各自�
     check(plate1Right < stripLeft || plate1Left > stripRight,
         '上家名牌与比分条区间不重叠(横向错开)', `名牌 ${plate1Left.toFixed(0)}~${plate1Right.toFixed(0)}, 比分条 ${stripLeft.toFixed(0)}~${stripRight.toFixed(0)}`);
 
-    // 侧名牌: 桌沿外侧那一列, 挂在"xx·听"标记下方
+    // 侧名牌: 桌沿外侧那一列, 纵向居中(上方不再挂"xx·听"小牌)
     const sideX = CONTENT_W / 2 - MARK_INSET;
-    const sideY = -(MARK_H / 2 + SEAT_PLATE_GAP + SEAT_PLATE_H / 2);
-    check(sideX + plateW / 2 <= CONTENT_W / 2, '侧名牌不越出内容坐标系(±840)',
+    const sideY = 0;
+    check(sideX + plateW / 2 <= CONTENT_W / 2, '侧名牌(含 ·听 与 ×N)不越出内容坐标系(±840)',
         `外缘 ${(sideX + plateW / 2).toFixed(0)}`);
-    const markBottom = -MARK_H / 2;
-    check(sideY + SEAT_PLATE_H / 2 <= markBottom - SEAT_PLATE_GAP + 0.01,
-        '侧名牌在"xx·听"标记下方且留出间距', `名牌上沿 ${(sideY + SEAT_PLATE_H / 2).toFixed(0)} ≤ 标记下沿 ${markBottom.toFixed(0)}`);
 
     // 每个屏幕比例下都验一遍: 上家名牌不越界、侧名牌不与玩家按钮行/手牌撞车
     const PLATE_SCREENS = SCREENS.concat([{ name: '3:2 平板', halfH: 560 }, { name: '4:3 iPad', halfH: 630 }]);
@@ -446,6 +440,7 @@ console.log('\n[5] 座位名牌(三家 AI: 名字 + 连庄角标): 贴着各自�
         // 侧名牌: 竖直方向不越界; 与玩家听牌/提示按钮行(以 handY 为心、高 HINT_BTN_H)分开
         check(Math.abs(sideY) + SEAT_PLATE_H / 2 <= sc.halfH,
             `${sc.name}: 侧名牌在可见区内`, `y=${sideY.toFixed(0)} 半高=${sc.halfH.toFixed(0)}`);
+        // 按钮行在底部(handY), 名牌在桌沿中线; 只要名牌下沿高过按钮上沿就不会撞
         const btnTop = handY + HINT_BTN_H / 2;
         const plateBottom = sideY - SEAT_PLATE_H / 2;
         check(plateBottom > btnTop,
@@ -482,6 +477,18 @@ console.log('\n[5] 座位名牌(三家 AI: 名字 + 连庄角标): 贴着各自�
     check(applyLayout2.includes('_placeSeatPlates') && applyLayout2.includes('_topHandY'),
         '_applyLayout 重摆名牌(转屏跟着走)');
     check(!/createLabelNode\([^)]*'你'/.test(code), '没有"你"的名牌(自己不需要身份提示)');
+
+    // ---- 听牌状态并进名牌(2026-10-17 用户要求: 名字后面加标签, 不再单独标一遍名字) ----
+    check(plateBody.includes('isTenpaiDeclared'), '名牌内容包含听牌状态(取自 GameManager)');
+    check(plateBody.includes('·听'), '报听后名牌显示"·听"标签');
+    check(/isTenpaiDeclared[\s\S]{0,300}_seatPlateSig/.test(plateBody),
+        '名牌指纹里带上听牌状态(否则报了听不会重建)');
+    const markerBuild = code.slice(code.indexOf('private _buildTenpaiMarkers('),
+        code.indexOf('private _buildTenpaiMarkers(') + 600);
+    check(/createTenpaiChip\(seatLabel\(0\)\)/.test(markerBuild),
+        '只给玩家自己建"听"标记(三家的已并进名牌)');
+    check(!/for\s*\(let seat = 0; seat < 4; seat\+\+\)[\s\S]{0,200}createTenpaiChip/.test(code),
+        '不再四角循环挂"xx·听"小牌');
 }
 
 console.log(`\n${fails === 0 ? '全部通过' : fails + ' 项失败'}\n`);

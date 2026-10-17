@@ -933,6 +933,17 @@ export function createLabelNode(
 const buttonPainters = new WeakMap<Node, () => void>();
 
 /**
+ * 给自绘按钮注册重画回调(与 `createButtonNode` 同一套 `repaintButtons` 机制)
+ *
+ * 用于那些不走 createButtonNode、自己拿 Graphics 画底框的按钮 ——
+ * 页面/面板"隐藏过再显示"时原生平台的 Graphics 顶点会丢(硬约束 6),
+ * 显示后调一次 `repaintButtons(根节点)` 就能把整棵子树都补画回来。
+ */
+export function registerButtonPainter(node: Node, paint: () => void): void {
+    buttonPainters.set(node, paint);
+}
+
+/**
  * 重画一棵子树里所有按钮的底框(含自身),用于页面/面板重新显示时补画
  *
  * 幂等: draw3DButton 内部先 clear 再画,重复调用不会叠加(原生平台必须 clear,

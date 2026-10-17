@@ -109,7 +109,8 @@ export function simulateGame(diffA: AIDifficulty, diffB: AIDifficulty, seed: num
         const d = p.removeTile(idx)!;
         p.discards.push(d);
         p.sortHand();
-        if (HuChecker.isTenpai(p.hand, p.melds).length > 0) p.declaredTenpai = true;
+        // 与真实规则一致: 只有门清才能宣告听牌(立直), 副露过的不能
+        if (p.melds.length === 0 && HuChecker.isTenpai(p.hand, p.melds).length > 0) p.declaredTenpai = true;
         return d;
     };
 
@@ -174,7 +175,7 @@ export function simulateGame(diffA: AIDifficulty, diffB: AIDifficulty, seed: num
             me.addTile(rep);
             if (HuChecker.isHu(me.hand, me.melds)) { settleSelfDraw(turn); break; }
         }
-        if (HuChecker.isTenpai(me.hand, me.melds).length > 0) me.declaredTenpai = true;
+        if (me.melds.length === 0 && HuChecker.isTenpai(me.hand, me.melds).length > 0) me.declaredTenpai = true;
 
         const discarded = doDiscard(turn);
         if (!discarded) break;
@@ -203,7 +204,7 @@ export function simulateGame(diffA: AIDifficulty, diffB: AIDifficulty, seed: num
                         np.addTile(rep);
                         if (HuChecker.isHu(np.hand, np.melds)) { settleSelfDraw(nxt); break; }
                     }
-                    if (HuChecker.isTenpai(np.hand, np.melds).length > 0) np.declaredTenpai = true;
+                    if (np.melds.length === 0 && HuChecker.isTenpai(np.hand, np.melds).length > 0) np.declaredTenpai = true;
                     const d2 = doDiscard(nxt);
                     if (!d2) break;
                     const rons2 = ronSeats(nxt, d2);

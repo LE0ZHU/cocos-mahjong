@@ -1,6 +1,6 @@
-import { _decorator, Component, Node, Color, Label, Graphics, UITransform, Vec3, view, Canvas, Camera, UIOpacity, tween } from 'cc';
+import { _decorator, Component, Node, Color, Label, Graphics, UITransform, Vec3, view, Canvas, Camera, UIOpacity, tween, Button } from 'cc';
 import { GameManager, GamePhase, MeldPromptItem, MeldPromptRequest, seatLabel, TenpaiInfo } from './managers/GameManager';
-import { createTileNode, createTileBackNode, createLabelNode, createButtonNode, createIconButton, repaintButtons, setTileBgColor, applyDesignResolution, BTN_COLOR_GREY, ButtonStyle, bindSafeClick } from './ui/UIFactory';
+import { createTileNode, createTileBackNode, createLabelNode, createButtonNode, createIconButton, repaintButtons, registerButtonPainter, setTileBgColor, applyDesignResolution, BTN_COLOR_GREY, ButtonStyle, bindSafeClick } from './ui/UIFactory';
 import { TileView, tileRadius } from './ui/TileView';
 import { MenuUI } from './ui/MenuUI';
 import { SettlementPanel } from './ui/SettlementPanel';
@@ -9,7 +9,7 @@ import { SettingsPanel } from './ui/SettingsPanel';
 import { Hint, HintAdvisor } from './game/HintAdvisor';
 import { GAME_RULES } from './game/GameRules';
 import { preloadTileImages } from './ui/TileImage';
-import { preloadSounds, playTileVoice, playMeldVoice, playPassVoice, playBgm } from './audio/Sound';
+import { preloadSounds, playTileVoice, playMeldVoice, playPassVoice, playBgm, playButtonClick } from './audio/Sound';
 import { vibrateHu, vibrateMeld } from './feedback/Haptics';
 import {
     ANIM, centerOf, ensureOpacity, flashBurst, flyToSlot, gatherIn, glideTo, popIn, slideIn, stopTweensDeep, toWorld,
@@ -27,10 +27,12 @@ enum SceneState { HOME, RULES, PLAYING }
 /** 吃/碰选择按钮尺寸与间距(按钮自带 3D 底框,不再套外层黑底) */
 const MELD_BTN_H = 52;
 const MELD_BTN_GAP = 12;
-/** 副露按钮金色 / "过"按钮灰色 / 吃胡按钮红色 */
-const MELD_BTN_COLOR = new Color(196, 132, 44, 255);
-const PASS_BTN_COLOR = new Color(96, 104, 116, 255);
-const RON_BTN_COLOR = new Color(178, 52, 48, 255);
+/** 副露按钮内边距 / 动作字与牌面文字的间距 */
+const MELD_BTN_PAD = 20;
+const MELD_BTN_TEXT_GAP = 10;
+/** 动作字(吃/碰/杠/胡牌/过)与牌面文字的字号 */
+const MELD_ACTION_FONT = 26;
+const MELD_SUB_FONT = 21;
 
 // ---- AI 提示按钮 ----
 /** 提示按钮尺寸(与"听牌"按钮同一档, 视觉上属同一组) */
@@ -102,6 +104,8 @@ const CHIP_TEXT_WARN = new Color(236, 134, 90, 255);
 const SCORE_GAIN = new Color(250, 208, 118, 255);
 const SCORE_LOSS = new Color(238, 138, 124, 255);
 const SCORE_ZERO = new Color(200, 216, 198, 255);
+/** 座位名牌上的"·听"标签: 沿用旧"xx·听"小牌的金色, 换了位置但看起来还是同一个标记 */
+const RIICHI_TAG_TEXT = new Color(255, 226, 158, 255);
 
 // ==================== 座位名牌 ====================
 //
@@ -391,6 +395,8 @@ export class Main extends Component {
     private _pointerAngle = 0;
     /** 指针呼吸动画计时 */
     private _pointerPulseT = 0;
+    /** "听牌"按钮呼吸提示计时(玩家已听牌却没宣告时, 按钮一跳一跳地提醒) */
+    private _riichiPulseT = 0;
     /** 决策倒计时: 环形进度 Graphics + 中央秒数 Label(平时整体隐藏) */
     private _countdownG: Graphics | null = null;
     private _countdownLabel: Label | null = null;
@@ -714,7 +720,7 @@ export class Main extends Component {
      * (清 Main 排的帧) + `_abortDealing()` (清 UI 标记)。
      */
     private _startDealing(): void {
-        const gm = GameManager.instance;
+        const gm = this.game;
         if (!gm) return;
         this._dealing = true;
         this._dealShown = 0;
@@ -745,7 +751,7 @@ export class Main extends Component {
 
     /** 推进一帧发牌动画: 多揭示一张, 再排下一帧 */
     private _dealNextFrame(): void {
-        const gm = GameManager.instance;
+        const gm = this.game;
         if (!gm || this._sceneState !== SceneState.PLAYING) return;
         if (gm.phase !== GamePhase.DEALING) {
             // 期间被 stopGame / 重开打断了: 收尾, 别把牌留在半截状态
@@ -772,7 +778,7 @@ export class Main extends Component {
      * @param shown 已揭示的张数(0~13)
      */
     private _renderDealFrame(shown: number): void {
-        const gm = GameManager.instance;
+        const gm = this.game;
         if (!gm) return;
         const n = Math.max(0, Math.min(HAND_SIZE, shown));
 
@@ -826,7 +832,7 @@ export class Main extends Component {
      * 这里要按完整 14 张重画一遍, 否则玩家会少牌、且整排位置也不对。
      */
     private _finishDealing(): void {
-        const gm = GameManager.instance;
+        const gm = this.game;
         if (!gm || this._sceneState !== SceneState.PLAYING) return;
         this._dealShown = 0;
         this._refreshHand();
@@ -851,7 +857,7 @@ export class Main extends Component {
         // 返回前先收起设置弹窗(含恢复倒计时) —— 否则下局开始时它还压在牌桌上
         this._closeSettings();
         // 中途返回要把对局真的停下来: 撤销排队中的 AI 调度 + 清掉等待中的副露选择
-        GameManager.instance?.stopGame();
+        this.game?.stopGame();
         this._clearTable();
         this._revealAll = false;
         if (this._settingsBtn) this._settingsBtn.active = false;
@@ -944,6 +950,8 @@ export class Main extends Component {
         this._refreshCountdown();
         // AI 台词气泡的停留/淡出
         this._updateAISpeech(dt);
+        // "听牌"按钮的呼吸提示: 同样要排在 pointer 的早退之前
+        this._updateRiichiPulse(dt);
         const pointer = this._turnPointer;
         if (!pointer) return;
 
@@ -960,7 +968,7 @@ export class Main extends Component {
 
         const op = pointer.getComponent(UIOpacity);
         if (!op) return;
-        const gm = GameManager.instance;
+        const gm = this.game;
         const running = !!gm && gm.isTurnRunning;
         if (!running) {
             // 发牌中/已结束: 压暗但保留指向,不做呼吸
@@ -1187,10 +1195,8 @@ export class Main extends Component {
             this._riichiBtn?.setPosition(riichiX, handY, 0);
             this._hintBtn?.setPosition(riichiX + HINT_BTN_W / 2 + HINT_BTN_GAP + HINT_BTN_W / 2, handY, 0);
         }
+        // "你·听"标记: 只有玩家自己这一块(三家的听牌状态并进了各自名牌)
         this._tenpaiMarkers[0]?.setPosition(halfW - TENPAI_MARK_INSET, handY, 0);
-        this._tenpaiMarkers[1]?.setPosition(-halfW + TENPAI_MARK_INSET, topMeldY, 0);
-        this._tenpaiMarkers[2]?.setPosition(-halfW + TENPAI_MARK_INSET, 0, 0);
-        this._tenpaiMarkers[3]?.setPosition(halfW - TENPAI_MARK_INSET, 0, 0);
 
         // ---- 上家(索引 0): 贴可见顶部 ----
         this._aiHandContainers[0]?.setPosition(0, topHandY, 0);
@@ -1243,7 +1249,7 @@ export class Main extends Component {
      */
     private _rebuildTiles(): void {
         if (this._dealing) return;
-        if (!GameManager.instance) return;
+        if (!this.game) return;
         this._refreshHand();
         for (let i = 0; i < 3; i++) {
             this._refreshAIHand(i);
@@ -1255,11 +1261,23 @@ export class Main extends Component {
 
     // ==================== GameManager 初始化 ====================
 
+    /**
+     * 牌局控制器(恒为 GameManager.instance)
+     *
+     * 保留成字段而不是到处写 `GameManager.instance`: 牌局对象在
+     * `_ensureGameManager()` 里装配, 其余代码只经它访问。
+     */
+    private game: GameManager | null = null;
+
     private _ensureGameManager(): void {
-        if (GameManager.instance) return;
+        if (GameManager.instance) {
+            this.game = GameManager.instance;
+            return;
+        }
         const gmNode = new Node('GameManager');
         gmNode.parent = this.node;
         gmNode.addComponent(GameManager);
+        this.game = GameManager.instance;
     }
 
     // ==================== UI 构建 ====================
@@ -1450,7 +1468,7 @@ export class Main extends Component {
         // 先按当前可见高度重排(转屏后可能变过), 再显示
         panel.fit(this._halfH);
         // 冻结倒计时: 玩家在调音量时看不到牌桌, 不该被系统判超时替他出牌
-        GameManager.instance?.pauseDecideTimer();
+        this.game?.pauseDecideTimer();
         panel.show();
     }
 
@@ -1460,7 +1478,7 @@ export class Main extends Component {
      */
     private _closeSettings(after?: () => void): void {
         if (this._settingsPanel?.isOpen) this._settingsPanel.hide();
-        GameManager.instance?.resumeDecideTimer();
+        this.game?.resumeDecideTimer();
         after?.();
     }
 
@@ -1498,7 +1516,7 @@ export class Main extends Component {
      */
     private _refreshScoreStrip(force = false): void {
         const strip = this._scoreStrip;
-        const gm = GameManager.instance;
+        const gm = this.game;
         if (!strip || !gm) return;
         const scores: number[] = [];
         const scoreTexts: string[] = [];
@@ -1571,18 +1589,24 @@ export class Main extends Component {
     }
 
     /**
-     * 重建四家名牌: `名字` + 连庄角标 `×N`
+     * 重建四家名牌: `名字` + 听牌标签 `·听` + 连庄角标 `×N`
      *
      * 角标只在连庄(连续胡牌 ≥ 2 局)时出现 —— 与结算面板里那行 `连庄×N` 同一个
      * 计数口径(`GameManager.getStreak`), 不另存一份。分数不放进名牌:
      * 比分条已经列了四家分数, 两处各写一份必然漂移。
      *
+     * 【听牌标签为什么在这里(2026-10-17 用户要求)】原先四角各挂一块"xx·听"小牌,
+     * 名字被重复标了一遍; 现在哪家报听就**在它自己的名字后面加个"·听"**, 不再另立一块。
+     * 于是"谁是谁"和"谁在等牌"合并成同一条信息, 四角也空出来了。
+     *
      * @param force true=无条件重建(原生平台隐藏过再显示 / 开局时 Graphics 会丢)
      */
     private _refreshSeatPlates(force = false): void {
-        const gm = GameManager.instance;
+        const gm = this.game;
         if (!gm) return;
-        const sig = [1, 2, 3].map(s => `${seatLabel(s)}|${gm.getStreak(s)}`).join('/');
+        const sig = [1, 2, 3]
+            .map(s => `${seatLabel(s)}|${gm.getStreak(s)}|${gm.isTenpaiDeclared(s) ? 1 : 0}`)
+            .join('/');
         if (!force && sig === this._seatPlateSig) return;
         this._seatPlateSig = sig;
 
@@ -1594,10 +1618,13 @@ export class Main extends Component {
             const name = seatLabel(s);
             const streak = gm.getStreak(s);
             const badge = streak >= 2 ? `×${streak}` : '';
+            const tag = gm.isTenpaiDeclared(s) ? '·听' : '';
             const nameW = textWidth(name, SEAT_PLATE_FONT);
+            const tagW = tag ? textWidth(tag, SEAT_PLATE_FONT) : 0;
             const badgeW = badge ? textWidth(badge, SEAT_PLATE_FONT) : 0;
+            // "·听"紧贴名字(它是名字的一部分), 连庄角标前面才留缝
             const gapW = badge ? SEAT_PLATE_FONT * 0.3 : 0;
-            const w = nameW + badgeW + gapW + SEAT_PLATE_PAD * 2;
+            const w = nameW + tagW + badgeW + gapW + SEAT_PLATE_PAD * 2;
             plate.getComponent(UITransform)?.setContentSize(w, SEAT_PLATE_H);
             paintInfoChip(plate.getComponent(Graphics) ?? plate.addComponent(Graphics),
                 w, SEAT_PLATE_H);
@@ -1607,10 +1634,16 @@ export class Main extends Component {
             const nameLabel = createLabelNode(name, SEAT_PLATE_FONT, CHIP_TEXT, nameW + 4, SEAT_PLATE_H, true);
             nameLabel.parent = plate;
             nameLabel.setPosition(startX + nameW / 2, 0, 0);
+            if (tag) {
+                // 金色, 与旧的"xx·听"小牌同色 —— 换了位置但看起来还是同一个标记
+                const tagLabel = createLabelNode(tag, SEAT_PLATE_FONT, RIICHI_TAG_TEXT, tagW + 4, SEAT_PLATE_H, true);
+                tagLabel.parent = plate;
+                tagLabel.setPosition(startX + nameW + tagW / 2, 0, 0);
+            }
             if (badge) {
                 const badgeLabel = createLabelNode(badge, SEAT_PLATE_FONT, SCORE_GAIN, badgeW + 4, SEAT_PLATE_H, true);
                 badgeLabel.parent = plate;
-                badgeLabel.setPosition(startX + nameW + gapW + badgeW / 2, 0, 0);
+                badgeLabel.setPosition(startX + nameW + tagW + gapW + badgeW / 2, 0, 0);
             }
         }
         this._placeSeatPlates();
@@ -1620,9 +1653,10 @@ export class Main extends Component {
      * 名牌定位: 贴在各家手牌的**外侧端**(不占任何牌区)
      *
      * - 上家: 手牌行的右端之外(按满手 14 张取位, 张数变少也不会缩回来撞到别处)
-     * - 左/右家: **屏幕左右边缘那一列**, 挂在"xx·听"标记下方, 与它组成一条
-     *   "这家是谁 / 听没听"的竖列。手牌列的下端看着更近, 但 21:9 上那条带只剩
-     *   ~94px, 而玩家的听牌/提示按钮就咬在那儿, 30px 高的名牌塞不进去(实测撞车)。
+     * - 左/右家: **屏幕左右边缘那一列**(±(840−70)), 与侧家手牌列纵向居中
+     *
+     * 【2026-10-17】左/右家原先挂在"xx·听"小牌下面(那块牌没了, 听牌状态已并进名字),
+     * 所以整列可以回到 y=0 —— 名牌自己就是这条净空里唯一的东西。
      *
      * ⚠️ 这几处都是"净空里挑出来的": 左侧紧挨听牌/提示按钮、右边贴着牌墙,
      * 改动牌区或按钮位置后必须重跑 `tools/ai-test/info-visibility-test.ts` 的名牌一组。
@@ -1639,11 +1673,10 @@ export class Main extends Component {
         // 上家: 手牌行右端(14 张是最宽情形)
         put(1, (14 * this.TOP_TILE_W) / 2 + SEAT_PLATE_GAP + widthOf(1) / 2, this._topHandY);
 
-        // 左/右家: 桌沿外侧那一列(与"xx·听"标记同一 x), 挂在标记下方
+        // 左/右家: 桌沿外侧那一列, 纵向居中(上方不再有"xx·听"小牌)
         const sideX = this.CONTENT_W / 2 - TENPAI_MARK_INSET;
-        const sideY = -(TENPAI_MARK_H / 2 + SEAT_PLATE_GAP + SEAT_PLATE_H / 2);
-        put(2, -sideX, sideY);
-        put(3, sideX, sideY);
+        put(2, -sideX, 0);
+        put(3, sideX, 0);
     }
 
     /**
@@ -1719,7 +1752,7 @@ export class Main extends Component {
 
     /** 点"提示": 向 GameManager 要一份建议, 由 onHint 回调驱动显示 */
     private _onHintClick(): void {
-        const gm = GameManager.instance;
+        const gm = this.game;
         if (!gm || this._sceneState !== SceneState.PLAYING) return;
         // 发牌动画期间点提示没有意义(此刻还没轮到自己), 静默忽略, 与牌面点击同理
         if (this._dealing) return;
@@ -1810,18 +1843,17 @@ export class Main extends Component {
     }
 
     /**
-     * 创建四家的"听"标记(默认隐藏, 宣告听牌后亮出)
+     * 创建"听"标记(默认隐藏, 宣告听牌后亮出)
      *
-     * 放在牌桌四角: 自己右下 / 上家左上 / 左家左侧 / 右家右侧,
-     * 都不与手牌、牌河、副露行重叠。
+     * 【只有玩家自己这一块】三家的听牌状态已经并进各自的名牌(`名字·听`, 见
+     * `_refreshSeatPlates`), 不再在四角重复标一遍名字; 而玩家没有名牌
+     * ("我是谁"不需要提示), 所以"你·听"仍然单独挂在手牌行右端。
      */
     private _buildTenpaiMarkers(): void {
-        for (let seat = 0; seat < 4; seat++) {
-            const node = createTenpaiChip(seatLabel(seat));
-            node.parent = this._gameRoot;
-            node.active = false;
-            this._tenpaiMarkers[seat] = node;
-        }
+        const node = createTenpaiChip(seatLabel(0));
+        node.parent = this._gameRoot;
+        node.active = false;
+        this._tenpaiMarkers[0] = node;
     }
 
     /** 创建独立结算面板(默认隐藏, 牌局结束时由 onSettle 弹出) */
@@ -1980,7 +2012,7 @@ export class Main extends Component {
      * 避免"两套计时器各走各的"导致显示和实际超时对不上。
      */
     private _refreshCountdown(): void {
-        const gm = GameManager.instance;
+        const gm = this.game;
         const g = this._countdownG;
         const lbl = this._countdownLabel;
         if (!g || !lbl) return;
@@ -2077,7 +2109,7 @@ export class Main extends Component {
 
     /** 依据当前阶段/座位更新中央转盘指针的指向 */
     private _refreshTurnPointer(): void {
-        const gm = GameManager.instance;
+        const gm = this.game;
         const turnPhase = !!gm && gm.isTurnRunning;
         const seat = turnPhase ? gm!.currentSeat : -1;
         if (seat < 0) return; // 非进行中(发牌/结算)保持上一次指向
@@ -2095,7 +2127,7 @@ export class Main extends Component {
         if (!g || !node) return;
         g.clear();
 
-        const count = countOverride ?? GameManager.instance?.wallRemaining ?? 0;
+        const count = countOverride ?? this.game?.wallRemaining ?? 0;
         if (count <= 0) return;
 
         const cols = 12;
@@ -2315,7 +2347,7 @@ export class Main extends Component {
     // ==================== 事件注册 ====================
 
     private _registerEvents(): void {
-        const gm = GameManager.instance;
+        const gm = this.game;
         if (!gm) return;
         gm.onHandChanged = () => this._refreshHand();
         gm.onDiscardChanged = () => this._refreshDiscard();
@@ -2330,6 +2362,9 @@ export class Main extends Component {
             this._refreshMelds(seat, meld);
         };
         gm.onPlayerMeldChoice = (request) => this._showMeldPrompt(request);
+        // 面板被逻辑层关掉(超时自动"过"/重开取消挂起)时收面板 ——
+        // 逻辑层不会自己动 UI, 不接这条的话超时后面板会一直盖在牌桌上
+        gm.onMeldPromptClosed = () => this._hideMeldPrompt();
         // AI 台词(碰 / 杠): 在说话那家的手牌上冒一个短气泡;
         // 胡牌与点炮那句由结算面板显示(牌桌那时已被遮罩盖住)
         gm.onAISpeech = (seat, text) => this._showAISpeech(seat, text);
@@ -2340,7 +2375,14 @@ export class Main extends Component {
             else this._hideTenpaiChip();
         };
         gm.onTenpai = (info) => this._showTenpai(info);
-        gm.onTenpaiChanged = (seat) => this._refreshTenpaiMarkers();
+        // 听牌状态变化 → 刷新标记; 玩家自己还要立刻刷一次「听牌」按钮。
+        // 【为什么必须在这里刷】`_playerDraw` 的顺序是"手牌变了(→_refreshInfo)→ 再判听牌",
+        // 所以按钮那次刷新时 `player.tenpai` 还是旧值 —— 不加这一句, 玩家刚听牌的那一巡
+        // 按钮根本不出现(要等下一次摸牌才亮), 正好错过"立刻宣告"的时机。
+        gm.onTenpaiChanged = (seat) => {
+            this._refreshTenpaiMarkers();
+            if (seat === 0) this._refreshRiichiButton();
+        };
         gm.onNotice = (msg) => this._showToast(msg);
         gm.onHu = (msg) => this._showHuToast(msg);
         gm.onReveal = (winnerSeat, msg) => this._onGameEndReveal(winnerSeat, msg);
@@ -2369,7 +2411,7 @@ export class Main extends Component {
         this._selectedIndex = -1;
         this._clearChildren(this._handContainer);
 
-        const gm = GameManager.instance;
+        const gm = this.game;
         const player = gm?.player;
         if (!player) return;
 
@@ -2416,7 +2458,7 @@ export class Main extends Component {
         // 手牌是整体重建的, 之前贴的提示标记随旧节点一起没了 —— 按记录的下标补回来。
         // 局面没变(玩家只是点开提示看了看)时这一步是无感的;
         // 局面真变了的话 GameManager 已经把提示清空, 这里也一并收起。
-        if (this._hintedTileIndex >= 0 && GameManager.instance?.hint) this._reapplyHintMark();
+        if (this._hintedTileIndex >= 0 && this.game?.hint) this._reapplyHintMark();
         this._refreshInfo();
     }
 
@@ -2456,7 +2498,7 @@ export class Main extends Component {
         if (!this._discardContainer) return;
         this._clearChildren(this._discardContainer);
 
-        const player = GameManager.instance?.player;
+        const player = this.game?.player;
         if (!player) return;
 
         // 自家弃牌河向上堆(朝着桌心方向),每排最多 RIVER_COLS 张,避免与下方副露/手牌重叠
@@ -2508,7 +2550,7 @@ export class Main extends Component {
         if (!container) return;
         this._clearChildren(container);
 
-        const ai = GameManager.instance?.getAIPlayer(idx);
+        const ai = this.game?.getAIPlayer(idx);
         if (!ai) return;
 
         // 发牌动画期间只显示前 limit 张
@@ -2587,7 +2629,7 @@ export class Main extends Component {
         if (!container) return;
         this._clearChildren(container);
 
-        const ai = GameManager.instance?.getAIPlayer(idx);
+        const ai = this.game?.getAIPlayer(idx);
         if (!ai) return;
 
         if (idx === 0) {
@@ -2686,7 +2728,7 @@ export class Main extends Component {
         if (!btn) return;
         const show = this._sceneState === SceneState.PLAYING
             && !this._dealing
-            && !!GameManager.instance?.canHint;
+            && !!this.game?.canHint;
         if (btn.active === show) return;
         btn.active = show;
         // 原生平台: 藏过再亮的 Graphics 会只剩文字, 亮出来时补画一次底框
@@ -2699,11 +2741,39 @@ export class Main extends Component {
     private _refreshRiichiButton(): void {
         const btn = this._riichiBtn;
         if (!btn) return;
-        const show = !!GameManager.instance?.canRiichi;
+        const show = !!this.game?.canRiichi;
         if (btn.active === show) return;
         btn.active = show;
         // 原生平台: 藏过再亮的 Graphics 会只剩文字, 亮出来时补画一次底框
         if (show) repaintButtons(btn);
+    }
+
+    /**
+     * "听牌"按钮的呼吸提示 —— 玩家已经听牌却还没宣告时, 按钮一下一下地放大缩小
+     *
+     * 【为什么要有它】AI 是**一摸到听牌就自动宣告**的(白拿 +1 番, 分值直接翻倍),
+     * 玩家却要自己点「听牌」。忘了点 = 同样的牌少一半分, 而且牌桌上没有任何提示
+     * 说明这件事 —— 这是纯粹的信息不对等, 不是难度。
+     * 这里不做成"自动宣告", 是因为宣告后出牌会被锁成"必须保听"(见 `playTile` 的立直锁),
+     * 玩家可能想换听; 所以改成**显眼地提醒**, 由玩家自己按下(超时则替他宣告, 见
+     * GameManager.update 的出牌超时分支)。
+     */
+    private _updateRiichiPulse(dt: number): void {
+        const btn = this._riichiBtn;
+        if (!btn) return;
+        if (!btn.active) {
+            // 隐藏时把缩放复位, 下次亮出来的第一帧不会是一个怪尺寸
+            if (this._riichiPulseT !== 0) {
+                this._riichiPulseT = 0;
+                btn.setScale(1, 1, 1);
+            }
+            return;
+        }
+        this._riichiPulseT += dt;
+        // 1.00 ↔ 1.09, 周期约 0.9s: 够显眼, 又不至于像报错那样闪。
+        // 幅度压到 9%: Label 是按字号绘制的贴图, 放大越多越容易糊
+        const k = 1 + 0.09 * (0.5 + 0.5 * Math.sin(this._riichiPulseT * 7));
+        btn.setScale(k, k, 1);
     }
 
     // ==================== AI 台词气泡(拟人化) ====================
@@ -2801,17 +2871,23 @@ export class Main extends Component {
         }
     }
 
-    /** 四家"听"标记: 谁宣告了听牌就亮谁 */
+    /**
+     * 听牌状态刷新: 玩家自己的"你·听"标记 + 三家 AI 名牌上的"·听"标签
+     *
+     * 两处都靠 `isTenpaiDeclared`(宣告状态), 与比分条/名牌同一口径, 不另存一份。
+     */
     private _refreshTenpaiMarkers(): void {
-        const gm = GameManager.instance;
-        for (let seat = 0; seat < 4; seat++) {
-            const node = this._tenpaiMarkers[seat];
-            if (!node) continue;
-            const on = !!gm && gm.isTenpaiDeclared(seat);
-            if (node.active === on) continue;
-            node.active = on;
-            if (on) repaintButtons(node);
+        const gm = this.game;
+        const node = this._tenpaiMarkers[0];
+        if (node) {
+            const on = !!gm && gm.isTenpaiDeclared(0);
+            if (node.active !== on) {
+                node.active = on;
+                if (on) repaintButtons(node);
+            }
         }
+        // 三家的听牌标签挂在名牌后面(有指纹挡重复, 这里随手调不会狂重建)
+        this._refreshSeatPlates();
     }
 
     /** 显示一条临时文字提示(听牌/胡牌/操作提示),到时自动清除 */
@@ -2870,7 +2946,7 @@ export class Main extends Component {
         if (!container) return;
         this._clearChildren(container);
 
-        const gm = GameManager.instance;
+        const gm = this.game;
         const owner = seat === 0 ? gm?.player : gm?.getAIPlayer(seat - 1);
         const melds = owner?.melds ?? [];
         if (melds.length === 0) return;
@@ -2968,9 +3044,15 @@ export class Main extends Component {
      *
      * 常驻详情已经挂在手牌右侧的芯片上, 这条文字只负责"喊一声":
      * 以前每摸一张牌都喊一遍同样的"可胡: 三萬 六萬", 有了常驻信息后那是纯噪音。
+     *
+     * 【2026-10-17】还能宣告立直时补一句"点「听牌」+1 番":
+     * AI 一摸到听牌就自动宣告(白拿 +1 番), 玩家却只能靠这句话知道 ——
+     * 忘了点是"同样的牌少一半分", 属于信息不对等, 必须在提示里说清。
      */
     private _showTenpai(info: TenpaiInfo): void {
-        this._showMessage(`【听牌】${HintAdvisor.tenpaiText(info.waiting, info.remain)}`, 4);
+        const canDeclare = !!this.game?.canRiichi;
+        const tail = canDeclare ? ' · 点「听牌」+1 番' : '';
+        this._showMessage(`【听牌】${HintAdvisor.tenpaiText(info.waiting, info.remain)}${tail}`, 4);
     }
 
     // ==================== 交互处理 ====================
@@ -2981,7 +3063,7 @@ export class Main extends Component {
      * 拖牌走的是 _onTileDropDiscard,不会触发这里。
      */
     private _onTileClick(index: number): void {
-        const gm = GameManager.instance;
+        const gm = this.game;
         if (!gm) return;
         if (this._sceneState !== SceneState.PLAYING) return;
         // 发牌动画期间: 静默忽略点击。
@@ -3011,7 +3093,7 @@ export class Main extends Component {
      * @returns true 表示已打出(手牌会整体重建,调用方不要再操作那张牌的节点)
      */
     private _onTileDropDiscard(index: number): boolean {
-        const gm = GameManager.instance;
+        const gm = this.game;
         if (!gm) return false;
         if (this._sceneState !== SceneState.PLAYING) return false;
         // 发牌动画期间一律不响应拖拽(与 _onTileClick 同样静默, 不弹提示)
@@ -3063,7 +3145,7 @@ export class Main extends Component {
         this._revealAll = false;
         // 设置弹窗若还开着先收起(从弹窗进来时已关, 从结算面板进来时它本来就没开)
         this._closeSettings();
-        GameManager.instance?.cancelPendingMeld();
+        this.game?.cancelPendingMeld();
         this._clearTable();
         this._startDealing();
         // 重开后设置按钮仍然可用(重开期间它的显示状态可能被改过)
@@ -3072,7 +3154,7 @@ export class Main extends Component {
 
     /** 点"听牌": 宣告本局已听牌(亮给对手看, 胡牌时加 1 番) */
     private _onRiichiClick(): void {
-        const gm = GameManager.instance;
+        const gm = this.game;
         if (!gm || this._sceneState !== SceneState.PLAYING) return;
         gm.declareTenpai();
         this._refreshRiichiButton();
@@ -3100,13 +3182,19 @@ export class Main extends Component {
 
         const items = request.items;
         const isRon = request.kind === 'ron';
-        // 按钮文字: 副露项为 "碰 五萬五萬五萬";吃胡为 "胡牌 五萬";末项为"过"
-        const labels = items.map(it => `${it.label} ${it.tilesText}`.trim());
-        const passLabel = isRon ? '过 (不胡)' : '过 (继续摸牌)';
+        // 按钮两段文字: 动作(吃/碰/杠/胡牌/过) + 说明(牌面 / 选了会怎样)
+        // 副露项的牌面由 GameManager 给出(碰/杠只报一张, 吃报整组点数)
+        const specs = items.map(it => ({ action: it.label, sub: it.tilesText, ghost: false, ron: false }));
+        specs.push({ action: '过', sub: isRon ? '不胡' : '继续摸牌', ghost: true, ron: false });
 
-        // 按文字长度估算按钮宽度(中文按每字约 20px),整行居中
-        const widths = labels.map(t => clamp(MELD_BTN_H + t.length * 20, 84, 210));
-        widths.push(clamp(MELD_BTN_H + passLabel.length * 20, 96, 210));
+        // 宽度按**真实文字宽度**实测(硬约束 4: 文本域给小了会被压扁,
+        // 原先按"字数×20"拍脑袋再夹到 210, "碰 五萬五萬五萬"会直接撑出边框)
+        const widths = specs.map(sp => Math.max(
+            MELD_BTN_PAD * 2
+            + textWidth(sp.action, MELD_ACTION_FONT)
+            + (sp.sub ? MELD_BTN_TEXT_GAP + textWidth(sp.sub, MELD_SUB_FONT) : 0),
+            96,
+        ));
         const totalW = widths.reduce((s, w) => s + w, 0) + (widths.length - 1) * MELD_BTN_GAP;
 
         // 容器尺寸跟随按钮总宽(仅用于居中与命中范围,不绘制底板)
@@ -3114,25 +3202,82 @@ export class Main extends Component {
         row.getComponent(UITransform)?.setContentSize(totalW, MELD_BTN_H);
 
         let cursor = -totalW / 2;
-        for (let i = 0; i <= labels.length; i++) {
-            const isPass = i === labels.length;
-            const baseColor = isPass ? PASS_BTN_COLOR : (isRon ? RON_BTN_COLOR : MELD_BTN_COLOR);
-            const btn = createButtonNode(
-                isPass ? passLabel : labels[i],
-                widths[i],
-                MELD_BTN_H,
-                baseColor,
-            );
+        for (let i = 0; i < specs.length; i++) {
+            const sp = specs[i];
+            const isPass = sp.ghost;
+            const btn = this._buildMeldButton(sp.action, sp.sub, isPass, isRon && !isPass, widths[i]);
             btn.parent = row;
             btn.setPosition(cursor + widths[i] / 2, 0, 0);
-            bindSafeClick(btn, () => this._onMeldChoiceClick(i), this);
+            // "过"按契约传 -1(resolvePlayerMeld 只认 -1 = 放弃)
+            bindSafeClick(btn, () => this._onMeldChoiceClick(isPass ? -1 : i), this);
             cursor += widths[i] + MELD_BTN_GAP;
         }
 
         panel.setPosition(0, this._meldPanelY, 0);
         panel.active = true;
+        // 原生平台: 按钮底框是在面板隐藏时画的, 显示后补画一次(硬约束 6)
+        repaintButtons(row);
         // 副露面板弹出后玩家多半要重新判断, 提示按钮的可点性随之变化 → 刷一次
         this._refreshHintButton();
+    }
+
+    /**
+     * 造一枚"吃/碰/杠/过"按钮: **信息芯片样式**(深墨绿底 + 金边)
+     *
+     * 与比分条/名牌/听牌芯片是同一套视觉语言(同一块毡布上的东西不该有两种画风);
+     * 文字拆成两段: 动作字(金, 如"碰") + 说明(米白, 如牌面"五萬"), 各自按字号实测宽度。
+     * "过"是弱操作 → 暗边框 + 灰绿字, 视觉上明确比吃/碰/杠低一档。
+     *
+     * 【为什么不用 createButtonNode】那个是立体倒角 + 整行单色白字, 且宽度原来按
+     * "字数×20"估算再夹到 210 —— 长文案会撑出边框(2026-10-17 用户反馈)。
+     *
+     * @param action 动作字(吃/碰1/杠/胡牌/过)
+     * @param sub    说明文字(牌面或后果), 可为空
+     * @param ghost  true="过"这类弱操作
+     * @param ron    true=吃胡按钮(动作字用暖红, 提示"这一下见血")
+     */
+    private _buildMeldButton(action: string, sub: string, ghost: boolean, ron: boolean, width: number): Node {
+        const node = new Node(`MeldBtn_${action}`);
+        node.addComponent(UITransform).setContentSize(width, MELD_BTN_H);
+        const g = node.addComponent(Graphics);
+        const paint = (): void => {
+            g.clear();
+            const r = 12;
+            g.fillColor = CHIP_BG;
+            g.roundRect(-width / 2, -MELD_BTN_H / 2, width, MELD_BTN_H, r);
+            g.fill();
+            g.strokeColor = ghost ? CHIP_EDGE : CHIP_EDGE_SELF;
+            g.lineWidth = ghost ? 1.5 : 2;
+            g.roundRect(-width / 2, -MELD_BTN_H / 2, width, MELD_BTN_H, r);
+            g.stroke();
+        };
+        registerButtonPainter(node, paint);
+        paint();
+
+        // 按下缩放 + 点击音效, 与 createButtonNode 的手感一致
+        const button = node.addComponent(Button);
+        button.transition = Button.Transition.SCALE;
+        button.duration = 0.08;
+        button.zoomScale = 0.9;
+        bindSafeClick(node, playButtonClick, node);
+
+        // 两段文字左对齐排布(硬约束 4: 文字起点 = 节点 x − 宽度/2)
+        const actionColor = ghost
+            ? CHIP_TEXT
+            : (ron ? CHIP_TEXT_WARN : SCORE_GAIN);
+        const subColor = ghost ? SCORE_ZERO : CHIP_TEXT;
+        const actionW = textWidth(action, MELD_ACTION_FONT);
+        const subW = sub ? textWidth(sub, MELD_SUB_FONT) : 0;
+        const startX = -width / 2 + MELD_BTN_PAD;
+        const actionLabel = createLabelNode(action, MELD_ACTION_FONT, actionColor, actionW + 4, MELD_BTN_H, true);
+        actionLabel.parent = node;
+        actionLabel.setPosition(startX + actionW / 2, 0, 0);
+        if (sub) {
+            const subLabel = createLabelNode(sub, MELD_SUB_FONT, subColor, subW + 4, MELD_BTN_H, true);
+            subLabel.parent = node;
+            subLabel.setPosition(startX + actionW + MELD_BTN_TEXT_GAP + subW / 2, 0, 0);
+        }
+        return node;
     }
 
     private _hideMeldPrompt(): void {
@@ -3147,7 +3292,7 @@ export class Main extends Component {
         this._hideMeldPrompt();
         // "过"给一声反馈, 让玩家知道系统收到的是放弃而不是没点到
         if (index < 0) playPassVoice();
-        GameManager.instance?.resolvePlayerMeld(index);
+        this.game?.resolvePlayerMeld(index);
     }
 
     // ==================== 工具方法 ====================

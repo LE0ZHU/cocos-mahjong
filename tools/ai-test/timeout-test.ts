@@ -12,6 +12,7 @@
  *  4. 玩家已行动后计时停止, 不会再自动打牌
  *  5. 超时只触发一次(不会连打两张)
  *  6. 决策计时中不会因为 _awaitingPlayerMeld 混用而误判
+ * 10. 副露超时必须通知 UI 收面板(onMeldPromptClosed), 否则面板盖在对局上不消失
  */
 // 本仓库没有 @types/node, 用 require 引入以跳过类型解析
 declare const require: (m: string) => any;
@@ -63,6 +64,13 @@ check(src.includes('DECIDE_LIMIT = 20'), 'DECIDE_LIMIT = 20');
 check(src.includes("_startDecisionTimer('discard')"), "出牌处调用 _startDecisionTimer('discard')");
 check(src.includes("_startDecisionTimer('meld')"), "副露处调用 _startDecisionTimer('meld')");
 check(src.includes('this._clearDecisionTimer()'), '存在 _clearDecisionTimer');
+{
+    // Main 必须把回调接到 _hideMeldPrompt(否则逻辑层喊了没人收面板)
+    const mainPath = path.join(path.dirname(GM_PATH), '..', 'Main.ts');
+    const mainSrc = fs.readFileSync(mainPath, 'utf8');
+    check(/onMeldPromptClosed\s*=\s*\(\)\s*=>\s*this\._hideMeldPrompt\(\)/.test(mainSrc),
+        'Main 已把 onMeldPromptClosed 接到 _hideMeldPrompt');
+}
 
 // 统计启停点: 出牌起计时应至少 3 处(摸牌/杠后/恢复回合), 副露 3 处
 const startDiscard = (src.match(/_startDecisionTimer\('discard'\)/g) || []).length;
@@ -93,6 +101,18 @@ class TimerHarness {
     /** 记录发生的动作 */
     playedIndex = -1;
     meldResolved = -99;
+    /** 是否满足"门清听牌、还没宣告"的条件(真实代码里是 get canRiichi) */
+    canRiichi = false;
+    /** declareTenpai 被调用的次数 */
+    declareCalls = 0;
+    /** 宣告后, 出牌必须保听(真实代码是 playTile 里的立直锁; 替身只记标记) */
+    declaredTenpai = false;
+    /** 面板关闭通知次数(真实代码经 onMeldPromptClosed 回调让 Main 收面板) */
+    promptClosed = 0;
+    onMeldPromptClosed: (() => void) | null = null;
+    /** 收到的提示文案(真实代码经 onNotice 弹 toast) */
+    notices: string[] = [];
+    onNotice: ((m: string) => void) | null = null;
 
     _startDecisionTimer(kind: 'discard' | 'meld'): void {
         this._decideKind = kind; this._decideElapsed = 0; this._decideTimedOut = false;
@@ -107,6 +127,12 @@ class TimerHarness {
         this._player.hand.splice(index, 1);
         this._playerDrawnTile = null;
         this.playedIndex = index;
+        return true;
+    }
+    declareTenpai(): boolean {
+        this.declareCalls++;
+        this.declaredTenpai = true;
+        this.canRiichi = false;   // 宣告后按钮不再亮
         return true;
     }
     resolvePlayerMeld(i: number): void {
@@ -231,6 +257,65 @@ function tick(harness: any, seconds: number, step = 0.25): void {
     g._startDecisionTimer('discard');
     tick(g, 25);
     check(g.playedIndex === -1, 'AI 回合/不可出牌时, 超时不会替玩家出牌');
+}
+
+// --- 9. 超时兜底: 门清听牌时先自动宣告"听牌"(+1 番), 再打出刚摸的那张 ---
+{
+    const g: any = new TimerHarness();
+    g.hand = [7, 8, 9, 10];
+    g._playerDrawnTile = 10;
+    g.canRiichi = true;
+    g._startDecisionTimer('discard');
+    tick(g, 20.5);
+    check(g.declareCalls === 1, '门清听牌超时 → 自动宣告"听牌"恰好一次', `declareCalls=${g.declareCalls}`);
+    check(g.declaredTenpai === true, '宣告后 marked 为已宣告');
+    check(g.playedIndex === 3, '宣告之后仍按老规则打出刚摸的那张', `playedIndex=${g.playedIndex}`);
+}
+{
+    // 不能宣告(有副露 / 不允许立直)时不许乱宣告
+    const g: any = new TimerHarness();
+    g.hand = [7, 8, 9, 10];
+    g._playerDrawnTile = 10;
+    g.canRiichi = false;
+    g._startDecisionTimer('discard');
+    tick(g, 20.5);
+    check(g.declareCalls === 0, '不满足宣告条件时不宣告', `declareCalls=${g.declareCalls}`);
+    check(g.playedIndex === 3, '照常自动出牌');
+}
+// 源码顺序: 宣告必须排在 playTile 之前(否则牌已打出, 立直就锁不住下一手)
+{
+    const iDeclare = updateBody.indexOf('this.declareTenpai()');
+    const iPlay = updateBody.indexOf('this.playTile(idx)');
+    check(iDeclare > 0 && iPlay > 0 && iDeclare < iPlay,
+        '超时分支里"自动宣告"排在 playTile 之前', `${iDeclare} vs ${iPlay}`);
+}
+
+// --- 10. 副露超时: 必须通知 UI 收面板(逻辑层"过"了, 面板不会自己消失) ---
+{
+    const g: any = new TimerHarness();
+    g._awaitingPlayerMeld = true;
+    g.onMeldPromptClosed = () => { g.promptClosed++; };
+    g.onNotice = (m: string) => { g.notices.push(m); };
+    g._startDecisionTimer('meld');
+    tick(g, 20.5);
+    check(g.promptClosed === 1, '副露超时: 通知 UI 收面板恰好一次', `promptClosed=${g.promptClosed}`);
+    check(g.notices.some(m => m.includes('超时')), '副露超时: 给玩家一条"超时已自动过"的提示',
+        JSON.stringify(g.notices));
+    check(g.meldResolved === -1, '面板收掉后照常自动"过"', `meldResolved=${g.meldResolved}`);
+}
+// 源码顺序: 收面板通知必须先于 resolvePlayerMeld(先撤面板, 再继续对局)
+{
+    const iClosed = updateBody.indexOf('this.onMeldPromptClosed?.()');
+    const iResolve = updateBody.indexOf('this.resolvePlayerMeld(-1)');
+    check(iClosed > 0 && iResolve > 0 && iClosed < iResolve,
+        '超时分支里"收面板通知"排在 resolvePlayerMeld 之前', `${iClosed} vs ${iResolve}`);
+}
+check(src.includes('onMeldPromptClosed'), '存在 onMeldPromptClosed 回调(非点击关闭也要通知 UI)');
+{
+    // cancelPendingMeld(重开/返回主页/副露确定都经过它)也要通知 UI 收面板
+    const m = src.match(/cancelPendingMeld\(\): void \{[\s\S]*?\n    \}/);
+    check(!!m && m[0].includes('onMeldPromptClosed?.()'),
+        'cancelPendingMeld 里同样通知 UI 收面板(挂起作废 = 面板撤下)');
 }
 
 console.log(`\n=== 结果: ${fails === 0 ? '全部通过' : fails + ' 项失败'} ===`);

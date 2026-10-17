@@ -72,7 +72,7 @@ SCORE_HAND_GAP = const('SCORE_HAND_GAP')
 TENPAI_CHIP_H = const('TENPAI_CHIP_H')
 TENPAI_FONT = const('TENPAI_FONT')
 TENPAI_CHIP_PAD = const('TENPAI_CHIP_PAD')
-TENPAI_CHIP_RIGHT = const('TENPAI_CHIP_RIGHT')
+CHIP_EDGE_PAD = const('CHIP_EDGE_PAD')
 TENPAI_HAND_GAP = const('TENPAI_HAND_GAP')
 CHIP_MIN_SCALE = const('CHIP_MIN_SCALE')
 
@@ -158,27 +158,32 @@ def layout_for(ratio):
     strip_scale = max(CHIP_MIN_SCALE, strip_max_w / total) if total > strip_max_w else 1.0
 
     # _placeTenpaiChip
-    chip_right = half_w - TENPAI_CHIP_RIGHT
+    chip_right = half_w - CHIP_EDGE_PAD
     hand_right = (14 * TILE_W) / 2 + TENPAI_HAND_GAP
     chip_max_w = chip_right - hand_right
     chip_w = text_width(TENPAI_TEXT, TENPAI_FONT) + TENPAI_CHIP_PAD * 2
     chip_scale = max(CHIP_MIN_SCALE, chip_max_w / chip_w) if chip_w > chip_max_w else 1.0
+    # 镜像 _placeTenpaiChip: 芯片中心在手牌行上方 dy, 与"你·听"标记纵向错开
+    chip_dy = max(TILE_H / 2 - 7, TENPAI_MARK_H / 2 + TENPAI_CHIP_H / 2 + 8)
 
     # ---- 座位名牌(镜像 _placeSeatPlates) ----
     plate_names = ['', '老陈', '小雨', '阿虎']   # 自家没有名牌(见 Main._buildSeatPlates)
     plate_badges = ['', '×2', '', '']          # 只演示"上家在连庄"
+    # 听牌状态并进名牌(2026-10-17): 手机名字后面加"·听", 四角不再挂"xx·听"小牌
+    plate_tags = ['', '·听', '', '·听']
     plates = []
     for i in range(4):
         name_w = text_width(plate_names[i], SEAT_PLATE_FONT)
+        tag_w = text_width(plate_tags[i], SEAT_PLATE_FONT) if plate_tags[i] else 0
         badge_w = text_width(plate_badges[i], SEAT_PLATE_FONT) if plate_badges[i] else 0
         gap_w = SEAT_PLATE_FONT * 0.3 if plate_badges[i] else 0
-        w = name_w + badge_w + gap_w + SEAT_PLATE_PAD * 2
-        plates.append(dict(name=plate_names[i], badge=plate_badges[i],
-                           name_w=name_w, badge_w=badge_w, gap_w=gap_w, w=w))
+        w = name_w + tag_w + badge_w + gap_w + SEAT_PLATE_PAD * 2
+        plates.append(dict(name=plate_names[i], tag=plate_tags[i], badge=plate_badges[i],
+                           name_w=name_w, tag_w=tag_w, badge_w=badge_w, gap_w=gap_w, w=w))
     tilt = _math.radians(90 - SIDE_EDGE_TILT)
     side_half = (14 * SIDE_TILE_W) / 2 * _math.sin(tilt) + (SIDE_TILE_W * TILE_RATIO) / 2 * _math.cos(tilt)
     side_x = CONTENT_W / 2 - TENPAI_MARK_INSET
-    side_y = -(TENPAI_MARK_H / 2 + SEAT_PLATE_GAP + SEAT_PLATE_H / 2)
+    side_y = 0   # 上方不再有"xx·听"小牌, 名牌自己居中(镜像 _placeSeatPlates)
     plates[1]['x'] = (14 * TOP_TILE_W) / 2 + SEAT_PLATE_GAP + plates[1]['w'] / 2
     plates[1]['y'] = top_hand_y
     plates[2]['x'], plates[2]['y'] = -side_x, side_y
@@ -192,7 +197,7 @@ def layout_for(ratio):
         gear_x=gear_x, gear_y=gear_y, strip_left=strip_left, strip_right=strip_right,
         strip_cx=strip_cx, strip_max_w=strip_max_w, widths=widths, total=total,
         strip_scale=strip_scale, chip_right=chip_right, hand_right=hand_right,
-        chip_w=chip_w, chip_scale=chip_scale,
+        chip_w=chip_w, chip_scale=chip_scale, chip_dy=chip_dy,
     )
 
 
@@ -302,10 +307,10 @@ def render(ratio, title, out):
     f = font(22 * sx)
     d.text((mx, my), '你·听', fill=(255, 226, 158), font=f, anchor='mm')
 
-    # 听牌详情芯片(真实宽度与缩放, 右对齐到 halfW−TENPAI_CHIP_RIGHT)
+    # 听牌详情芯片(真实宽度与缩放, 右对齐到 halfW−CHIP_EDGE_PAD, 抬到手牌行上方)
     chip_w = L['chip_w'] * L['chip_scale']
     cxx = L['chip_right'] - chip_w / 2
-    px, py = P(cxx, L['hand_y'])
+    px, py = P(cxx, L['hand_y'] + L['chip_dy'])
     pw, ph = chip_w * sx, TENPAI_CHIP_H * L['chip_scale'] * sx
     r = min(10 * L['chip_scale'] * sx, ph / 2)
     d.rounded_rectangle([px - pw / 2, py - ph / 2, px + pw / 2, py + ph / 2], radius=r,
@@ -329,9 +334,6 @@ def render(ratio, title, out):
     box(-620, 0, SIDE_TILE_W * 1.5, L['side_half'] * 2, (150, 190, 255), '左家手牌')
     box(620, 0, SIDE_TILE_W * 1.5, L['side_half'] * 2, (150, 190, 255), '右家手牌')
     box(0, L['meld_y'], 4 * 3 * RIVER_TILE_W, riv_h, (150, 190, 255), '自家副露(4 组最坏)')
-    box(-TENPAI_MARK_INSET, top_meld_y, TENPAI_MARK_W, TENPAI_MARK_H, (170, 210, 255), '上家·听')
-    box(-TENPAI_MARK_INSET, 0, TENPAI_MARK_W, TENPAI_MARK_H, (170, 210, 255), '左家·听')
-    box(TENPAI_MARK_INSET, 0, TENPAI_MARK_W, TENPAI_MARK_H, (170, 210, 255), '右家·听')
     box(764, L['half_h'] - 16 - 27, 96, 55, (170, 210, 255), '牌墙')
 
     # ---- 四家座位名牌(名字 + 连庄角标) ----
@@ -346,8 +348,10 @@ def render(ratio, title, out):
         f = font(SEAT_PLATE_FONT * sx)
         x0 = px - pw / 2 + SEAT_PLATE_PAD * sx
         d.text((x0, py), p['name'], fill=CHIP_TEXT, font=f, anchor='lm')
+        if p['tag']:
+            d.text((x0 + p['name_w'] * sx, py), p['tag'], fill=(255, 226, 158), font=f, anchor='lm')
         if p['badge']:
-            d.text((x0 + (p['name_w'] + p['gap_w']) * sx, py), p['badge'],
+            d.text((x0 + (p['name_w'] + p['tag_w'] + p['gap_w']) * sx, py), p['badge'],
                    fill=SCORE_GAIN, font=f, anchor='lm')
 
     # 关键边界线: 手牌右缘 / 芯片右缘 / 手牌上沿
