@@ -490,7 +490,8 @@ export class Main extends Component {
     /**
      * 上家/本家弃牌河每排最多张数
      * 取 9: 一局里每家最多弃 21 张,排到第三排时只剩 1~3 张,且从最外侧那一列开始,
-     * 离桌心的转盘还很远。也不能再加大(例如 11 张/排): 那样这块牌河横向会顶到左右两家的牌河。
+     * 离桌心的转盘还很远。也不能再加大(例如 11 张/排): 那样这块牌河横向会顶到左右两家的牌河 ——
+     * ⚠️ 侧家牌河的 x 现在是**按这个宽度反推**的(`_sideRiverX`), 改这里会把左右两块一起推出去。
      */
     private readonly RIVER_COLS = 9;
     /**
@@ -499,6 +500,14 @@ export class Main extends Component {
      * 取 7 让这一块短一点: 残局堆到第 3 行时,两端的牌不会顶到本家副露行的两个角。
      */
     private readonly SIDE_RIVER_COLS = 7;
+    /**
+     * 左/右家牌河内缘 与 自家/上家牌河外沿 之间要留的横向净空
+     *
+     * 侧家那块牌河与上下的牌河在纵向上是**重叠**的(侧家那块从 y≈-160 一路到 +180),
+     * 所以"不叠"只靠这条横向净空兜着。留 30(≈0.7 张牌宽)才看得出是两堆牌,
+     * 而不是一堆斜着摆的牌。侧家牌河的 x 由 `_sideRiverX` 按这条净空反推。
+     */
+    private readonly SIDE_RIVER_GAP = 30;
     // 四家的弃牌河容器一律不做纵向压缩(scaleY 全为 1):
     // 同一张 44 宽的牌,压过的比没压过的又扁又小,本家的牌河就会显得比其他三家小、宽高比也不对。
     // 副露(吃/碰/杠)那一排同样不单独配尺寸,直接用 RIVER_TILE_W / RIVER_GAP(见 _refreshMelds),
@@ -507,6 +516,8 @@ export class Main extends Component {
     // ---- AI 布局配置: [手牌x, 横向(顶部/侧边), 弃牌x, Y缩放] ----
     // 手牌/弃牌的 y 由 _applyLayout 按可见高度动态计算(顶部贴可见上边,侧边居中)
     // 弃牌河排布统一走 RIVER_COLS,不在这里单独配置
+    // 左右家的 dx 只是**上限**(= 老位置 340): 真实 x 由 _sideRiverX 按牌尺寸反推,
+    // 只允许比这个值更靠桌心, 不许往外退(见 _sideRiverX 的注释)
     private readonly AI_LAYOUT: {
         hx: number; hH: boolean;
         dx: number; scaleY: number;
@@ -1024,6 +1035,37 @@ export class Main extends Component {
     }
 
     /**
+     * 左/右家弃牌河的 x(内容坐标, 返回正数; 左家取负、右家取正)
+     *
+     * 【为什么不再写死 340】侧家牌河是斜着摆的(容器按桌面侧边倾角旋转 ±(90 − tilt),
+     * 见 SIDE_EDGE_TILT), 它在屏幕横向上最"往桌心探"的位置**不是容器原点**,
+     * 而是靠桌心那条边上最内侧的牌角 ——
+     *
+     *   探出量 = (半排长 + 半张牌宽) × sin(tilt) + 半张牌高 × cos(tilt)
+     *
+     * 手机(牌宽 44)约 55px, 4:3 平板(牌宽 59)约 73px。所以写死 340 时两块牌河之间
+     * 其实还空着 87px(手机), 看着像"飘在桌边"; 平板却只剩 3px —— 同一个数字
+     * 在两种屏幕上完全不是一回事, 必须按牌尺寸反推。
+     *
+     * 约束: 内缘 ≥ 上下牌河的外沿 + SIDE_RIVER_GAP。
+     * 上限取 `AI_LAYOUT.dx`(老位置 340): 平板牌大, 反推出来会超过 340,
+     * 那就保持原位 —— 本次只"往桌心靠", 不让它往外退。
+     */
+    private _sideRiverX(rivH: number): number {
+        const w = this.RIVER_TILE_W;
+        const stepX = w + this.RIVER_GAP;
+        const tilt = (this.SIDE_EDGE_TILT * Math.PI) / 180;
+        const overhang =
+            (((this.SIDE_RIVER_COLS - 1) * stepX) / 2 + w / 2) * Math.sin(tilt)
+            + (rivH / 2) * Math.cos(tilt);
+        const riverHalfW = (this.RIVER_COLS * stepX) / 2;
+        return Math.min(
+            Math.abs(this.AI_LAYOUT[1].dx),
+            riverHalfW + this.SIDE_RIVER_GAP + overhang,
+        );
+    }
+
+    /**
      * 依据可见半高 halfH 定位所有 UI(内容坐标,原点为屏幕中心):
      *  - 底部由下到上: 手牌 → 副露 → 弃牌河
      *  - 顶部由上到下: 上家手牌 → 上家副露 → 上家弃牌河(整组紧贴可见区顶边;
@@ -1062,6 +1104,8 @@ export class Main extends Component {
         const meldH = rivH;
         // 副露行与手牌/牌河之间留宽一点: 副露牌外侧要挂"吃/碰/杠是从谁那里来的"小标记
         const meldGap = MELD_MARK_GAP;
+        /** 左/右家牌河 x: 内缘贴住自家/上家牌河, 按牌尺寸反推(见 _sideRiverX) */
+        const sideRiverX = this._sideRiverX(rivH);
 
         // ---- 底部: 手牌 → 副露 → 弃牌河(按钮已移除) ----
         const handY = -bottomHalf + this.TILE_H / 2 + 8;
@@ -1153,11 +1197,11 @@ export class Main extends Component {
         this._meldContainers[1]?.setPosition(0, topMeldY, 0);
         this._aiDiscardContainers[0]?.setPosition(0, topDiscY, 0);
 
-        // ---- 左/右家(索引 1、2): 竖直居中 ----
+        // ---- 左/右家(索引 1、2): 竖直居中; 牌河 x 由 _sideRiverX 反推(比老位置更靠桌心) ----
         for (let i = 1; i <= 2; i++) {
             const layout = this.AI_LAYOUT[i];
             this._aiHandContainers[i]?.setPosition(layout.hx, 0, 0);
-            this._aiDiscardContainers[i]?.setPosition(layout.dx, 0, 0);
+            this._aiDiscardContainers[i]?.setPosition(i === 1 ? -sideRiverX : sideRiverX, 0, 0);
             if (this._meldContainers[i + 1]) {
                 const offX = i === 1 ? 70 : -70;
                 this._meldContainers[i + 1]!.setPosition(layout.hx + offX, 0, 0);

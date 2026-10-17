@@ -106,7 +106,12 @@ const TURN_DISC_R_MIN = num(mainCode, /TURN_DISC_R_MIN\s*=\s*([\d.]+)/, 'TURN_DI
 const TURN_DISC_MARGIN = num(mainCode, /TURN_DISC_MARGIN\s*=\s*([\d.]+)/, 'TURN_DISC_MARGIN');
 /** 左/右家手牌列 / 弃牌河的 x(来自 Main.AI_LAYOUT) */
 const SIDE_HAND_X = 620;
-const SIDE_RIVER_X = 340;
+/** 左右家牌河的老位置 = 现在只作上限(反推出来更大时保持原位, 只许往桌心靠) */
+const SIDE_RIVER_X_MAX = Math.abs(num(mainCode, /hH:\s*false,\s*dx:\s*(-?[\d.]+)/, 'AI_LAYOUT 左家 dx'));
+/** 弃牌河列数 / 侧家牌河内缘净空(侧家牌河的 x 由它们反推, 见 Main._sideRiverX) */
+const RIVER_COLS = num(mainCode, /private readonly RIVER_COLS\s*=\s*([\d.]+)/, 'RIVER_COLS');
+const SIDE_RIVER_COLS = num(mainCode, /private readonly SIDE_RIVER_COLS\s*=\s*([\d.]+)/, 'SIDE_RIVER_COLS');
+const SIDE_RIVER_GAP = num(mainCode, /private readonly SIDE_RIVER_GAP\s*=\s*([\d.]+)/, 'SIDE_RIVER_GAP');
 /** 满手张数(含刚摸到的那张), 横向最坏情况 */
 const FULL_HAND = 14;
 /** 副露最坏情况: 4 组 × 4 张 */
@@ -135,6 +140,37 @@ function bottomHalfOf(halfH: number): number {
 }
 function aspectHalfH(aspect: number): number {
     return CONTENT_HALF_W / aspect;
+}
+
+/**
+ * 侧家牌河的倾斜角(度) —— 与 Main.SIDE_EDGE_TILT 同一套桌面几何:
+ * atan2(近端半宽 − 远端半宽, 近端半高 + 远端半高)。这里用上面提取到的桌面常量重算,
+ * 桌面几何一改, 下面的净空断言会立刻变红。
+ */
+const SIDE_EDGE_TILT = Math.atan2(
+    FELT_NEAR_HW - FELT_NEAR_HW * FAR_RATIO,
+    FELT_NEAR_HH + FELT_NEAR_HH * (TABLE_FAR_HH / TABLE_NEAR_HH),
+) * 180 / Math.PI;
+
+/**
+ * 侧家牌河"往桌心探"的深度。
+ * 容器是斜的, 最靠桌心的不是容器原点, 而是靠桌心那条边上最内侧的牌角:
+ *   (半排长 + 半张牌宽) × sin(倾角) + 半张牌高 × cos(倾角)
+ * 写死 x=340 时手机这块会白留 87px 空档, 4:3 平板却只剩 3px —— 同一个数字不是一回事。
+ */
+function sideRiverOverhang(riverW: number, rivH: number): number {
+    const tilt = (SIDE_EDGE_TILT * Math.PI) / 180;
+    return (((SIDE_RIVER_COLS - 1) * riverW) / 2 + riverW / 2) * Math.sin(tilt)
+        + (rivH / 2) * Math.cos(tilt);
+}
+/** 复刻 Main._sideRiverX */
+function sideRiverX(riverW: number, rivH: number): number {
+    return Math.min(SIDE_RIVER_X_MAX,
+        (RIVER_COLS * riverW) / 2 + SIDE_RIVER_GAP + sideRiverOverhang(riverW, rivH));
+}
+/** 侧家牌河内缘 ↔ 自家/上家牌河外沿 的净空(<0 就是叠了) */
+function sideRiverClearance(riverW: number, rivH: number): number {
+    return sideRiverX(riverW, rivH) - sideRiverOverhang(riverW, rivH) - (RIVER_COLS * riverW) / 2;
 }
 
 const SCREENS: Array<[string, number]> = [
@@ -231,6 +267,16 @@ check(['_refreshHand', '_refreshAIHand', '_refreshDiscard', '_refreshAIDiscard',
     .every(f => rebuildBody.indexOf(f) >= 0),
     '_rebuildTiles() 覆盖手牌 / 牌河 / 副露');
 check(rebuildBody.includes('_dealing'), '_rebuildTiles() 在发牌动画期间跳过(不打断飞入)');
+// 左右家牌河的 x 不再是写死的 340, 而是按净空反推 —— 别又退回硬编码
+const sideXBody = body(mainCode, 'private _sideRiverX(');
+check(sideXBody.length > 0, '_sideRiverX() 能定位到');
+check(sideXBody.includes('SIDE_RIVER_GAP') && sideXBody.includes('RIVER_COLS')
+    && sideXBody.includes('SIDE_EDGE_TILT'),
+    '_sideRiverX() 用"净空 + 牌河宽度 + 倾斜探出量"反推');
+check(sideXBody.includes('Math.min'), '_sideRiverX() 被上限夹住(只许往桌心靠, 不许往外退)');
+check(applyLayout.includes('_sideRiverX(rivH)'), '_applyLayout() 用 _sideRiverX 定位左右家牌河');
+check(/setPosition\(i === 1 \? -sideRiverX : sideRiverX/.test(applyLayout),
+    '左右家牌河按反推值镜像摆放');
 // 桌面绘制与牌位上限必须共用同一组常量, 否则改桌面大小会漏
 const tableBody = body(mainCode, 'private _buildTable(');
 check(tableBody.includes('this.TABLE_NEAR_HH') && tableBody.includes('this.TABLE_FAR_HH'),
@@ -278,12 +324,15 @@ for (const [name, aspect] of [['3:2', 3 / 2], ['4:3', 4 / 3]] as Array<[string, 
         `${name} 上家手牌半宽 ${topHalfW.toFixed(0)} 不撞侧家手牌列 ${sideInner.toFixed(0)}`,
         `重叠 ${(topHalfW - sideInner).toFixed(0)}px`);
 
-    // 4) 自家/上家 9 张牌河 ←→ 左/右家牌河(内缘) —— 牌放大后最挤的一条
-    const riverHalfW = (9 * riverW) / 2;
-    const sideRiverInner = SIDE_RIVER_X - riverW / 2;
-    check(riverHalfW + 20 < sideRiverInner,
-        `${name} 牌河半宽 ${riverHalfW.toFixed(0)} 不撞侧家牌河 ${sideRiverInner.toFixed(0)}`,
-        `重叠 ${(sideRiverInner - riverHalfW).toFixed(0)}px 余量不足`);
+    // 4) 自家/上家 9 张牌河 ←→ 左/右家牌河(内缘) —— 牌放大后最挤的一条。
+    //    侧家那块是斜的: 内缘 = x − [(半排长 + 半牌宽)·sin + 半牌高·cos],
+    //    不能用 x − 牌宽/2(会高估净空), 见 sideRiverOverhang
+    const riverHalfW = (RIVER_COLS * riverW) / 2;
+    const rivH = (riverW * BASE_TILE_H) / BASE_TILE_W;
+    const sideGap = sideRiverClearance(riverW, rivH);
+    check(sideGap >= 0,
+        `${name} 侧家牌河内缘 ${(riverHalfW + sideGap).toFixed(0)} 让开牌河外沿 ${riverHalfW.toFixed(0)}(净空 ${sideGap.toFixed(0)})`,
+        `重叠 ${(-sideGap).toFixed(0)}px`);
 
     // 5) 副露最坏情况 16 张仍在内容宽度内
     const meldHalfW = (FULL_MELD * riverW) / 2;
@@ -348,6 +397,32 @@ for (const [name, aspect] of [['21:9', 21 / 9], ['19.5:9', 19.5 / 9], ['16:9', 1
     check(discR <= room,
         `${name} 转盘半径 ${discR.toFixed(1)} ≤ 到牌河的距离 ${room.toFixed(1)}`,
         `压牌 ${(discR - room).toFixed(1)}px`);
+}
+
+console.log('\n[G] 左右家弃牌河"往桌心靠": 内缘净空恒定, 且绝不越过老位置');
+for (const [name, aspect] of [['21:9', 21 / 9], ['19.5:9', 19.5 / 9], ['16:9', 16 / 9],
+    ['3:2', 3 / 2], ['4:3', 4 / 3]] as Array<[string, number]>) {
+    const halfH = aspectHalfH(aspect);
+    const tk = tileScale(halfH);
+    const riverW = BASE_RIVER_TILE_W * tk;
+    const rivH = (riverW * BASE_TILE_H) / BASE_TILE_W;
+    const x = sideRiverX(riverW, rivH);
+    const gap = sideRiverClearance(riverW, rivH);
+    const overhang = sideRiverOverhang(riverW, rivH);
+    check(x <= SIDE_RIVER_X_MAX + 1e-6,
+        `${name} 侧家牌河 x=${x.toFixed(0)} 不越过老位置 ${SIDE_RIVER_X_MAX}(只往桌心靠)`,
+        `跑到了 ${x.toFixed(0)}`);
+    check(gap >= 0, `${name} 与自家/上家牌河净空 ${gap.toFixed(0)} ≥ 0(倾斜探出 ${overhang.toFixed(0)} 已扣掉)`,
+        `重叠 ${(-gap).toFixed(0)}px`);
+    if (tk <= 1.001) {
+        // 手机: 反推值没撞上限, 应该正好贴到 SIDE_RIVER_GAP, 且比老位置至少挪 40px
+        check(near(gap, SIDE_RIVER_GAP, 0.5), `${name} 净空 = SIDE_RIVER_GAP ${SIDE_RIVER_GAP}`,
+            `实际 ${gap.toFixed(1)}`);
+        check(x <= SIDE_RIVER_X_MAX - 40,
+            `${name} 侧家牌河 ${x.toFixed(0)} 比老位置 ${SIDE_RIVER_X_MAX} 靠桌心 ${(SIDE_RIVER_X_MAX - x).toFixed(0)}px(≥40)`,
+            `只挪了 ${(SIDE_RIVER_X_MAX - x).toFixed(0)}px`);
+    }
+    console.log(`     ${name.padEnd(7)} 牌宽 ${riverW.toFixed(0)} → x=${x.toFixed(0)} 内缘 ${(x - overhang).toFixed(0)} 净空 ${gap.toFixed(0)}`);
 }
 
 console.log(`\n${fails === 0 ? '全部通过' : fails + ' 项失败'}\n`);

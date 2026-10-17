@@ -32,6 +32,36 @@ OLD_AI_LAYOUT = [
 ]
 SIDE_EDGE_TILT = math.degrees(math.atan2(786 - 786 * 0.78, 526 + 526 * (530 / 560)))
 
+# ===== 弃牌河列数 / 侧家牌河 x(镜像 Main.RIVER_COLS / SIDE_RIVER_COLS / _sideRiverX) =====
+RIVER_COLS = 9
+SIDE_RIVER_COLS = 7
+SIDE_RIVER_GAP = 30        # 侧家牌河内缘 ↔ 上下牌河外沿的横向净空
+SIDE_RIVER_X_MAX = 340     # 老位置 = 上限: 反推出来更大时保持原位(只许往桌心靠)
+
+
+def side_river_x(riv_w, riv_h):
+    """镜像 Main._sideRiverX: 侧家牌河容器 x(正数)。
+
+    侧家那块是斜着摆的, 最靠桌心的不是容器原点而是内角, 探出量 =
+    (半排长 + 半张牌宽) × sin(tilt) + 半张牌高 × cos(tilt)。
+    """
+    tilt = math.radians(SIDE_EDGE_TILT)
+    overhang = (((SIDE_RIVER_COLS - 1) * riv_w) / 2 + riv_w / 2) * math.sin(tilt) \
+        + riv_h / 2 * math.cos(tilt)
+    return min(SIDE_RIVER_X_MAX, RIVER_COLS * riv_w / 2 + SIDE_RIVER_GAP + overhang)
+
+
+def side_river_inner(riv_w, riv_h, x=None):
+    """侧家牌河内缘到桌心的距离(用于算它和上下牌河之间的真实净空)
+
+    x=None 表示按 _sideRiverX 反推; 给数字表示写死(出"改前"对照图时用)。
+    """
+    tilt = math.radians(SIDE_EDGE_TILT)
+    overhang = (((SIDE_RIVER_COLS - 1) * riv_w) / 2 + riv_w / 2) * math.sin(tilt) \
+        + riv_h / 2 * math.cos(tilt)
+    return (side_river_x(riv_w, riv_h) if x is None else x) - overhang
+
+
 
 def tile_h(w):
     return w * TILE_H_RATIO
@@ -44,7 +74,8 @@ class Variant:
                  info_rows, meld_matches_river=False, meld_squash=0.85, river_squash=0.82,
                  side_river_inward=True, disc_r_min=30, side_river_cols=None,
                  top_tile_w=32, top_tile_gap=2, side_tile_w=38, side_tile_gap=3,
-                 ai_layout=None, meld_offset=70, side_step_adaptive=False):
+                 ai_layout=None, meld_offset=70, side_step_adaptive=False,
+                 side_river_x=None):
         self.name = name
         self.river_w = river_w
         self.river_gap = 2
@@ -69,6 +100,8 @@ class Variant:
         self.ai_layout = ai_layout or DEFAULT_AI_LAYOUT
         self.meld_offset = meld_offset
         self.side_step_adaptive = side_step_adaptive   # 侧边手牌间距是否按可见高度压缩
+        # None = 按 Main._sideRiverX 反推; 给数字 = 写死(用来出"改前"对照图)
+        self.side_river_x = side_river_x
 
     def meld_width(self, seat):
         if self.meld_matches_river:
@@ -172,7 +205,8 @@ def resolve_layout(v, design_w, design_h):
                 riv_h=riv_h, meld_h=meld_h, top_meld_h=top_meld_h,
                 hand_y=hand_y, meld_y=meld_y, disc_y=disc_y,
                 top_hand_y=top_hand_y, top_meld_y=top_meld_y, top_disc_y=top_disc_y,
-                info_y=info_y, disc_r=v.disc_r, tip=v.disc_r * v.tip_ratio)
+                info_y=info_y, disc_r=v.disc_r, tip=v.disc_r * v.tip_ratio,
+                side_river_x=side_river_x(riv_w, riv_h))
 
 
 # ===== 绘制 =====
@@ -401,9 +435,10 @@ def river_tiles(seat, v, lay, count):
         # 所以朝桌外都是 +1;朝桌心则是左家 -1、右家 +1
         inward = -1 if seat == 2 else 1
         direction = inward if v.side_river_inward else 1
-        _, _, dx = v.ai_layout[seat - 1]
+        # x 不再取 AI_LAYOUT 里写死的 340, 而是按牌尺寸反推(镜像 Main._sideRiverX)
+        dx = v.side_river_x if v.side_river_x is not None else lay['side_river_x']
         angle = (90 - SIDE_EDGE_TILT) if seat == 2 else (SIDE_EDGE_TILT - 90)
-        origin, squash = (dx, 0.0), 1.0
+        origin, squash = (-dx if seat == 2 else dx, 0.0), 1.0
     a = math.radians(angle)
     ca, sa = math.cos(a), math.sin(a)
     out = []
@@ -543,6 +578,51 @@ def main_tablet():
     print('saved tablet-preview.png', out.size)
 
 
+def main_side():
+    """左右家牌河"往桌心靠": 改前(写死 340) / 改后(按牌尺寸反推)对照
+
+    弃牌取 21 张(= 三排)是最坏情况: 侧家那块纵向最长, 与上下牌河的重叠带最宽,
+    也最靠桌心。图里要确认两件事: 两块牌河之间**没有叠**, 且看得出是两堆。
+    """
+    cases = [('16:9 手机 (1680x945)', 1680, 945),
+             ('4:3 iPad (1680x1260)', 1680, 1260)]
+    f_label = ImageFont.truetype('C:/Windows/Fonts/msyh.ttc', 22)
+    rows = []
+    for label, dw, dh in cases:
+        for tag, fixed in (('改前 写死 340', 340.0), ('改后 反推', None)):
+            v = Variant('side', 44, 9, (44, 44, 44), (0, 0, 0), 52, True, 1.27, 1,
+                        meld_matches_river=True, river_squash=1.0, side_river_inward=False,
+                        side_river_cols=7, top_tile_w=36, top_tile_gap=0, side_tile_gap=0,
+                        side_river_x=fixed)
+            f = f'tools/.preview-side-{dh}-{tag[:2]}.png'
+            lay = render(v, dw, dh, 21, f)
+            riv_w, riv_h = lay['river_w'], lay['riv_h']
+            x = fixed if fixed is not None else lay['side_river_x']
+            inner = side_river_inner(riv_w, riv_h, fixed)
+            gap = inner - RIVER_COLS * riv_w / 2
+            print(f'[{label} | {tag}] 牌宽={riv_w:.0f} 侧家牌河 x={x:.0f} '
+                  f'内缘={inner:.0f} 上下牌河外沿={RIVER_COLS * riv_w / 2:.0f} 净空={gap:+.0f}px')
+            img = Image.open(f).convert('RGB')
+            os.remove(f)
+            rows.append((f'{label} | {tag} (净空 {gap:+.0f}px)', img))
+
+    scale = 0.5
+    gap_px, pad_top = 12, 30
+    panels = [(t, im.resize((int(im.width * scale), int(im.height * scale)), Image.LANCZOS))
+              for t, im in rows]
+    tw = max(im.width for _, im in panels) + gap_px * 2
+    th = sum(im.height + pad_top + gap_px for _, im in panels)
+    out = Image.new('RGB', (tw, th), (18, 20, 24))
+    d = ImageDraw.Draw(out)
+    y = gap_px
+    for title, im in panels:
+        d.text((gap_px, y), title, font=f_label, fill=(232, 236, 240))
+        out.paste(im, (gap_px, y + pad_top))
+        y += im.height + pad_top + gap_px
+    out.save('side-river-preview.png')
+    print('saved side-river-preview.png', out.size)
+
+
 def main():
     design_w, design_h = 2340, 1080        # 19.5:9 手机横屏
     report = []
@@ -574,5 +654,7 @@ if __name__ == '__main__':
     import sys
     if '--tablet' in sys.argv:
         main_tablet()
+    elif '--side' in sys.argv:
+        main_side()
     else:
         main()
