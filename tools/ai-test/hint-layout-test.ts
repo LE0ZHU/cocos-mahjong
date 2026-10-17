@@ -56,11 +56,13 @@ function num(file: string, name: string): number {
 }
 
 // ---- 提取真实常量 ----
+// 牌尺寸取 BASE_*(基准值): 提示面板的落位校验的是**手机(倍率 1)**;
+// 平板把牌放大后的净空由 tablet-layout-test.ts 的 E 组负责。
 const CONTENT_W = num(src, 'CONTENT_W');
-const TILE_W = num(src, 'TILE_W');
-const TILE_H = num(src, 'TILE_H');
-const TOP_TILE_W = num(src, 'TOP_TILE_W');
-const RIVER_TILE_W = num(src, 'RIVER_TILE_W');
+const TILE_W = num(src, 'BASE_TILE_W');
+const TILE_H = num(src, 'BASE_TILE_H');
+const TOP_TILE_W = num(src, 'BASE_TOP_TILE_W');
+const RIVER_TILE_W = num(src, 'BASE_RIVER_TILE_W');
 const TURN_DISC_R_MIN = num(src, 'TURN_DISC_R_MIN');
 const TURN_DISC_R_MAX = num(src, 'TURN_DISC_R_MAX');
 const MELD_MARK_GAP = num(src, 'MELD_MARK_GAP');

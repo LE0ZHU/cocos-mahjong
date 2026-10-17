@@ -53,10 +53,10 @@ def const(name):
 
 
 CONTENT_W = const('CONTENT_W')
-TILE_W = const('TILE_W')
-TILE_H = const('TILE_H')
-TOP_TILE_W = const('TOP_TILE_W')
-RIVER_TILE_W = const('RIVER_TILE_W')
+TILE_W = const('BASE_TILE_W')
+TILE_H = const('BASE_TILE_H')
+TOP_TILE_W = const('BASE_TOP_TILE_W')
+RIVER_TILE_W = const('BASE_RIVER_TILE_W')
 MELD_MARK_GAP = const('MELD_MARK_GAP')
 HINT_BTN_W = const('HINT_BTN_W')
 HINT_BTN_H = const('HINT_BTN_H')
@@ -75,6 +75,23 @@ TENPAI_CHIP_PAD = const('TENPAI_CHIP_PAD')
 TENPAI_CHIP_RIGHT = const('TENPAI_CHIP_RIGHT')
 TENPAI_HAND_GAP = const('TENPAI_HAND_GAP')
 CHIP_MIN_SCALE = const('CHIP_MIN_SCALE')
+
+# 座位名牌(见 Main._refreshSeatPlates / _placeSeatPlates)
+SEAT_PLATE_H = const('SEAT_PLATE_H')
+SEAT_PLATE_FONT = const('SEAT_PLATE_FONT')
+SEAT_PLATE_PAD = const('SEAT_PLATE_PAD')
+SEAT_PLATE_GAP = const('SEAT_PLATE_GAP')
+SIDE_TILE_W = const('BASE_SIDE_TILE_W')
+TENPAI_MARK_W = const('TENPAI_MARK_W')
+TENPAI_MARK_H = const('TENPAI_MARK_H')
+TENPAI_MARK_INSET = const('TENPAI_MARK_INSET')
+# 桌面几何(平板适配: 可见半高很大时牌位要夹到毡布内)
+TABLE_FAR_HH = const('TABLE_FAR_HH')
+FELT_TILE_TOP = const('FELT_TILE_TOP')
+FELT_TILE_BOTTOM = const('FELT_TILE_BOTTOM')
+# 桌面侧边透视倾斜角(与 Main.SIDE_EDGE_TILT 同一式子)
+import math as _math
+SIDE_EDGE_TILT = _math.degrees(_math.atan2(786 - 786 * 0.78, 526 + 526 * (530 / 560)))
 
 # 齿轮按钮尺寸(与 _buildSettingsUI 的 createIconButton 一致)
 _gear = re.search(r"createIconButton\(\s*'icons/settings'\s*,\s*(\d+)\s*,\s*(\d+)", MAIN)
@@ -100,7 +117,7 @@ WOOD = (150, 104, 54)
 IVORY = (248, 238, 210)
 
 # ---- 展示文案(比分取"常见两三位数", 听牌取"多面听"最坏情况) ----
-SCORE_TEXTS = ['你 +12', '上家 -4', '左家 +128', '右家 -36']
+SCORE_TEXTS = ['你 +12', '老陈 -4', '小雨 +128', '阿虎 -36']
 SCORE_VALUES = [12, -4, 128, -36]
 TENPAI_TEXT = '听 2/3/4/5/6萬 · 余 12 张'   # 最坏情况: 五面听 + 两位数剩余
 
@@ -117,10 +134,16 @@ def layout_for(ratio):
     """复刻 Main._applyLayout 里与新元素相关的定位"""
     half_h = 840 / ratio
     half_w = CONTENT_W / 2
-    hand_y = -half_h + TILE_H / 2 + 8
+    # 平板(3:2 / 4:3)上可见半高超过毡布: 牌位要夹住(见 Main._applyLayout)
+    k = max(1.0, (half_h + 10) / TABLE_FAR_HH)
+    top_half = min(half_h, FELT_TILE_TOP * k)
+    bottom_half = min(half_h, FELT_TILE_BOTTOM * k)
+    hand_y = -bottom_half + TILE_H / 2 + 8
     hand_top = hand_y + TILE_H / 2
     top_tile_h = TOP_TILE_W * TILE_RATIO
+    top_hand_y = top_half - 8 - top_tile_h / 2
     top_meld_top = half_h - 8 - top_tile_h - MELD_MARK_GAP
+    meld_y = hand_y + TILE_H / 2 + RIVER_TILE_W * TILE_RATIO / 2 + MELD_MARK_GAP
 
     gear_x = -half_w + GEAR_PAD + GEAR_W / 2
     gear_y = half_h - 8 - GEAR_H / 2
@@ -141,8 +164,31 @@ def layout_for(ratio):
     chip_w = text_width(TENPAI_TEXT, TENPAI_FONT) + TENPAI_CHIP_PAD * 2
     chip_scale = max(CHIP_MIN_SCALE, chip_max_w / chip_w) if chip_w > chip_max_w else 1.0
 
+    # ---- 座位名牌(镜像 _placeSeatPlates) ----
+    plate_names = ['', '老陈', '小雨', '阿虎']   # 自家没有名牌(见 Main._buildSeatPlates)
+    plate_badges = ['', '×2', '', '']          # 只演示"上家在连庄"
+    plates = []
+    for i in range(4):
+        name_w = text_width(plate_names[i], SEAT_PLATE_FONT)
+        badge_w = text_width(plate_badges[i], SEAT_PLATE_FONT) if plate_badges[i] else 0
+        gap_w = SEAT_PLATE_FONT * 0.3 if plate_badges[i] else 0
+        w = name_w + badge_w + gap_w + SEAT_PLATE_PAD * 2
+        plates.append(dict(name=plate_names[i], badge=plate_badges[i],
+                           name_w=name_w, badge_w=badge_w, gap_w=gap_w, w=w))
+    tilt = _math.radians(90 - SIDE_EDGE_TILT)
+    side_half = (14 * SIDE_TILE_W) / 2 * _math.sin(tilt) + (SIDE_TILE_W * TILE_RATIO) / 2 * _math.cos(tilt)
+    side_x = CONTENT_W / 2 - TENPAI_MARK_INSET
+    side_y = -(TENPAI_MARK_H / 2 + SEAT_PLATE_GAP + SEAT_PLATE_H / 2)
+    plates[1]['x'] = (14 * TOP_TILE_W) / 2 + SEAT_PLATE_GAP + plates[1]['w'] / 2
+    plates[1]['y'] = top_hand_y
+    plates[2]['x'], plates[2]['y'] = -side_x, side_y
+    plates[3]['x'], plates[3]['y'] = side_x, side_y
+    plates[0]['x'], plates[0]['y'] = None, None
+
     return dict(
         half_h=half_h, half_w=half_w, hand_y=hand_y, hand_top=hand_top, top_meld_top=top_meld_top,
+        table_k=k, top_half=top_half, bottom_half=bottom_half, top_hand_y=top_hand_y,
+        meld_y=meld_y, side_half=side_half, plates=plates,
         gear_x=gear_x, gear_y=gear_y, strip_left=strip_left, strip_right=strip_right,
         strip_cx=strip_cx, strip_max_w=strip_max_w, widths=widths, total=total,
         strip_scale=strip_scale, chip_right=chip_right, hand_right=hand_right,
@@ -266,6 +312,43 @@ def render(ratio, title, out):
                         fill=CHIP_BG + (235,), outline=CHIP_EDGE + (245,), width=2)
     f = font(TENPAI_FONT * L['chip_scale'] * sx)
     d.text((px, py), TENPAI_TEXT, fill=CHIP_TEXT, font=f, anchor='mm')
+
+    # ---- 各家牌区(淡框): 核对座位名牌有没有压到牌 ----
+    riv_h = RIVER_TILE_W * TILE_RATIO
+    top_tile_h = TOP_TILE_W * TILE_RATIO
+    top_meld_y = L['top_hand_y'] - top_tile_h / 2 - riv_h / 2 - MELD_MARK_GAP
+
+    def box(cx, cy, w, h, col, label=''):
+        x0, y0 = P(cx - w / 2, cy + h / 2)
+        x1, y1 = P(cx + w / 2, cy - h / 2)
+        d.rectangle([x0, min(y0, y1), x1, max(y0, y1)], outline=col + (110,), width=1)
+        if label:
+            T(x0 + 2, min(y0, y1) + 2, label, col, 14)
+
+    box(0, L['top_hand_y'], 14 * TOP_TILE_W, top_tile_h, (150, 190, 255), '上家手牌 14 张')
+    box(-620, 0, SIDE_TILE_W * 1.5, L['side_half'] * 2, (150, 190, 255), '左家手牌')
+    box(620, 0, SIDE_TILE_W * 1.5, L['side_half'] * 2, (150, 190, 255), '右家手牌')
+    box(0, L['meld_y'], 4 * 3 * RIVER_TILE_W, riv_h, (150, 190, 255), '自家副露(4 组最坏)')
+    box(-TENPAI_MARK_INSET, top_meld_y, TENPAI_MARK_W, TENPAI_MARK_H, (170, 210, 255), '上家·听')
+    box(-TENPAI_MARK_INSET, 0, TENPAI_MARK_W, TENPAI_MARK_H, (170, 210, 255), '左家·听')
+    box(TENPAI_MARK_INSET, 0, TENPAI_MARK_W, TENPAI_MARK_H, (170, 210, 255), '右家·听')
+    box(764, L['half_h'] - 16 - 27, 96, 55, (170, 210, 255), '牌墙')
+
+    # ---- 四家座位名牌(名字 + 连庄角标) ----
+    for i, p in enumerate(L['plates']):
+        if p['x'] is None:
+            continue
+        px, py = P(p['x'], p['y'])
+        pw, ph = p['w'] * sx, SEAT_PLATE_H * sx
+        d.rounded_rectangle([px - pw / 2, py - ph / 2, px + pw / 2, py + ph / 2],
+                            radius=min(10 * sx, ph / 2), fill=CHIP_BG + (235,),
+                            outline=(CHIP_EDGE_SELF if i == 0 else CHIP_EDGE) + (245,), width=2)
+        f = font(SEAT_PLATE_FONT * sx)
+        x0 = px - pw / 2 + SEAT_PLATE_PAD * sx
+        d.text((x0, py), p['name'], fill=CHIP_TEXT, font=f, anchor='lm')
+        if p['badge']:
+            d.text((x0 + (p['name_w'] + p['gap_w']) * sx, py), p['badge'],
+                   fill=SCORE_GAIN, font=f, anchor='lm')
 
     # 关键边界线: 手牌右缘 / 芯片右缘 / 手牌上沿
     for x, col, label in ((L['hand_right'], (255, 200, 120), '手牌右缘(14 张最坏)'),

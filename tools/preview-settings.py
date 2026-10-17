@@ -56,9 +56,9 @@ def const(src, name):
 
 
 CONTENT_W = const(MAIN, 'CONTENT_W')
-TILE_W = const(MAIN, 'TILE_W')
-TILE_H = const(MAIN, 'TILE_H')
-TOP_TILE_W = const(MAIN, 'TOP_TILE_W')
+TILE_W = const(MAIN, 'BASE_TILE_W')
+TILE_H = const(MAIN, 'BASE_TILE_H')
+TOP_TILE_W = const(MAIN, 'BASE_TOP_TILE_W')
 DISC_R_MAX = const(MAIN, 'TURN_DISC_R_MAX')
 
 CARD_W = const(PANEL, 'CARD_W')

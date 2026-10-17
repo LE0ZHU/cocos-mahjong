@@ -84,14 +84,15 @@ class Variant:
 
     def side_hand_step(self, lay, count):
         """左右家手牌每张牌的间距(复刻 Main._sideHandStep)"""
-        full = self.side_tile_w + self.side_tile_gap
+        tk = lay.get('tile_k', 1.0)
+        full = (self.side_tile_w + self.side_tile_gap) * tk
         half_h = lay['half_h']
         if not self.side_step_adaptive or half_h <= 0 or count <= 1:
             return full
         tilt = math.radians(SIDE_EDGE_TILT)
         cos, sin = math.cos(tilt), math.sin(tilt)
-        th = tile_h(self.side_tile_w)
-        usable_half = half_h - 10 - (th / 2) * sin - (self.side_tile_w / 2) * cos
+        th = tile_h(self.side_tile_w * tk)
+        usable_half = half_h - 10 - (th / 2) * sin - (self.side_tile_w * tk / 2) * cos
         if usable_half <= 0:
             return full
         return min(full, (usable_half * 2) / ((count - 1) * cos))
@@ -101,6 +102,15 @@ class Variant:
 TABLE_FAR_HH = 530
 FELT_TILE_TOP = 492       # 毡布上沿 497.75 再留 6
 FELT_TILE_BOTTOM = 520    # 毡布下沿 -526 再留 6
+
+# ===== 牌尺寸的屏幕比例适配(镜像 Main._applyTileScale) =====
+TILE_REF_HALF_H = 472.5   # 牌尺寸 1:1 的基准可见半高(= 16:9 的 840 × 9/16)
+TILE_SCALE_MAX = 1.14     # 上限: 满手 14 张要让开"提示"按钮右缘
+
+
+def tile_scale(half_h):
+    """镜像 Main._applyTileScale: 手机(≥16:9)恒为 1, 平板按可见高度等比放大"""
+    return max(1.0, min(TILE_SCALE_MAX, half_h / TILE_REF_HALF_H))
 
 
 def table_scale(half_h):
@@ -122,19 +132,24 @@ def resolve_layout(v, design_w, design_h):
     scale = design_w / CONTENT_W
     half_h = (design_h / 2) / scale
     k = table_scale(half_h)
+    # 牌尺寸也跟着可见高度放大(平板), 否则牌相对被放大的桌面会明显偏小
+    tk = tile_scale(half_h)
+    tile_w, tile_h_full = TILE_W * tk, TILE_H * tk
     # 牌位可用半高: 屏幕越方, 可见半高越大, 但桌面只有那么大 —— 必须夹住, 否则牌摆到桌外。
     # 毡布上下不对称(近端更低), 所以上下各夹一次
     top_half = min(half_h, FELT_TILE_TOP * k)
     bottom_half = min(half_h, FELT_TILE_BOTTOM * k)
 
-    riv_h = tile_h(v.river_w)
-    top_tile_h = tile_h(v.top_tile_w)
-    meld_h = tile_h(v.meld_width(0)) if not v.meld_matches_river else riv_h
-    top_meld_h = tile_h(v.meld_width(1)) if not v.meld_matches_river else riv_h
+    riv_w = v.river_w * tk
+    top_w = v.top_tile_w * tk
+    riv_h = tile_h(riv_w)
+    top_tile_h = tile_h(top_w)
+    meld_h = tile_h(v.meld_width(0) * tk) if not v.meld_matches_river else riv_h
+    top_meld_h = tile_h(v.meld_width(1) * tk) if not v.meld_matches_river else riv_h
     gap = MELD_MARK_GAP
 
-    hand_y = -bottom_half + TILE_H / 2 + 8
-    meld_y = hand_y + TILE_H / 2 + meld_h / 2 + gap
+    hand_y = -bottom_half + tile_h_full / 2 + 8
+    meld_y = hand_y + tile_h_full / 2 + meld_h / 2 + gap
     disc_y = meld_y + meld_h / 2 + riv_h / 2 + gap
 
     top_hand_y = top_half - 8 - top_tile_h / 2
@@ -149,7 +164,9 @@ def resolve_layout(v, design_w, design_h):
     avail = min(-bottom_river_top, top_river_bottom) - 6
     v.disc_r = max(v.disc_r_min, min(v.disc_r_max, avail)) if v.disc_adaptive else v.disc_r_max
 
-    return dict(scale=scale, half_h=half_h, top_half=top_half, bottom_half=bottom_half, table_k=k,
+    return dict(scale=scale, half_h=half_h, top_half=top_half, bottom_half=bottom_half,
+                table_k=k, tile_k=tk, tile_w=tile_w, tile_h=tile_h_full,
+                top_tile_w=top_w, side_tile_w=v.side_tile_w * tk, river_w=riv_w,
                 riv_h=riv_h, meld_h=meld_h, top_meld_h=top_meld_h,
                 hand_y=hand_y, meld_y=meld_y, disc_y=disc_y,
                 top_hand_y=top_hand_y, top_meld_y=top_meld_y, top_disc_y=top_disc_y,
@@ -308,13 +325,13 @@ def hand_tiles(seat, v, lay, count):
     """某家手牌每张牌的 (中心x, 中心y, 宽, 高, 旋转角)"""
     origin, angle = seat_origin_angle(seat, v, lay)
     if seat == 0:
-        w, h, step = TILE_W, TILE_H, TILE_W + TILE_GAP
+        w, h, step = lay['tile_w'], lay['tile_h'], lay['tile_w'] + TILE_GAP
     elif seat == 1:
-        w = v.top_tile_w
+        w = lay['top_tile_w']
         h = tile_h(w)
         step = w + v.top_tile_gap
     else:
-        w = v.side_tile_w
+        w = lay['side_tile_w']
         h = tile_h(w)
         step = v.side_hand_step(lay, count)
     start = -((count - 1) * step) / 2
@@ -338,7 +355,7 @@ def meld_tiles(seat, v, lay, groups=(4, 3)):
         off = v.meld_offset if seat == 2 else -v.meld_offset
         origin = (hx + off, 0.0)
         angle = (90 - SIDE_EDGE_TILT) if seat == 2 else (SIDE_EDGE_TILT - 90)
-    w = v.meld_width(seat)
+    w = v.meld_width(seat) * lay['tile_k']
     gap = v.meld_gap_of(seat)
     h = tile_h(w)
     squash = v.player_meld_squash() if seat == 0 else 1.0
@@ -367,7 +384,7 @@ def draw_hand(p, seat, v, lay, count, front=False):
 
 def river_tiles(seat, v, lay, count):
     """某家弃牌河每张牌在内容坐标下的 (中心x, 中心y, 宽, 高, 旋转角)"""
-    w = v.river_w
+    w = lay['river_w']
     h = lay['riv_h']
     gap = v.river_gap
     cols = v.side_river_cols if seat >= 2 else v.river_cols
@@ -481,9 +498,9 @@ def check_fit(lay, discards=14):
 def edge_margins(lay):
     """上家手牌上沿 / 自家手牌下沿 到毡布上下沿的余量(屏幕像素)"""
     k = lay['table_k']
-    top_h = tile_h(CURRENT.top_tile_w) / 2
+    top_h = tile_h(lay['top_tile_w']) / 2
     top = (FELT_FAR_Y - (lay['top_hand_y'] + top_h) / k) * k
-    bottom = lay['hand_y'] - TILE_H / 2 - FELT_NEAR_Y * k
+    bottom = lay['hand_y'] - lay['tile_h'] / 2 - FELT_NEAR_Y * k
     return top, bottom
 
 
@@ -500,6 +517,7 @@ def main_tablet():
         over, where = check_fit(lay)
         top_m, bot_m = edge_margins(lay)
         print(f'[{label}] 可见半高={lay["half_h"]:.0f} 桌面缩放={lay["table_k"]:.3f} '
+              f'牌倍率={lay["tile_k"]:.3f}({lay["tile_w"]:.0f}x{lay["tile_h"]:.0f}) '
               f'牌位半高={lay["top_half"]:.0f}/{lay["bottom_half"]:.0f} 盘半径={lay["disc_r"]:.0f} | '
               f'上沿余量={top_m:.1f} 下沿余量={bot_m:.1f} | 越界={over:+.1f}px {where}')
         img = Image.open(f).convert('RGB')

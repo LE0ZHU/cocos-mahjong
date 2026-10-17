@@ -66,8 +66,22 @@ _gameRoot.scale = design.width / 1680        // CONTENT_W = 1680
 涉及常量都收在 `Main.ts` 顶部的
 `TABLE_NEAR_HH / TABLE_FAR_HH / FELT_TILE_TOP / FELT_TILE_BOTTOM`
 （`_buildTable` 与 `_applyLayout` 共用，别各写一套）。
-复核：`tools/ai-test/tablet-layout-test.ts`；出图：`python tools/preview-layout.py --tablet`
-（`tablet-preview.png`，16:9 / 3:2 / 4:3 三张叠一起，并打印"牌是否越界"）。
+
+⚠️ **牌尺寸本身也必须跟着放大**（2026-10-17 加）：桌面被放大 1.08~1.21 倍后，
+牌若还是手机上的 63×84，牌/桌比例就比手机小一截 —— 观感是"麻将很小、桌子很空旷"。
+所以 `TILE_W / TILE_H / TOP_TILE_W / SIDE_TILE_W / RIVER_TILE_W` **不是常量**，
+而是运行期字段，由 `_applyTileScale(halfH)` 按 `halfH / TILE_REF_HALF_H`（472.5）
+统一乘倍率；基准值收在 `BASE_*`，改牌大小只改 `BASE_*`。
+倍率上限 `TILE_SCALE_MAX = 1.14` 是**由横向净空倒推**的：满手 14 张的半宽
+必须让开「提示」按钮右缘（-531），留 28px 呼吸。再大就会顶到按钮、
+或把听牌芯片挤到 `CHIP_MIN_SCALE` 以下。
+牌的长宽是创建节点时写进 `UITransform` 的，**光改字段不会让已经画出来的牌变大** ——
+`_applyLayout` 在倍率变化时调 `_rebuildTiles()` 重建四家手牌 / 牌河 / 副露
+（发牌动画期间跳过，那一帧本来就在按 `_dealing` 重画）。
+出图：`python tools/preview-layout.py --tablet`
+（`tablet-preview.png`，16:9 / 3:2 / 4:3 三张叠一起，会打印牌倍率与"牌是否越界"）。
+复核：`tools/ai-test/tablet-layout-test.ts`（A 手机不变 / B 桌面盖住屏幕 /
+C 牌在毡布内 / D 源码接线 / E 放大后的牌不撞常驻 UI）。
 
 ### 3. 纵向排版的游标写法
 
@@ -311,6 +325,13 @@ n?.getComponent(TileView)?.setHinted(false);
   与手牌同一排，**右缘固定**（`halfW − TENPAI_CHIP_RIGHT`，让开右侧「你·听」标记）→
   文案变长时向左伸、位置不跳；左缘以满手 14 张的右缘为界，多面听长文案同样靠缩放兜底。
   它纵向整体位于手牌上沿之下，所以不会侵入提示面板的落位通道（硬约束 13b）。
+- **座位名牌**（`_buildSeatPlates` / `_refreshSeatPlates` / `_placeSeatPlates`，2026-10-17）：
+  **只给三家 AI 做**（自己坐哪不用提示，四角净空也都占满了）。内容 = `seatLabel` + 连庄角标
+  `×N`，**不带分数** —— 分数只在比分条里，两处各写一份必然出现"改名忘了改分"的漂移。
+  角标口径 = `GameManager.getStreak(seat)`（连续胡牌 ≥ 2 才显示），与结算面板的 `连庄×N` 同源。
+  位置：上家挂**手牌行右端之外**（按 14 张最宽取位）；左右家挂**桌沿外侧那一列**
+  （x = ±(halfW − `TENPAI_MARK_INSET`)），落在「xx·听」标记**下方** —— 手牌列下端看着更近，
+  但 21:9 上那条带只剩 ~94px，而听牌/提示按钮就咬在那儿，30px 高的名牌塞不进去（实测撞车）。
 - **数据一律由 GameManager 算**（`TenpaiInfo` + `onTenpaiInfo`）：剩余张数 = Σ(4 − 可见张数)，
   与提示里的「N 张进张」同一算法（硬约束 13d）；可见张数直接复用
   `_buildAIContext(0).visible`，玩家与 AI 看到的公开信息一致（硬约束 10）。
@@ -332,9 +353,11 @@ node "$TSC" --target ES2020 --module commonjs --strict false --skipLibCheck \
 node temp/infovis/tools/ai-test/info-visibility-test.js
 ```
 
-四组：①各屏幕比例下比分条不压齿轮/上家手牌/副露行/听标记（含四位数分的最坏文案）
+五组：①各屏幕比例下比分条不压齿轮/上家手牌/副露行/听标记（含四位数分的最坏文案）
 ②听牌芯片不压满手 14 张牌与「你·听」标记、不侵入提示面板通道 ③文案格式**打真实
-`HintAdvisor`**（花色合并、排序、张数口径）④刷新点与跨局归零的源码级断言。
+`HintAdvisor`**（花色合并、排序、张数口径）④刷新点与跨局归零的源码级断言
+⑤座位名牌：上家在手牌右端之外、侧名牌在桌沿列且不压按钮行/手牌（含 3:2 / 4:3），
+角标口径与 JSB 补画、跨局指纹归零的源码级断言。
 出图：`python tools/preview-status.py`（16:9 / 21:9 / 超宽 / 竖屏）。
 
 ### 6h. 菜单内容页（设置规则 / 玩法说明）：字号优先，超出就滚动

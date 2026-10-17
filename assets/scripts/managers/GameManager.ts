@@ -1638,6 +1638,14 @@ export class GameManager extends Component {
     /** 某家累计得分 */
     getScore(seat: number): number { return this._scores[seat] ?? 0; }
 
+    /**
+     * 某家当前的连庄次数(连续胡牌局数, 没胡过是 0)
+     *
+     * 与"庄家"无关 —— 本作没有庄家轮转, 连庄只用于加番(HuScore 的 `连庄×N`)。
+     * 牌桌上的座位名牌就靠它显示 `×N` 角标, 与结算面板那一行同一个口径。
+     */
+    getStreak(seat: number): number { return this._streaks[seat] ?? 0; }
+
     /** 获取座位玩家(0=自己, 1-3=AI) */
     private _getPlayer(seat: number): Player | null {
         if (seat === 0) return this._player;

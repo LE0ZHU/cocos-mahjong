@@ -94,6 +94,26 @@ const SCORE_GAIN = new Color(250, 208, 118, 255);
 const SCORE_LOSS = new Color(238, 138, 124, 255);
 const SCORE_ZERO = new Color(200, 216, 198, 255);
 
+// ==================== 座位名牌 ====================
+//
+// 【为什么要它】比分条把"名字 → 分数"列在一起, 却没说谁坐在哪个位置 ——
+// 听到"老陈碰"时玩家得靠记忆去对上哪一家。名牌贴在各自手牌的外侧端,
+// 把"座位 ↔ 名字"变成常驻信息, 顺带用 `×N` 角标显示连庄。
+//
+// 【为什么只管身份与连庄, 不带分数】分数放两处必然漂移(改名忘了改分数),
+// 而名牌越窄越不容易撞到牌区; 分数仍只在比分条里出现。
+
+const SEAT_PLATE_H = 30;
+const SEAT_PLATE_FONT = 20;
+/** 名牌内左右内边距 */
+const SEAT_PLATE_PAD = 12;
+/** 名牌与手牌端之间的空隙 */
+const SEAT_PLATE_GAP = 12;
+/** "xx·听"标记的尺寸与四角内缩量 —— 座位名牌挂在同一列(桌沿外侧), 两处共用 */
+const TENPAI_MARK_W = 112;
+const TENPAI_MARK_H = 36;
+const TENPAI_MARK_INSET = 70;
+
 // ==================== AI 台词气泡(拟人化) ====================
 //
 // 【为什么气泡贴在自己手牌上, 而不是浮在桌心】牌桌中间那条纵向带在横屏下只有
@@ -275,6 +295,13 @@ export class Main extends Component {
     private _tenpaiChipW = 0;
     /** 手牌行的 y(听牌芯片与手牌同一排, 由 _applyLayout 更新) */
     private _handRowY = 0;
+    // ---- 座位名牌(四家; 贴在各自手牌外侧, 显示名字与连庄角标) ----
+    /** 四家名牌节点(索引 = 座位, 0 = 自己) */
+    private _seatPlates: (Node | null)[] = [null, null, null, null];
+    /** 名牌内容指纹(名字 + 连庄次数), 挡掉无谓重建 */
+    private _seatPlateSig = '';
+    /** 上家手牌行的 y(上家名牌挂在它的右端, 由 _applyLayout 更新) */
+    private _topHandY = 0;
     // ---- AI 台词气泡(拟人化) ----
     /** 三家 AI 的气泡(索引 0/1/2 = 座位 1/2/3);常驻节点,只切显示与文字 */
     private _aiBubbles: (Node | null)[] = [null, null, null];
@@ -352,17 +379,50 @@ export class Main extends Component {
     private _wallNode: Node | null = null;
     private _wallG: Graphics | null = null;
     private _halfH = 0;
+    /** 当前牌尺寸倍率(`_applyTileScale` 的结果); 0 = 还没应用过 */
+    private _tileK = 0;
 
     /** 各座位在中央转盘上的指向角度(度): 0=朝上(上家), 180=朝下(自己), 90=朝左(左家), -90=朝右(右家) */
     private readonly POINTER_ANGLES = [180, 0, 90, -90];
 
     // ---- 牌的统一长宽比例 ----
     // 所有牌(自己手牌 / 上家手牌 / 左右家手牌 / 弃牌河 / 吃碰杠副露)的宽高比都与此一致,
-    // 统一为 3:4(宽:高), 只通过宽度区分远近大小,改比例只需改 TILE_W / TILE_H 两个值。
-    /** 玩家(底部)手牌宽度: 全局尺寸基准(最大,最近) */
-    private readonly TILE_W = 63;
-    /** 玩家(底部)手牌高度: 与宽度成 3:4(63×84) */
-    private readonly TILE_H = 84;
+    // 统一为 3:4(宽:高), 只通过宽度区分远近大小,改比例只需改 BASE_TILE_W / BASE_TILE_H。
+    //
+    // ⚠️ 下面的 TILE_W / TILE_H 等是**运行期尺寸**, 不是编译期常量:
+    // 平板(3:2 / 4:3)上桌面会被 `_applyTableScale` 放大 1.08~1.21 倍, 牌若还按手机尺寸画,
+    // 牌相对桌子就明显偏小、桌子显得空旷。所以 `_applyTileScale(halfH)` 会按可见高度
+    // 把它们统一乘一个倍率(手机 16:9 及更宽恒为 1, 排版一个像素都不变)。
+    // 真实尺寸 = BASE_* × 倍率, 改某一档牌的大小只改 BASE_*。
+    /** 玩家(底部)手牌宽度基准: 全局尺寸基准(最大,最近) */
+    private readonly BASE_TILE_W = 63;
+    /** 玩家(底部)手牌高度基准: 与宽度成 3:4(63×84) */
+    private readonly BASE_TILE_H = 84;
+    /** 上家(顶部)手牌宽度基准(最小,最远) */
+    private readonly BASE_TOP_TILE_W = 36;
+    /** 左/右家手牌宽度基准(中等) */
+    private readonly BASE_SIDE_TILE_W = 38;
+    /** 弃牌河 / 副露牌宽度基准 */
+    private readonly BASE_RIVER_TILE_W = 44;
+
+    /** 玩家(底部)手牌宽度(基准 × 牌尺寸倍率, 见 _applyTileScale) */
+    private TILE_W = this.BASE_TILE_W;
+    /** 玩家(底部)手牌高度(基准 × 牌尺寸倍率) */
+    private TILE_H = this.BASE_TILE_H;
+
+    // ---- 牌尺寸的屏幕比例适配(平板专用, 手机不受影响) ----
+    /** 牌尺寸 1:1 的基准可见半高: 16:9(1920×1080) 的可见半高 = 840 × 9/16 */
+    private readonly TILE_REF_HALF_H = 472.5;
+    /**
+     * 牌尺寸放大倍率上限(手机 16:9 及更宽 = 1)
+     *
+     * 1.14 由**横向净空**倒推: 满手 14 张牌的左缘必须让开"提示"按钮的右缘。
+     * 提示按钮中心 = -CONTENT_W/2 + 115 + HINT_BTN_W + HINT_BTN_GAP = -591, 右缘 -531;
+     * 留 28px 呼吸 → (531 − 28) / (14 × 63 / 2) ≈ 1.14。
+     * 再大就会顶到提示按钮, 或把听牌芯片挤到 `CHIP_MIN_SCALE` 以下。
+     * 改按钮位置 / 手牌张数上限后必须重跑 `tools/ai-test/tablet-layout-test.ts`。
+     */
+    private readonly TILE_SCALE_MAX = 1.14;
 
     // ---- 牌桌几何(内容坐标系) ----
     // 这三个数同时被 `_buildTable()` 的绘制和"牌位能摆多高"的上限使用,
@@ -388,15 +448,15 @@ export class Main extends Component {
 
     // ---- 上家(顶部)牌尺寸(最小,最远) ----
     // 对家(顶部)手牌略微加大,远端的牌不至于太小
-    private readonly TOP_TILE_W = 36;
+    private TOP_TILE_W = this.BASE_TOP_TILE_W;
     private readonly TOP_TILE_GAP = 0;
 
     // ---- 左/右家牌尺寸(中等) ----
-    private readonly SIDE_TILE_W = 38;
+    private SIDE_TILE_W = this.BASE_SIDE_TILE_W;
     private readonly SIDE_TILE_GAP = 0;
 
     // ---- 弃牌河牌尺寸 ----
-    private readonly RIVER_TILE_W = 44;
+    private RIVER_TILE_W = this.BASE_RIVER_TILE_W;
     /** 牌间距/行距: 0 = 弃牌河与副露都排成紧贴的方阵 */
     private readonly RIVER_GAP = 0;
     /**
@@ -491,6 +551,8 @@ export class Main extends Component {
         // 清掉指纹强制重建一次(重画是幂等的)
         this._scoreSig = '';
         this._refreshScoreStrip(true);
+        this._seatPlateSig = '';
+        this._refreshSeatPlates(true);
         // 按钮同理: onLoad 期间画的底框在原生平台上下不来(只剩文字),
         // 菜单与牌桌上所有按钮都在这里补画一次,之后由各处"显示时补画"维持。
         repaintButtons(this.node);
@@ -619,8 +681,9 @@ export class Main extends Component {
         this._dealShown = 0;
         // 比分条是常驻信息(跨局保留): 每次开局按最新累计分重画一次。
         // 牌桌可能刚从主菜单"隐藏过再显示", 原生平台下这种节点的 Graphics 会丢,
-        // 所以这里不是"刷新"而是强制重建。
+        // 所以这里不是"刷新"而是强制重建(座位名牌同理)。
         this._refreshScoreStrip(true);
+        this._refreshSeatPlates(true);
         // 发牌期间不能沿用上一局的槽位快照:
         // 否则新发的牌会"从上一局的位置滑过来", 读起来是错位的瞬移
         this._handSlots.clear();
@@ -820,8 +883,9 @@ export class Main extends Component {
         this._hideAISpeech();
         this._aiBubbleHold = [0, 0, 0];
         this._aiBubbleFade = [0, 0, 0];
-        // 比分条指纹归零: 下一局开局时会强制重建一次(见 _startDealing)
+        // 比分条 / 座位名牌的指纹归零: 下一局开局时会强制重建一次(见 _startDealing)
         this._scoreSig = '';
+        this._seatPlateSig = '';
         // 设置弹窗一并收起(它可能开着; 收起时恢复被冻结的决策倒计时)
         this._closeSettings();
         // 发牌链被 unscheduleAllCallbacks 清掉时, toast 的自动清除也一并没了,
@@ -904,6 +968,27 @@ export class Main extends Component {
     }
 
     /**
+     * 按可见高度放大全部牌的尺寸, 返回倍率(同时改写 TILE_W / TILE_H 等运行期字段)。
+     *
+     * 【为什么牌也要跟着放大】牌是"相对桌子"看的: 平板 3:2 / 4:3 上
+     * `_applyTableScale` 会把桌面放大 1.08~1.21 倍(否则整张桌子会缩在屏幕中间),
+     * 牌若还是手机上的 63×84, 牌/桌比例就比手机小一截 —— 观感正是"牌很小、桌子很空"。
+     * 这里按 `halfH / TILE_REF_HALF_H` 等比放大, 让牌在屏幕上占的高度与 16:9 手机一致。
+     *
+     * 手机 16:9 及更宽时 `halfH ≤ 472.5`, 倍率被 clamp 到 1 —— 排版一个像素都不变。
+     * 尺寸改完后, 已经建好的牌必须重建(长宽写在节点 UITransform 里), 见 `_rebuildTiles`。
+     */
+    private _applyTileScale(halfH: number): number {
+        const k = clamp(halfH / this.TILE_REF_HALF_H, 1, this.TILE_SCALE_MAX);
+        this.TILE_W = this.BASE_TILE_W * k;
+        this.TILE_H = this.BASE_TILE_H * k;
+        this.TOP_TILE_W = this.BASE_TOP_TILE_W * k;
+        this.SIDE_TILE_W = this.BASE_SIDE_TILE_W * k;
+        this.RIVER_TILE_W = this.BASE_RIVER_TILE_W * k;
+        return k;
+    }
+
+    /**
      * 依据可见半高 halfH 定位所有 UI(内容坐标,原点为屏幕中心):
      *  - 底部由下到上: 手牌 → 副露 → 弃牌河
      *  - 顶部由上到下: 上家手牌 → 上家副露 → 上家弃牌河(整组紧贴可见区顶边;
@@ -915,6 +1000,9 @@ export class Main extends Component {
     private _applyLayout(halfH: number): void {
         // 桌面先按可见高度放大 —— 平板 3:2 / 4:3 上它本来会整块缩在屏幕里(见 _applyTableScale)
         const tableK = this._applyTableScale(halfH);
+        // 牌也跟着可见高度等比放大(平板 3:2 / 4:3; 手机 16:9 及更宽恒为 1),
+        // 否则牌相对被放大的桌面会明显偏小 —— 见 _applyTileScale
+        const tileK = this._applyTileScale(halfH);
         /**
          * 牌位可用半高(上下各一个, 因为毡布上下不对称)。
          *
@@ -1004,10 +1092,10 @@ export class Main extends Component {
         const riichiX = -halfW + 115;
         this._riichiBtn?.setPosition(riichiX, handY, 0);
         this._hintBtn?.setPosition(riichiX + HINT_BTN_W / 2 + HINT_BTN_GAP + HINT_BTN_W / 2, handY, 0);
-        this._tenpaiMarkers[0]?.setPosition(halfW - 70, handY, 0);
-        this._tenpaiMarkers[1]?.setPosition(-halfW + 70, topMeldY, 0);
-        this._tenpaiMarkers[2]?.setPosition(-halfW + 70, 0, 0);
-        this._tenpaiMarkers[3]?.setPosition(halfW - 70, 0, 0);
+        this._tenpaiMarkers[0]?.setPosition(halfW - TENPAI_MARK_INSET, handY, 0);
+        this._tenpaiMarkers[1]?.setPosition(-halfW + TENPAI_MARK_INSET, topMeldY, 0);
+        this._tenpaiMarkers[2]?.setPosition(-halfW + TENPAI_MARK_INSET, 0, 0);
+        this._tenpaiMarkers[3]?.setPosition(halfW - TENPAI_MARK_INSET, 0, 0);
 
         // ---- 上家(索引 0): 贴可见顶部 ----
         this._aiHandContainers[0]?.setPosition(0, topHandY, 0);
@@ -1027,6 +1115,10 @@ export class Main extends Component {
 
         // ---- 回合提示: 中央转盘固定在桌心,方向由指针旋转表达(无需随可见高度重排) ----
 
+        // ---- 座位名牌(贴上家手牌右端 / 左右家手牌列下端) ----
+        this._topHandY = topHandY;
+        this._placeSeatPlates();
+
         // ---- 剩余牌墙(图形化),依赖当前可见高度 ----
         this._halfH = halfH;
         // 结算面板按可见高度自适应(手机横屏比 16:9 矮很多), 转屏/改窗口时跟着重排
@@ -1034,6 +1126,37 @@ export class Main extends Component {
         // 设置弹窗同理: 卡片高度随可见高度缩放, 转屏时要重排(否则按钮会被挤出屏幕)
         this._settingsPanel?.fit(halfH);
         this._refreshWall();
+        // 倍率变了 → 桌上已经画好的牌必须按新尺寸重建(长宽写在节点 UITransform 里,
+        // 光改 TILE_W 不会让它们变大)。首次进布局时桌上还没有牌, 这里是空操作。
+        if (Math.abs(tileK - this._tileK) > 1e-4) {
+            this._tileK = tileK;
+            // 上家手牌变宽/变窄后比分条的可用宽度跟着变, 而它的指纹只看分数文本 ——
+            // 转屏时得强制重建一次, 否则芯片不会按新宽度重新缩放
+            this._refreshScoreStrip(true);
+            this._rebuildTiles();
+        }
+    }
+
+    /**
+     * 按当前牌尺寸重建桌上所有的牌(屏幕比例变化后由 `_applyLayout` 调用)
+     *
+     * 【为什么必须重建】牌的长宽是创建节点时写进 UITransform 的, 改 TILE_W 不会
+     * 让已经画出来的牌变大。四家手牌 / 四家牌河 / 四家副露都得重来一遍 ——
+     * 复用各处的刷新入口, 不在这里另写一套排版。
+     *
+     * 发牌动画期间跳过: 那时每帧都在按 `_dealShown` 重画, 中途整体重建会把飞入动画
+     * 和已揭示张数打乱; 尺寸字段已经改好, 下一帧自然按新尺寸画。
+     */
+    private _rebuildTiles(): void {
+        if (this._dealing) return;
+        if (!GameManager.instance) return;
+        this._refreshHand();
+        for (let i = 0; i < 3; i++) {
+            this._refreshAIHand(i);
+            this._refreshAIDiscard(i);
+        }
+        this._refreshDiscard();
+        for (let s = 0; s < 4; s++) this._refreshMelds(s);
     }
 
     // ==================== GameManager 初始化 ====================
@@ -1083,6 +1206,8 @@ export class Main extends Component {
 
         // 对局信息常驻显示: 四家比分条(齿轮右侧) + 听牌详情芯片(手牌右侧)
         this._buildScoreStrip();
+        // 四家座位名牌(贴在各自手牌外侧, 把"座位 ↔ 名字"变成常驻信息)
+        this._buildSeatPlates();
         this._buildTenpaiChip();
 
         this._buildAISeats();
@@ -1331,6 +1456,100 @@ export class Main extends Component {
             chip.setPosition(cursor + w / 2, 0, 0);
             cursor += w + SCORE_CHIP_GAP;
         }
+    }
+
+    // ==================== 座位名牌 ====================
+
+    /**
+     * 创建三家 AI 的名牌容器(空节点, 内容由 `_refreshSeatPlates` 重建)
+     *
+     * 【为什么没有"自家"的名牌】自己坐在哪里不需要提示 —— 手牌就在眼前;
+     * 而四角净空全被占着(左上比分条、右上牌墙、左下听牌/提示按钮),
+     * 硬塞一块只会在侧家名牌旁边再挤一块。自家的连庄在结算面板的番型里写着。
+     */
+    private _buildSeatPlates(): void {
+        for (let s = 1; s <= 3; s++) {
+            const plate = new Node(`SeatPlate_${s}`);
+            plate.parent = this._gameRoot;
+            plate.addComponent(UITransform).setContentSize(1, 1);
+            this._seatPlates[s] = plate;
+        }
+    }
+
+    /**
+     * 重建四家名牌: `名字` + 连庄角标 `×N`
+     *
+     * 角标只在连庄(连续胡牌 ≥ 2 局)时出现 —— 与结算面板里那行 `连庄×N` 同一个
+     * 计数口径(`GameManager.getStreak`), 不另存一份。分数不放进名牌:
+     * 比分条已经列了四家分数, 两处各写一份必然漂移。
+     *
+     * @param force true=无条件重建(原生平台隐藏过再显示 / 开局时 Graphics 会丢)
+     */
+    private _refreshSeatPlates(force = false): void {
+        const gm = GameManager.instance;
+        if (!gm) return;
+        const sig = [1, 2, 3].map(s => `${seatLabel(s)}|${gm.getStreak(s)}`).join('/');
+        if (!force && sig === this._seatPlateSig) return;
+        this._seatPlateSig = sig;
+
+        for (let s = 1; s <= 3; s++) {
+            const plate = this._seatPlates[s];
+            if (!plate) continue;
+            this._clearChildren(plate);
+
+            const name = seatLabel(s);
+            const streak = gm.getStreak(s);
+            const badge = streak >= 2 ? `×${streak}` : '';
+            const nameW = textWidth(name, SEAT_PLATE_FONT);
+            const badgeW = badge ? textWidth(badge, SEAT_PLATE_FONT) : 0;
+            const gapW = badge ? SEAT_PLATE_FONT * 0.3 : 0;
+            const w = nameW + badgeW + gapW + SEAT_PLATE_PAD * 2;
+            plate.getComponent(UITransform)?.setContentSize(w, SEAT_PLATE_H);
+            paintInfoChip(plate.getComponent(Graphics) ?? plate.addComponent(Graphics),
+                w, SEAT_PLATE_H);
+
+            // 左对齐排布(硬约束 4: 文字起点 = 节点 x − 宽度/2)
+            const startX = -w / 2 + SEAT_PLATE_PAD;
+            const nameLabel = createLabelNode(name, SEAT_PLATE_FONT, CHIP_TEXT, nameW + 4, SEAT_PLATE_H, true);
+            nameLabel.parent = plate;
+            nameLabel.setPosition(startX + nameW / 2, 0, 0);
+            if (badge) {
+                const badgeLabel = createLabelNode(badge, SEAT_PLATE_FONT, SCORE_GAIN, badgeW + 4, SEAT_PLATE_H, true);
+                badgeLabel.parent = plate;
+                badgeLabel.setPosition(startX + nameW + gapW + badgeW / 2, 0, 0);
+            }
+        }
+        this._placeSeatPlates();
+    }
+
+    /**
+     * 名牌定位: 贴在各家手牌的**外侧端**(不占任何牌区)
+     *
+     * - 上家: 手牌行的右端之外(按满手 14 张取位, 张数变少也不会缩回来撞到别处)
+     * - 左/右家: **屏幕左右边缘那一列**, 挂在"xx·听"标记下方, 与它组成一条
+     *   "这家是谁 / 听没听"的竖列。手牌列的下端看着更近, 但 21:9 上那条带只剩
+     *   ~94px, 而玩家的听牌/提示按钮就咬在那儿, 30px 高的名牌塞不进去(实测撞车)。
+     *
+     * ⚠️ 这几处都是"净空里挑出来的": 左侧紧挨听牌/提示按钮、右边贴着牌墙,
+     * 改动牌区或按钮位置后必须重跑 `tools/ai-test/info-visibility-test.ts` 的名牌一组。
+     */
+    private _placeSeatPlates(): void {
+        const widthOf = (s: number): number => {
+            const t = this._seatPlates[s]?.getComponent(UITransform);
+            return t ? t.width : 0;
+        };
+        const put = (s: number, x: number, y: number): void => {
+            this._seatPlates[s]?.setPosition(x, y, 0);
+        };
+
+        // 上家: 手牌行右端(14 张是最宽情形)
+        put(1, (14 * this.TOP_TILE_W) / 2 + SEAT_PLATE_GAP + widthOf(1) / 2, this._topHandY);
+
+        // 左/右家: 桌沿外侧那一列(与"xx·听"标记同一 x), 挂在标记下方
+        const sideX = this.CONTENT_W / 2 - TENPAI_MARK_INSET;
+        const sideY = -(TENPAI_MARK_H / 2 + SEAT_PLATE_GAP + SEAT_PLATE_H / 2);
+        put(2, -sideX, sideY);
+        put(3, sideX, sideY);
     }
 
     /**
@@ -2348,8 +2567,9 @@ export class Main extends Component {
         this._refreshRiichiButton();
         this._refreshHintButton();
         this._refreshTenpaiMarkers();
-        // 比分条只在分数变化时真的重建(内部用指纹挡重复)
+        // 比分条只在分数变化时真的重建(内部用指纹挡重复); 名牌同理(名字 + 连庄)
         this._refreshScoreStrip();
+        this._refreshSeatPlates();
     }
 
     /**
@@ -3057,8 +3277,8 @@ function addClaimedRing(node: Node, w: number, h: number): void {
  * 宣告听牌后挂到该座位附近, 一眼看出谁在等牌
  */
 function createTenpaiChip(seatName: string): Node {
-    const w = 112;
-    const h = 36;
+    const w = TENPAI_MARK_W;
+    const h = TENPAI_MARK_H;
     const node = new Node('TenpaiChip');
     node.addComponent(UITransform).setContentSize(w, h);
     const g = node.addComponent(Graphics);

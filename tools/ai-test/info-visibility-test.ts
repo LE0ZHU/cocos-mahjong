@@ -71,11 +71,13 @@ function strip(s: string): string {
 }
 
 // ---- 提取真实常量 ----
+// 牌尺寸取 BASE_*(基准值): 本脚本校验的是**手机(倍率 1)**的排版。
+// 平板把牌按 TILE_SCALE_MAX 放大之后的净空由 tablet-layout-test.ts 的 E 组负责。
 const CONTENT_W = num(mainSrc, 'CONTENT_W');
-const TOP_TILE_W = num(mainSrc, 'TOP_TILE_W');
-const TILE_W = num(mainSrc, 'TILE_W');
-const TILE_H = num(mainSrc, 'TILE_H');
-const RIVER_TILE_W = num(mainSrc, 'RIVER_TILE_W');
+const TOP_TILE_W = num(mainSrc, 'BASE_TOP_TILE_W');
+const TILE_W = num(mainSrc, 'BASE_TILE_W');
+const TILE_H = num(mainSrc, 'BASE_TILE_H');
+const RIVER_TILE_W = num(mainSrc, 'BASE_RIVER_TILE_W');
 const RIVER_GAP = num(mainSrc, 'RIVER_GAP');
 const MELD_MARK_GAP = num(mainSrc, 'MELD_MARK_GAP');
 const SCORE_CHIP_H = num(mainSrc, 'SCORE_CHIP_H');
@@ -353,6 +355,106 @@ console.log('\n[4] 行为约束(源码级)');
     const showTenpai = main.slice(main.indexOf('private _showTenpai('), main.indexOf('private _showTenpai(') + 500);
     check(showTenpai.includes('HintAdvisor.tenpaiText'), '一次性提醒也走同一份文案(不会"说一套显示一套")');
     check(!/可胡:/.test(showTenpai), '旧的“可胡: X Y”文案已替换');
+}
+
+// ================================================================ 5
+console.log('\n[5] 座位名牌(三家 AI: 名字 + 连庄角标): 贴着各自手牌外侧, 不压牌也不压按钮');
+{
+    const SEAT_PLATE_H = num(mainSrc, 'SEAT_PLATE_H');
+    const SEAT_PLATE_FONT = num(mainSrc, 'SEAT_PLATE_FONT');
+    const SEAT_PLATE_PAD = num(mainSrc, 'SEAT_PLATE_PAD');
+    const SEAT_PLATE_GAP = num(mainSrc, 'SEAT_PLATE_GAP');
+    const MARK_W = num(mainSrc, 'TENPAI_MARK_W');
+    const MARK_H = num(mainSrc, 'TENPAI_MARK_H');
+    const MARK_INSET = num(mainSrc, 'TENPAI_MARK_INSET');
+    const HINT_BTN_H = num(mainSrc, 'HINT_BTN_H');
+
+    // 名牌宽度: 名字(2 汉字, AIPersona 的硬约束) + 可选角标 ×N + 内边距
+    const nameW = textWidth('老陈', SEAT_PLATE_FONT);
+    const badgeW = textWidth('×9', SEAT_PLATE_FONT);          // 最坏一位数角标; 两位再宽 10px
+    const gapW = SEAT_PLATE_FONT * 0.3;
+    const plateW = nameW + badgeW + gapW + SEAT_PLATE_PAD * 2;
+    check(nameW > 0, `名牌文字宽 ${nameW.toFixed(0)}px(2 汉字 @ ${SEAT_PLATE_FONT})`);
+
+    const stripLeft = -CONTENT_W / 2 + (() => {
+        const m = /_settingsBtnX\s*=\s*-this\.CONTENT_W\s*\/\s*2\s*\+\s*(\d+)\s*\+\s*(\d+)/.exec(mainSrc)!;
+        return Number(m[1]) + Number(m[2]);                          // pad + 半宽
+    })() + Number(/_settingsBtnX\s*=\s*-this\.CONTENT_W\s*\/\s*2\s*\+\s*(\d+)\s*\+\s*(\d+)/.exec(mainSrc)![2])
+        + Number(/createIconButton\(\s*'icons\/settings'\s*,\s*(\d+)/.exec(mainSrc)![1]) / 2 + SCORE_STRIP_GAP;
+    const stripRight = -(14 * TOP_TILE_W) / 2 - SCORE_HAND_GAP;
+
+    // 上家名牌: 手牌行右端之外(14 张最宽), 与手牌同高
+    const topHandRight = (14 * TOP_TILE_W) / 2;
+    const plate1Left = topHandRight + SEAT_PLATE_GAP;
+    const plate1Right = plate1Left + plateW;
+    check(plate1Left >= topHandRight, '上家名牌在手牌右端之外', `left=${plate1Left.toFixed(0)} 手牌右缘=${topHandRight}`);
+    check(plate1Right < stripLeft || plate1Left > stripRight,
+        '上家名牌与比分条区间不重叠(横向错开)', `名牌 ${plate1Left.toFixed(0)}~${plate1Right.toFixed(0)}, 比分条 ${stripLeft.toFixed(0)}~${stripRight.toFixed(0)}`);
+
+    // 侧名牌: 桌沿外侧那一列, 挂在"xx·听"标记下方
+    const sideX = CONTENT_W / 2 - MARK_INSET;
+    const sideY = -(MARK_H / 2 + SEAT_PLATE_GAP + SEAT_PLATE_H / 2);
+    check(sideX + plateW / 2 <= CONTENT_W / 2, '侧名牌不越出内容坐标系(±840)',
+        `外缘 ${(sideX + plateW / 2).toFixed(0)}`);
+    const markBottom = -MARK_H / 2;
+    check(sideY + SEAT_PLATE_H / 2 <= markBottom - SEAT_PLATE_GAP + 0.01,
+        '侧名牌在"xx·听"标记下方且留出间距', `名牌上沿 ${(sideY + SEAT_PLATE_H / 2).toFixed(0)} ≤ 标记下沿 ${markBottom.toFixed(0)}`);
+
+    // 每个屏幕比例下都验一遍: 上家名牌不越界、侧名牌不与玩家按钮行/手牌撞车
+    const PLATE_SCREENS = SCREENS.concat([{ name: '3:2 平板', halfH: 560 }, { name: '4:3 iPad', halfH: 630 }]);
+    for (const sc of PLATE_SCREENS) {
+        // 平板: 牌位被毡布夹住(与 _applyLayout 同一套式子)
+        const k = Math.max(1, (sc.halfH + 10) / num(mainSrc, 'TABLE_FAR_HH'));
+        const topHalf = Math.min(sc.halfH, num(mainSrc, 'FELT_TILE_TOP') * k);
+        const bottomHalf = Math.min(sc.halfH, num(mainSrc, 'FELT_TILE_BOTTOM') * k);
+        const topHandY = topHalf - 8 - (TOP_TILE_W * TILE_H) / TILE_W / 2;
+        const handY = -bottomHalf + TILE_H / 2 + 8;
+
+        // 上家名牌: 竖直方向不越出可见区, 也不压上家手牌
+        check(Math.abs(topHandY) + SEAT_PLATE_H / 2 <= sc.halfH,
+            `${sc.name}: 上家名牌在可见区内`, `y=${topHandY.toFixed(0)} 半高=${sc.halfH.toFixed(0)}`);
+        check(SEAT_PLATE_H > 0 && plate1Left >= topHandRight, `${sc.name}: 上家名牌不压上家手牌`);
+
+        // 侧名牌: 竖直方向不越界; 与玩家听牌/提示按钮行(以 handY 为心、高 HINT_BTN_H)分开
+        check(Math.abs(sideY) + SEAT_PLATE_H / 2 <= sc.halfH,
+            `${sc.name}: 侧名牌在可见区内`, `y=${sideY.toFixed(0)} 半高=${sc.halfH.toFixed(0)}`);
+        const btnTop = handY + HINT_BTN_H / 2;
+        const plateBottom = sideY - SEAT_PLATE_H / 2;
+        check(plateBottom > btnTop,
+            `${sc.name}: 侧名牌在按钮行之上`, `名牌下沿 ${plateBottom.toFixed(0)} > 按钮上沿 ${btnTop.toFixed(0)}`);
+        // 侧名牌与玩家手牌(±441)横向错开: 名牌在 ±(840−70) 那一列, 必然在牌区之外
+        check(sideX - plateW / 2 > (14 * TILE_W) / 2,
+            `${sc.name}: 侧名牌在玩家手牌(±${(14 * TILE_W) / 2})之外`,
+            `名牌内缘 ${(sideX - plateW / 2).toFixed(0)}`);
+    }
+
+    // ---- 源码级: 口径与接线 ----
+    const code = strip(mainSrc);
+    check(/getStreak\(seat: number\): number/.test(strip(gmSrc)), 'GameManager 提供 getStreak(seat)');
+    const plateBody = code.slice(code.indexOf('private _refreshSeatPlates('),
+        code.indexOf('private _refreshSeatPlates(') + 2600);
+    check(plateBody.includes('getStreak'), '名牌的连庄次数取自 GameManager(不另存一份)');
+    check(/streak\s*>=\s*2/.test(plateBody), '角标只在连庄(连续胡牌 ≥ 2)时出现');
+    check(/seatLabel\(s\)/.test(plateBody), '名字用 seatLabel(与结算/比分条同一套)');
+    // 三家 AI 才有名牌: 玩家不需要"我是谁"的提示
+    const buildBody = code.slice(code.indexOf('private _buildSeatPlates('),
+        code.indexOf('private _buildSeatPlates(') + 700);
+    check(/for\s*\(let s = 1; s <= 3; s\+\+\)/.test(buildBody), '只为三家 AI 建名牌(自家不建)');
+    // 原生平台: 隐藏过再显示 Graphics 会丢 → 开局/首帧后必须强制重建
+    const drawStatic2 = code.slice(code.indexOf('private _drawStaticGraphics'),
+        code.indexOf('private _drawStaticGraphics') + 1000);
+    check(drawStatic2.includes('_refreshSeatPlates(true)'), '首帧后补画名牌');
+    const startDealing = code.slice(code.indexOf('private _startDealing('),
+        code.indexOf('private _startDealing(') + 1400);
+    check(startDealing.includes('_refreshSeatPlates(true)'), '开局强制重建名牌(隐藏过再显示)');
+    const clearTable2 = code.slice(code.indexOf('private _clearTable()'),
+        code.indexOf('private _clearTable()') + 3000);
+    check(/_seatPlateSig\s*=\s*''/.test(clearTable2), '_clearTable 清名牌指纹(跨局不残留)');
+    const applyLayout2 = code.slice(code.indexOf('private _applyLayout('),
+        code.indexOf('private _applyLayout(') + 4600);
+    check(applyLayout2.includes('_placeSeatPlates') && applyLayout2.includes('_topHandY'),
+        '_applyLayout 重摆名牌(转屏跟着走)');
+    check(!/createLabelNode\([^)]*'你'/.test(code), '没有"你"的名牌(自己不需要身份提示)');
 }
 
 console.log(`\n${fails === 0 ? '全部通过' : fails + ' 项失败'}\n`);
