@@ -40,7 +40,7 @@ HALF_H = 472.0
 C_GOLD = color('C_GOLD')
 T_LAND = num('T_LAND')
 RING_LIFE = num('RING_LIFE')
-FLASH_LIFE = num('FLASH_DUR') + 0.05
+T_BEAT = num('T_BEAT')
 MAIN_SRC = open(os.path.join(ROOT, 'assets/scripts/Main.ts'), encoding='utf-8').read()
 REVEAL_TAIL = float(re.search(r'HU_FX_REVEAL_TAIL = ([\d.]+)', MAIN_SRC).group(1))
 T_DONE = num('T_DONE')
@@ -50,10 +50,11 @@ def text_width(text, font):
     return sum(font if ord(ch) >= 0x2e80 else font * 0.5 for ch in text)
 
 
-def frame(flight=None, ghost=True, flash=False, subdued=False):
-    """画一帧亮桌面: 毡布 + 象征性牌河/手牌 + (可选的)飞行副本 / 落位金环 / 闪光
+def frame(flight=None, ghost=True, subdued=False):
+    """画一帧亮桌面: 毡布 + 象征性牌河/手牌 + (可选的)飞行副本 / 落位金环
 
-    flight: 飞行进度 0~1; ghost: 沿途残影; flash: 落位闪光
+    flight: 飞行进度 0~1; ghost: 沿途残影。
+    **没有闪光**: 2026-10-18 用户反馈那块实心金色矩形太突兀 —— 强调只留描边金环。
     """
     w, h = 1180, 700
     scale = w / CONTENT_W
@@ -77,13 +78,7 @@ def frame(flight=None, ghost=True, flash=False, subdued=False):
 
         ex, ey = end
         ew, eh = 62 * scale, 82 * scale
-        # 闪光(flashBurst: 比牌大一圈的金色块 + 外扩光晕)
-        if flash:
-            d.rounded_rectangle([ex - ew * 0.62, ey - eh * 0.62, ex + ew * 0.62, ey + eh * 0.62],
-                                radius=12 * scale, fill=(255, 214, 120, 120))
-            d.ellipse([ex - ew * 1.05, ey - eh * 0.95, ex + ew * 1.05, ey + eh * 0.95],
-                      outline=(255, 214, 120, 90), width=max(2, int(3 * scale)))
-        # 落位金环(RING_LIFE, 一闪即收) + 副露金边框
+        # 落位金环(描边, 由大收到牌面大小再淡出 RING_LIFE) + 飞行副本的金边框
         lw = max(2, int((4 if subdued else 6) * scale))
         d.rounded_rectangle([ex - ew / 2 - 7, ey - eh / 2 - 7, ex + ew / 2 + 7, ey + eh / 2 + 7],
                             radius=10 * scale, outline=(C_GOLD[0], C_GOLD[1], C_GOLD[2], 235), width=lw)
@@ -110,13 +105,13 @@ def frame(flight=None, ghost=True, flash=False, subdued=False):
 
 
 def main():
-    # 时间从**点胡**起算: 翻面 ~%.2fs | 起飞 %.2f | 落位 %.2f(金环 %.2f + 闪光 %.2f) | 交棒 %.2f → 面板 ≈%.2fs 就位
+    # 时间从**点胡**起算: 翻面 ~%.2fs | 起飞 %.2f | 落位 %.2f(金环 %.2f + 留一眼 %.2f) | 交棒 %.2f → 面板 ≈%.2fs 就位
     cases = [
         ('%.2f~%.2fs 副本飞行中(亮桌面, 全程不压暗 —— 压暗那拍已删除)' % (REVEAL_TAIL, REVEAL_TAIL + T_LAND),
          dict(flight=0.45)),
-        ('%.2fs 落位: 金环 %.2fs + 闪光 %.2fs → %.2fs 交棒结算面板(遮罩与结论都由面板负责)'
-         % (REVEAL_TAIL + T_LAND, RING_LIFE, FLASH_LIFE, REVEAL_TAIL + T_DONE),
-         dict(flight=1.0, ghost=False, flash=True)),
+        ('%.2fs 落位: 描边金环 %.2fs(闪光已删) + 留一眼 %.2fs → %.2fs 交棒结算面板(遮罩与结论都由面板负责)'
+         % (REVEAL_TAIL + T_LAND, RING_LIFE, T_BEAT, REVEAL_TAIL + T_DONE),
+         dict(flight=1.0, ghost=False)),
     ]
     pad, label_h = 12, 30
     imgs = [(t, frame(**kw)) for t, kw in cases]

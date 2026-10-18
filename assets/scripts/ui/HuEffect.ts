@@ -1,5 +1,5 @@
 import { _decorator, Color, Component, Graphics, Node, tween, UITransform, Vec3, v3 } from 'cc';
-import { ensureOpacity, flashBurst, stopTweensDeep, toLocal, toWorld } from './Anim';
+import { ensureOpacity, stopTweensDeep, toLocal, toWorld } from './Anim';
 import { createTileNode, setTileBgColor } from './UIFactory';
 import { TileView } from './TileView';
 import { SettlementData, WinnerResult } from '../core/HuScore';
@@ -9,22 +9,24 @@ const { ccclass } = _decorator;
 
 // ==================== 节奏(秒, 从 play() 起算) ====================
 // **只留"和牌归位"这一件事**(2026-10-18 用户拍板删掉了全桌压暗 / 大字宣告 / 摘要行三拍):
-// 飞牌 → 落位金环 + 闪光 → 留一眼 → 直接把结算面板交给 SettlementPanel。
+// 飞牌 → 落位金环 → 留一眼 → 直接把结算面板交给 SettlementPanel。
 // **没有压暗**: 全程在亮桌面上演, "谁胡了 / 几番"由结算面板自己说(它自带遮罩)。
+// **没有闪光**(2026-10-18 用户反馈"黄色的一块闪一下显得很突兀"): 强调只用**金环**
+// (描边, 不填色) —— 同为强调手段, 那块实心金色矩形会盖住牌面, 描边不会。
 // play() 在三家翻面播完之后才被 Main 调进来(HU_FX_REVEAL_TAIL = 1.15s 之前只播翻面)。
 const T_FLY_DUR = 0.7;      // 第 1 拍: 副本起飞(play 一开始就飞, 亮桌面上看得清)
-const T_LAND = 0.7;         // 落位 → 金环 + 闪光
-/** 金环寿命: 0.3s —— 落位后**一闪即收**, 明显短于闪光 */
-const RING_LIFE = 0.3;
-const FLASH_DUR = 0.6;      // 闪光主体时长(flashBurst 内部还有 0.05 淡入)
-const FLASH_SUB_DUR = 0.42; // 收着演的闪光更短
-/** 闪光相对**落位**的收束时刻(0.6 + 0.05 淡入 = 0.65) */
-const FLASH_LIFE = FLASH_DUR + 0.05;
-/** 闪光收束 → 交棒之间留的一眼(余韵看完再让面板上来) */
+const T_LAND = 0.7;         // 落位 → 定格金环
+/**
+ * 金环寿命 0.45s: 落位后轻微由大收到牌面大小, 再淡出 —— "就是这张"。
+ * (2026-10-18 闪光删掉后, 金环是唯一的强调手段, 从 0.3s 放宽到 0.45s;
+ *  它仍是**描边**而非实心块, 不会像 flashBurst 那样糊住牌面。)
+ */
+const RING_LIFE = 0.45;
+/** 金环收束 → 交棒之间留的一眼(看清是哪张牌后才让面板上来) */
 const T_BEAT = 0.5;
 const T_TILE = 0.7;         // 自摸(无飞行)的金环时刻(与吃胡落位同一时刻)
-/** 交棒: 面板开始上滑 —— 落位 0.7 + 闪光 0.65 + 留一眼 0.5(点胡起 ≈3.5s 就位) */
-const T_DONE = 1.85;
+/** 交棒: 面板开始上滑 —— 落位 0.7 + 金环 0.45 + 留一眼 0.5(点胡起 ≈3.3s 就位) */
+const T_DONE = 1.65;
 // 流局没有任何"归位"可播(没人胡, 没有关键牌), 陪着等就是纯枯等 —— 立刻交棒
 const DRAW_T_DONE = 0.15;
 
@@ -38,7 +40,7 @@ const C_GOLD = new Color(255, 214, 120, 255);
 export interface HuFxAnchor {
     container: Node;
     local: Vec3;
-    /** 锚点处牌的显示尺寸(画"定格金环"用; 缺省就只闪光不画环) */
+    /** 锚点处牌的显示尺寸(画"定格金环"用; 缺省用 84×112) */
     w?: number;
     h?: number;
     /** 容器自身旋转角(左右家的牌河/手牌是竖躺的, 副本飞行要沿它转正) */
@@ -96,7 +98,7 @@ export class HuEffect extends Component {
     /**
      * 播放胡牌特效, 结束时回调 onDone(由 Main 在那里弹出结算面板)
      *
-     * AI 胡且玩家没份时自动切成"收着演"(闪光更短、金环更细) —— 输的时候轰得太热闹不舒服。
+     * AI 胡且玩家没份时自动切成"收着演"(金环更暗更细) —— 输的时候轰得太热闹不舒服。
      */
     play(data: SettlementData, hooks: HuFxHooks, onDone: () => void): void {
         this.abort();               // 防重入: 上一场还没播完又来一场(理论到不了)
@@ -108,7 +110,7 @@ export class HuEffect extends Component {
 
         const subdued = data.kind === 'hu' && !data.winners.some(w => w.seat === 0);
         const draw = data.kind === 'draw';
-        // 流局没有任何"归位"可播, 立刻交棒; 胡牌则等"落位 + 闪光收束 + 留一眼"
+        // 流局没有任何"归位"可播, 立刻交棒; 胡牌则等"落位 + 金环收束 + 留一眼"
         const tDone = draw ? DRAW_T_DONE : T_DONE;
 
         // ---- 唯一的一拍: 和牌归位(飞行) + 关键牌定格金环 ----
@@ -162,7 +164,7 @@ export class HuEffect extends Component {
     private _ensureNodes(): void {
         // 根节点必须有 UITransform: _flyCopy/_showRing 的坐标要经
         // toWorld → toLocal(本节点) 换算 —— 没有它 toLocal 会静默退回世界坐标,
-        // 副本/金环/闪光全被画到屏幕外(真机表现为"看不到过渡, 大字突然弹出")。
+        // 副本/金环全被画到屏幕外(真机表现为"看不到飞行过程, 牌突然出现")。
         if (!this.node.getComponent(UITransform)) {
             this.node.addComponent(UITransform).setContentSize(MASK_SIZE, MASK_SIZE);
         }
@@ -188,7 +190,7 @@ export class HuEffect extends Component {
         return toLocal(this.node, toWorld(a.container, a.local));
     }
 
-    /** 定格金环: 套在关键牌上停 0.9s 再淡出 —— "就是这张" */
+    /** 定格金环: 描边套在关键牌上, 由大收到牌面大小再淡出(RING_LIFE) —— "就是这张" */
     private _showRing(anchor: HuFxAnchor, subdued: boolean): void {
         const p = this._toHere(anchor);
         const w = (anchor.w ?? 84) + 14;
@@ -210,8 +212,6 @@ export class HuEffect extends Component {
         tween(ring).to(RING_LIFE, { scale: v3(1, 1, 1) }, { easing: 'quadOut' })
             .call(() => ring.destroy())
             .start();
-        flashBurst(this.node, p.x, p.y, Math.max(60, w * 0.8), Math.max(60, h * 0.8),
-            subdued ? FLASH_SUB_DUR : FLASH_DUR);
     }
 
     /**
@@ -256,8 +256,6 @@ export class HuEffect extends Component {
                 // 角度/缩放那条补间可能还在跑, 先停再销毁(对已销毁节点补间会刷警告)
                 stopTweensDeep(copy);
                 copy.destroy();
-                flashBurst(this.node, end.x, end.y,
-                    Math.max(80, bw), Math.max(80, bh), subdued ? 0.42 : 0.6);
             })
             .start();
         // 缩放/转正略早于落位收束(与 flyToSlot 同一套手感: 85% 处到位, 留一点缓冲)

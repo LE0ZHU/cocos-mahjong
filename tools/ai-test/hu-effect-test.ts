@@ -61,38 +61,46 @@ const score = stripComments(fs.readFileSync(findFile('assets/scripts/core/HuScor
 const gm = stripComments(fs.readFileSync(findFile('assets/scripts/managers/GameManager.ts'), 'utf8'));
 const settle = stripComments(fs.readFileSync(findFile('assets/scripts/ui/SettlementPanel.ts'), 'utf8'));
 
-console.log('\n[A] 节奏: 只剩"和牌归位"一拍(压暗/大字/摘要三拍已删除)');
+console.log('\n[A] 节奏: 只剩"和牌归位"一拍(压暗/大字/摘要三拍 + 闪光已删除)');
 {
     const tTile = num(fx, 'T_TILE');
     const tDone = num(fx, 'T_DONE');
     const tLand = num(fx, 'T_LAND');
     const ringLife = num(fx, 'RING_LIFE');
-    const flashDur = num(fx, 'FLASH_DUR');
     const reveal = num(main, 'HU_FX_REVEAL_TAIL');
-    // 归位这一段本身仍然要**整段播完**才交棒: 金环 + 闪光都不能被面板盖掉
-    check(tLand + ringLife <= tDone + 1e-6,
-        `金环 ${tLand}~${(tLand + ringLife).toFixed(2)} 在交棒 ${tDone} 前收束`);
-    check(/const FLASH_LIFE = FLASH_DUR \+ 0\.05;/.test(fx),
-        '闪光寿命算上 flashBurst 内部的 0.05 淡入(不然少算一截)');
-    const flashEnd = tLand + flashDur + 0.05;
-    check(flashEnd <= tDone + 1e-6, `闪光 ${tLand}~${flashEnd.toFixed(2)} 在交棒 ${tDone} 前播完`);
-    check(tDone > flashEnd + 1e-6, `闪光收束 → 交棒之间留一眼 ${(tDone - flashEnd).toFixed(2)}s`);
-    check(ringLife < flashDur, `金环 ${ringLife}s 明显短于闪光 ${flashDur}s(落位后一闪即收)`);
-    // ---- 端到端: 面板在点胡起 ≈3.5s 就位(比删三拍之前的 5.65s 短 2.15s) ----
-    check(Math.abs(tDone - 1.85) < 1e-6, `特效时长 ${tDone}s(翻面缓冲 ${reveal}s 之前先单独播)`);
-    check(Math.abs(reveal + tDone + 0.5 - 3.5) < 1e-6,
+    // 归位这一段本身仍然要**整段播完**才交棒: 金环不能被面板盖掉
+    const ringEnd = tLand + ringLife;
+    check(ringEnd <= tDone + 1e-6,
+        `金环 ${tLand}~${ringEnd.toFixed(2)} 在交棒 ${tDone} 前收束`);
+    check(tDone > ringEnd + 1e-6, `金环收束 → 交棒之间留一眼 ${(tDone - ringEnd).toFixed(2)}s`);
+    check(Math.abs(tDone - (tLand + ringLife + num(fx, 'T_BEAT'))) < 1e-6,
+        `交棒 = 落位 ${tLand} + 金环 ${ringLife} + 留一眼 ${num(fx, 'T_BEAT')}`);
+    // ---- 端到端: 面板在点胡起 ≈3.3s 就位(删三拍前 5.65s, 再删闪光前 3.5s) ----
+    check(Math.abs(tDone - 1.65) < 1e-6, `特效时长 ${tDone}s(翻面缓冲 ${reveal}s 之前先单独播)`);
+    check(Math.abs(reveal + tDone + 0.5 - 3.3) < 1e-6,
         `点胡 → 面板就位 ${(reveal + tDone + 0.5).toFixed(2)}s`);
-    check(Math.abs(reveal + tDone - 3.0) < 1e-6,
+    check(Math.abs(reveal + tDone - 2.8) < 1e-6,
         `交棒在点胡起 ${(reveal + tDone).toFixed(2)}s`);
-    // ---- 支线: 收着演只剩"闪光更短/金环更细"; 流局没有任何东西可播, 立刻交棒 ----
+    // ---- 支线: 收着演只剩"金环更暗更细"; 流局没有任何东西可播, 立刻交棒 ----
     check(Math.abs(num(fx, 'DRAW_T_DONE') - 0.15) < 1e-6,
         `流局 ${num(fx, 'DRAW_T_DONE')}s 就交棒(没有关键牌, 陪着等是纯枯等)`);
     check(num(fx, 'DRAW_T_DONE') < tDone, '流局不比胡牌还慢');
-    check(num(fx, 'FLASH_SUB_DUR') < flashDur,
-        `AI 胡闪光更短(${num(fx, 'FLASH_SUB_DUR')} < ${flashDur}) —— 收着演`);
     const subdued = fx.includes("!data.winners.some(w => w.seat === 0)");
     check(subdued, '收着演的判定 = 玩家不在赢家之列');
     check(tTile === tLand, '自摸金环与吃胡落位同一时刻(对称)');
+}
+
+console.log('\n[A2] 闪光已删除(用户反馈"黄色的一块闪一下很突兀")');
+{
+    check(!/flashBurst|FLASH_|MeldFlash/.test(fx),
+        'HuEffect 里没有 flashBurst 调用, 也没有 FLASH_* 常量');
+    check(/const RING_LIFE = 0\.45;/.test(fx),
+        '金环寿命放宽到 0.45s(删掉闪光后它是唯一的强调手段)');
+    check(/g\.lineWidth = subdued \? 4 : 6;/.test(fx) && /g\.stroke\(\);/.test(fx),
+        '金环是**描边**不填色(实心块会糊住牌面, 这正是突兀感的来源)');
+    // 副露(吃/碰/杠)的闪光留在 Main 里 —— 那里是"这里刚吃/碰/杠了"的落点强调, 用户没提
+    check(/flashBurst\(container, group\.position\.x/.test(main),
+        'Main 里副露的那处 flashBurst 保留(用户只嫌胡牌落位突兀)');
 }
 
 console.log('\n[B] 三拍已删除: 没有压暗 / 大字 / 摘要 / 震动');
@@ -128,7 +136,7 @@ console.log('\n[D] 不引用牌桌节点 + 和牌归位飞行');
     check(/_ensureNodes\(\)/.test(fx) && /this\.node\.active = true;\s*\n\s*this\._ensureNodes/.test(fx),
         '节点在 play()(已 active)时才创建/补画 —— 原生平台隐藏期 Graphics 上不了屏');
     // 真机 bug(2026-10-18): 根节点没有 UITransform 时 toLocal 静默退回世界坐标,
-    // 副本/金环/闪光全画到屏幕外 —— 表现是"看不到过渡, 大字突然弹出"
+    // 副本/金环全画到屏幕外 —— 表现是"看不到飞行过程, 牌突然出现"
     check(/getComponent\(UITransform\)\) \?\?\s*\n?\s*this\.node\.addComponent\(UITransform\)/.test(fx)
         || /if \(!this\.node\.getComponent\(UITransform\)\)/.test(fx),
         '根节点补挂 UITransform(toLocal 才是本节点坐标, 不是世界坐标)');
@@ -138,11 +146,11 @@ console.log('\n[D] 不引用牌桌节点 + 和牌归位飞行');
     check(Math.abs(num(fx, 'T_FLY_DUR') - 0.7) < 1e-6, `飞行时长 ${num(fx, 'T_FLY_DUR')}s`);
     check(Math.abs(num(fx, 'T_LAND') - num(fx, 'T_FLY_DUR')) < 1e-6,
         'play 一开始就起飞(亮桌面, 不等压暗)');
-    // 交棒等**闪光的余韵**(含 0.05 淡入)播完 + 留一眼才开始
-    check(num(fx, 'T_DONE') >= num(fx, 'T_LAND') + num(fx, 'FLASH_DUR') + 0.05 - 1e-6,
-        `交棒等闪光播完(${num(fx, 'T_DONE')} ≥ 落位 ${num(fx, 'T_LAND')} + 闪光 ${num(fx, 'FLASH_DUR') + 0.05})`);
-    check(Math.abs(num(fx, 'RING_LIFE') - 0.3) < 1e-6,
-        '金环寿命 0.3s(落位后一闪即收, 比闪光短)');
+    // 交棒等**金环**收束 + 留一眼才开始(闪光已删, 金环就是唯一的归位强调)
+    check(num(fx, 'T_DONE') >= num(fx, 'T_LAND') + num(fx, 'RING_LIFE') - 1e-6,
+        `交棒等金环收束(${num(fx, 'T_DONE')} ≥ 落位 ${num(fx, 'T_LAND')} + 金环 ${num(fx, 'RING_LIFE')})`);
+    check(Math.abs(num(fx, 'RING_LIFE') - 0.45) < 1e-6,
+        '金环寿命 0.45s(闪光删掉后放宽: 它现在是唯一的强调手段)');
     check(Math.abs(num(fx, 'T_TILE') - num(fx, 'T_LAND')) < 1e-6,
         '自摸金环与吃胡落位同一时刻(对称)');
     // 副本自带金边框 + 起点残影: 无论牌面素材是否加载, "带金边的牌飞过去"都看得清

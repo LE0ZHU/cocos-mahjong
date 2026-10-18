@@ -721,17 +721,20 @@ export function tileFaceSize(w, h, gap = TILE_GAP) { return { w: w - gap, h: h -
 1.15   HuEffect.play() 接手(= HU_FX_REVEAL_TAIL, onSettle 里 scheduleOnce 延到这里)
 1.15   和牌副本起飞(0.7s, 金边框 + 起点 1.25 倍 + 牌河末格残影)
        吃胡: 牌河被取走的那格; 抢杠: 补杠者副露区; 自摸不飞(牌已在手)
-1.85   落位: 销毁副本 + **金环(RING_LIFE=0.3, 一闪即收)** + 闪光(0.6 + 0.05 淡入)
-2.15   金环收束 —— 明显早于闪光
-2.50   闪光收束
-       ↓ 留一眼 0.5s(T_BEAT): 余韵看完再交棒
-3.00   交棒 → SettlementPanel  卡片下方 70 上滑(backOut 0.5s) + 遮罩淡入, ≈3.5s 就位
+1.85   落位: 销毁副本 + **描边金环(RING_LIFE=0.45, 由大收到牌面大小再淡出)**
+       —— **没有闪光**(2026-10-18 用户反馈"黄色的一块闪一下很突兀"; 实心金色块会糊住牌面,
+       描边不会), 金环是唯一的强调手段
+2.30   金环收束
+       ↓ 留一眼 0.5s(T_BEAT): 看清是哪张牌再交棒
+2.80   交棒 → SettlementPanel  卡片下方 70 上滑(backOut 0.5s) + 遮罩淡入, ≈3.3s 就位
        流局 DRAW_T_DONE=0.15s: 没有关键牌可强调, 陪着等是纯枯等 → 立刻交棒
 ```
 
 **删掉的三拍不要再捡回来**: 全桌压暗层已退化为纯"吞点击的背景层"(只有 UITransform, 没有
 Graphics), 目的是特效期间不许误点牌桌; 大字/摘要/ `vibrateHu()` 连同 `STAMP_*`/`SUMMARY_*`/
-`textWidth` 一起删除, Main 也不再 import `vibrateHu`。AI 胡"收着演"只剩"闪光更短、金环更细"。
+`textWidth` 一起删除, Main 也不再 import `vibrateHu`; **flashBurst(闪光)也删了**(HuEffect 里
+不再调用 —— 别再捡回来), Anim.flashBurst 只剩 Main 里副露(吃/碰/杠)那一处在用。
+AI 胡"收着演"只剩"金环更暗更细"。
 中途重开/返回主页面: `onSettle` 里待播的 scheduleOnce 会被 Main 的
 `unscheduleAllCallbacks()` 取消; 已开播则由 `_clearTable` 的 `_huFx.abort()` 兜底。
 要调节奏: HuEffect 顶部的 T_* 一组 + Main 的 HU_FX_REVEAL_TAIL 一起动, 别只改一处。
@@ -743,7 +746,7 @@ Graphics), 目的是特效期间不许误点牌桌; 大字/摘要/ `vibrateHu()`
 槽位按 `_renderRiver` 横排公式反推；副本沿容器旋转角起飞/落位（左右家的牌竖躺），
 起点缩放 = 来路牌宽 / 落位牌宽。
 
-- **AI 胡"收着演"**（玩家没份）：只剩**闪光更短(0.42s)、金环更细**（输的时候轰得太热闹不舒服）；
+- **AI 胡"收着演"**（玩家没份）：只剩**金环更暗更细**（输的时候轰得太热闹不舒服）；
   交棒时刻与玩家胡一致（三拍删掉后，支线没有可压缩的拍了）。
 - **不跳过、不加开关**（2026-10-18 产品拍板）；背景层吞触摸，特效期间不许误点牌桌。
 - ⚠️ **特效不引用牌桌任何节点**：锚点由 `Main._huFxAnchorOf` 经 hooks 给（`_handSlots`
@@ -752,13 +755,13 @@ Graphics), 目的是特效期间不许误点牌桌; 大字/摘要/ `vibrateHu()`
   所以"从牌河飞来"用的是 `_flyCopy` 的装饰性副本（见上面第 0 拍）。
 - ⚠️ **特效根节点必须挂 UITransform 并在换算前 `updateWorldTransform()`**（2026-10-18
   真机踩过）：根节点没有 UITransform 时 `Anim.toLocal` 会**静默退回世界坐标**，
-  副本/金环/闪光全被画到屏幕外 —— 表现是"看不到飞行过程，牌突然出现"；
+  副本/金环全被画到屏幕外 —— 表现是"看不到飞行过程，牌突然出现"；
   刚 `active` 的节点世界矩阵还可能是脏的，`_ensureNodes` 里先 `updateWorldTransform()`。
 - ⚠️ 节点在 `play()`（已 active）时才创建/补画 —— 原生平台"隐藏期画的 Graphics 上不了屏"。
 - ⚠️ `_clearTable` 必须 `_huFx.abort()`（停 tween + 节点失活），否则飞行途中的副本会卡在桌面上。
 - `WinnerResult.fromSeat`（点炮者，自摸 -1）由 GameManager 直接带出，不能从 delta 反推。
 - 层级：设置弹窗 < HuEffect < 结算面板。改节奏/文案后重跑 `tools/ai-test/hu-effect-test.ts`，
-  静态分镜 `python tools/preview-hu-fx.py`（亮桌面两帧：飞行中 / 落位金环+闪光）。
+  静态分镜 `python tools/preview-hu-fx.py`（亮桌面两帧：飞行中 / 落位描边金环）。
 
 ### 7. 牌对象是引用，不是拷贝
 
