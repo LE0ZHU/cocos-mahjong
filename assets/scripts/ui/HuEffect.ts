@@ -9,29 +9,39 @@ import { vibrateHu } from '../feedback/Haptics';
 const { ccclass } = _decorator;
 
 // ==================== 节奏(秒, 从 play() 起算) ====================
-// **严格串行**(2026-10-18 用户反馈"动画不要一下子都开始"+"飞牌看不清"):
-// play() 在三家翻面播完之后才被 Main 调进来, 本文件内一拍接一拍 ——
-// **先在亮桌面上飞牌**(压暗之前, 暗底上的小牌看不清), 飞完落定才压暗 → 大字 → 摘要 → 交棒。
-// AI 胡(玩家没份)走"收着演"支线: 更暗更小更短 —— 输的时候被金色轰炸并不舒服。
+// **方案二 · 完全串行 / 零重叠**(2026-10-18 用户拍板):
+// 每一拍(**含它的余韵**)整段播完, 再留"一眼"呼吸, 才进下一拍 ——
+// 宁可节奏明显拖一点(面板从点胡起 ≈5.65s 就位), 也不让两件事同时在演。
+// play() 在三家翻面播完之后才被 Main 调进来(HU_FX_REVEAL_TAIL = 1.15s 之前只播翻面)。
 const T_FLY_DUR = 0.7;      // 第 1 拍: 副本起飞(play 一开始就飞, 亮桌面上看得清)
-const T_LAND = 0.7;         // 落位 → 金环+闪光
-const T_DIM = 1.3;          // 第 2 拍: 压暗开始(= T_LAND + 闪光 0.6s —— 压暗等闪光播完, 方案一)
-const T_DIM_IN = 0.3;       // 压暗淡入时长(1.3 ~ 1.6)
-const T_TILE = 0.7;         // 自摸(无飞行)的金环时刻(与吃胡落位同一时刻, 闪光同样在 1.3 收束)
-const T_BANNER = 1.6;       // 第 3 拍: 大字宣告 + 震动(压暗完成后停 0.3s)
+const T_LAND = 0.7;         // 落位 → 金环 + 闪光
 /**
- * 金环寿命 = 压暗开始 - 落位 = 0.6s: 金环也必须在压暗开始前收束。
- * (2026-10-18 用户两次反馈"上一拍没播完下一拍就开始" —— 时间轴要求**零重叠**,
- *  连"金环延续进压暗当锁定赢家"这个设计也撤掉, 严格一拍接一拍。)
+ * 金环寿命(方案二): 0.3s —— 落位后**一闪即收**, 明显短于闪光。
+ * (旧做法 = T_DIM - T_LAND, 金环一直拖到压暗前一刻, 被判成"和压暗叠在一起"。)
  */
-const RING_LIFE = T_DIM - T_LAND;
+const RING_LIFE = 0.3;
+const FLASH_DUR = 0.6;      // 闪光主体时长(flashBurst 内部还有 0.05 淡入)
+const FLASH_SUB_DUR = 0.42; // 收着演的闪光更短
+/** 闪光相对**落位**的收束时刻(0.6 + 0.05 淡入 = 0.65) */
+const FLASH_LIFE = FLASH_DUR + 0.05;
+/** 闪光收束 → 压暗之间留的一眼(亮桌面上把余韵看完再暗下来) */
+const T_BEAT = 0.5;
+/** 压暗完成后再停一眼才上大字(让"暗"先被看见, 大字不是追着压暗出来) */
+const T_DIM_TAIL = 0.3;
+const T_DIM = 1.85;         // 第 2 拍: 压暗开始 = 落位 0.7 + 闪光 0.65 + 留一眼 0.5
+const T_DIM_IN = 0.3;       // 压暗淡入时长
+const T_TILE = 0.7;         // 自摸(无飞行)的金环时刻(与吃胡落位同一时刻)
+const T_BANNER = 2.45;      // 第 3 拍: 大字宣告 + 震动 = 压暗起 1.85 + 淡入 0.3 + 停一眼 0.3
 const T_BANNER_IN = 0.42;
-const T_SUMMARY = 2.6;      // 第 4 拍: 摘要行浮出
-const T_DONE = 3.15;        // 交棒: 结算面板开始上滑
+const T_SUMMARY = 3.45;     // 第 4 拍: 摘要行浮出(大字弹入 0.42 播完之后)
+const T_DONE = 4.0;         // 交棒: 结算面板开始上滑(+0.5 上滑 ≈ 点胡起 5.65s 就位)
+// ---- AI 胡"收着演"支线: 同样整体顺延 0.85s(输的时候被金色轰炸并不舒服, 但节奏要同款) ----
 const SUB_T_TILE = 0.7;
-const SUB_T_BANNER = 1.3;
-const SUB_T_SUMMARY = 2.1;
-const SUB_T_DONE = 2.55;
+const SUB_T_BANNER = 2.15;
+const SUB_T_SUMMARY = 2.95;
+const SUB_T_DONE = 3.4;
+// ---- 流局: 没有飞行/闪光要等, 不必陪着拖 —— 但它自己的压暗要早于自己的大字 ----
+const DRAW_T_DIM = 0.3;
 const DRAW_T_BANNER = 1.0;
 const DRAW_T_SUMMARY = 1.7;
 const DRAW_T_DONE = 2.2;
@@ -155,6 +165,8 @@ export class HuEffect extends Component {
 
         const subdued = data.kind === 'hu' && !data.winners.some(w => w.seat === 0);
         const draw = data.kind === 'draw';
+        // 流局不等飞行/闪光(压暗早就该起), 玩家/AI 胡则等"闪光收束 + 留一眼"
+        const tDim = draw ? DRAW_T_DIM : T_DIM;
         const info = this._stampInfo(data);
         // 流局没有"关键牌"这一拍: 整个金环/飞行段都被 data.kind === 'hu' 挡住
         const tBanner = draw ? DRAW_T_BANNER : (subdued ? SUB_T_BANNER : T_BANNER);
@@ -184,12 +196,12 @@ export class HuEffect extends Component {
             }
         }
 
-        // ---- 第 2 拍: 压暗(飞完落定之后才开始) ----
+        // ---- 第 2 拍: 压暗(飞完落定 + 闪光的余韵看完之后才开始) ----
         this.scheduleOnce(() => {
             const dimOp = ensureOpacity(this._dim!);
             dimOp.opacity = 0;
             tween(dimOp).to(T_DIM_IN, { opacity: dim }).start();
-        }, T_DIM);
+        }, tDim);
 
         // ---- 第 3 拍: 大字宣告 + 震动 ----
         this._stampMain!.string = info.main;
@@ -409,7 +421,8 @@ export class HuEffect extends Component {
         tween(ring).to(RING_LIFE, { scale: v3(1, 1, 1) }, { easing: 'quadOut' })
             .call(() => ring.destroy())
             .start();
-        flashBurst(this.node, p.x, p.y, Math.max(60, w * 0.8), Math.max(60, h * 0.8), subdued ? 0.42 : 0.6);
+        flashBurst(this.node, p.x, p.y, Math.max(60, w * 0.8), Math.max(60, h * 0.8),
+            subdued ? FLASH_SUB_DUR : FLASH_DUR);
     }
 
     /**

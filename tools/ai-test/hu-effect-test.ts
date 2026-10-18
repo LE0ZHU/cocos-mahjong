@@ -61,7 +61,7 @@ const score = stripComments(fs.readFileSync(findFile('assets/scripts/core/HuScor
 const gm = stripComments(fs.readFileSync(findFile('assets/scripts/managers/GameManager.ts'), 'utf8'));
 const settle = stripComments(fs.readFileSync(findFile('assets/scripts/ui/SettlementPanel.ts'), 'utf8'));
 
-console.log('\n[A] 节奏: 三拍 + 收着演支线');
+console.log('\n[A] 节奏: 方案二(完全串行 / 零重叠 —— 每拍连余韵都播完才进下一拍)');
 {
     const tTile = num(fx, 'T_TILE');
     const tBanner = num(fx, 'T_BANNER');
@@ -70,6 +70,10 @@ console.log('\n[A] 节奏: 三拍 + 收着演支线');
     const bannerIn = num(fx, 'T_BANNER_IN');
     const tDim = num(fx, 'T_DIM');
     const tDimIn = num(fx, 'T_DIM_IN');
+    const tLand = num(fx, 'T_LAND');
+    const ringLife = num(fx, 'RING_LIFE');
+    const flashDur = num(fx, 'FLASH_DUR');
+    const reveal = num(main, 'HU_FX_REVEAL_TAIL');
     // 零重叠: 每一拍的起点 ≥ 上一拍的终点(允许首尾相接, 不允许跨进)
     check(tBanner >= tDim + tDimIn - 1e-6,
         `大字 ${tBanner} ≥ 压暗完成 ${tDim + tDimIn}(零重叠)`);
@@ -77,12 +81,41 @@ console.log('\n[A] 节奏: 三拍 + 收着演支线');
         `摘要 ${tSummary} ≥ 大字完成 ${tBanner + bannerIn}(零重叠)`);
     check(tDone >= tSummary + 0.34 - 1e-6,
         `交棒 ${tDone} ≥ 摘要完成 ${tSummary + 0.34}(零重叠)`);
-    check(Math.abs(tDone - 3.15) < 1e-6, `特效时长 ${tDone}s(翻面缓冲 1.15s 之前先单独播)`);
-    check(Math.abs(num(fx, 'SUB_T_DONE') - 2.55) < 1e-6, `AI 胡收着演 ${num(fx, 'SUB_T_DONE')}s`);
+    // ---- 方案二新增: 金环与闪光都必须在压暗**开始之前**整段播完 ----
+    check(tLand + ringLife <= tDim + 1e-6,
+        `金环 ${tLand}~${(tLand + ringLife).toFixed(2)} 在压暗 ${tDim} 前收束`);
+    check(/const FLASH_LIFE = FLASH_DUR \+ 0\.05;/.test(fx),
+        '闪光寿命算上 flashBurst 内部的 0.05 淡入(不然少算一截)');
+    const flashEnd = tLand + flashDur + 0.05;
+    check(flashEnd <= tDim + 1e-6, `闪光 ${tLand}~${flashEnd.toFixed(2)} 在压暗 ${tDim} 前播完`);
+    check(tDim > flashEnd + 1e-6, `闪光收束 → 压暗之间留一眼 ${(tDim - flashEnd).toFixed(2)}s`);
+    check(ringLife < flashDur, `金环 ${ringLife}s 明显短于闪光 ${flashDur}s(落位后一闪即收)`);
+    // ---- 端到端: 面板必须在点胡起 ≈5.65s 就位(方案二认了这个节奏) ----
+    check(Math.abs(tDone - 4.0) < 1e-6, `特效时长 ${tDone}s(翻面缓冲 ${reveal}s 之前先单独播)`);
+    check(Math.abs(reveal + tDone + 0.5 - 5.65) < 1e-6,
+        `点胡 → 面板就位 ${(reveal + tDone + 0.5).toFixed(2)}s`);
+    check(Math.abs(reveal + tBanner - 3.6) < 1e-6,
+        `大字在点胡起 ${(reveal + tBanner).toFixed(2)}s(方案一 2.75, 顺延 0.85)`);
+    check(Math.abs(reveal + tSummary - 4.6) < 1e-6,
+        `摘要在点胡起 ${(reveal + tSummary).toFixed(2)}s(方案一 3.75, 顺延 0.85)`);
+    check(Math.abs(reveal + tDone - 5.15) < 1e-6,
+        `交棒在点胡起 ${(reveal + tDone).toFixed(2)}s(方案一 4.30, 顺延 0.85)`);
+    // ---- 收着演 / 流局 两条支线 ----
+    check(Math.abs(num(fx, 'SUB_T_BANNER') - 2.15) < 1e-6, `AI 胡大字 ${num(fx, 'SUB_T_BANNER')}s`);
+    check(Math.abs(num(fx, 'SUB_T_SUMMARY') - 2.95) < 1e-6, `AI 胡摘要 ${num(fx, 'SUB_T_SUMMARY')}s`);
+    check(Math.abs(num(fx, 'SUB_T_DONE') - 3.4) < 1e-6, `AI 胡收着演 ${num(fx, 'SUB_T_DONE')}s`);
+    check(num(fx, 'SUB_T_BANNER') >= tDim + tDimIn - 1e-6, '收着演的大字也等压暗完成(零重叠)');
+    check(num(fx, 'SUB_T_DONE') <= tDone + 1e-6, '收着演不比玩家胡还长');
+    check(Math.abs(num(fx, 'SUB_T_TILE') - 0.7) < 1e-6, `自摸金环 ${num(fx, 'SUB_T_TILE')}s(与落位同时刻)`);
+    // 流局没有飞行/闪光要等, 压暗早开; 但它自己的压暗必须早于自己的大字
+    check(num(fx, 'DRAW_T_DIM') + tDimIn <= num(fx, 'DRAW_T_BANNER') + 1e-6,
+        `流局压暗 ${num(fx, 'DRAW_T_DIM')}~${(num(fx, 'DRAW_T_DIM') + tDimIn).toFixed(2)} 早于大字 ${num(fx, 'DRAW_T_BANNER')}(零重叠)`);
+    check(num(fx, 'DRAW_T_DIM') < tDim, '流局不等飞行/闪光(陪着拖就成纯枯等了)');
     check(Math.abs(num(fx, 'SUB_SCALE') - 0.72) < 1e-6, `AI 胡大字缩到 ${num(fx, 'SUB_SCALE')} 倍`);
     check(num(fx, 'DIM_SUB') < num(fx, 'DIM_FULL'), `AI 胡压暗更浅(${num(fx, 'DIM_SUB')} < ${num(fx, 'DIM_FULL')})`);
     const subdued = fx.includes("!data.winners.some(w => w.seat === 0)");
     check(subdued, '收着演的判定 = 玩家不在赢家之列');
+    check(tTile === tLand, '自摸金环与吃胡落位同一时刻(对称)');
 }
 
 console.log('\n[B] 四种大字 + 流局降级');
@@ -122,11 +155,13 @@ console.log('\n[D] 不引用牌桌节点 + 和牌归位飞行');
     check(Math.abs(num(fx, 'T_FLY_DUR') - 0.7) < 1e-6, `飞行时长 ${num(fx, 'T_FLY_DUR')}s`);
     check(Math.abs(num(fx, 'T_LAND') - num(fx, 'T_FLY_DUR')) < 1e-6,
         'play 一开始就起飞(亮桌面, 不等压暗)');
-    // 压暗等闪光(0.6s)播完才开始; 金环寿命也推导自同一关系, 在压暗开始前收束
-    check(num(fx, 'T_DIM') >= num(fx, 'T_LAND') + 0.6 - 1e-6,
-        `压暗等闪光播完(${num(fx, 'T_DIM')} ≥ 落位 ${num(fx, 'T_LAND')} + 0.6)`);
-    check(/const RING_LIFE = T_DIM - T_LAND;/.test(fx),
-        '金环寿命 = 压暗开始 - 落位(压暗前收束, 不再延续进压暗 —— 用户两次反馈要零重叠)');
+    // 方案二: 压暗等**闪光的余韵**(含 0.05 淡入)播完 + 留一眼才开始
+    check(num(fx, 'T_DIM') >= num(fx, 'T_LAND') + num(fx, 'FLASH_DUR') + 0.05 - 1e-6,
+        `压暗等闪光播完(${num(fx, 'T_DIM')} ≥ 落位 ${num(fx, 'T_LAND')} + 闪光 ${num(fx, 'FLASH_DUR') + 0.05})`);
+    check(Math.abs(num(fx, 'RING_LIFE') - 0.3) < 1e-6,
+        '金环寿命压到 0.3s(落位后一闪即收, 不再拖到压暗前一刻 —— 方案二)');
+    check(num(fx, 'RING_LIFE') < num(fx, 'T_DIM') - num(fx, 'T_LAND') + 1e-6,
+        '金环比"到压暗为止"短: 余下的时间是留给闪光的, 不是金环');
     check(Math.abs(num(fx, 'T_TILE') - num(fx, 'T_LAND')) < 1e-6,
         '自摸金环与吃胡落位同一时刻(对称, 闪光同样在压暗前收束)');
     // 副本自带金边框 + 起点残影: 无论牌面素材是否加载, "带金边的牌飞过去"都看得清

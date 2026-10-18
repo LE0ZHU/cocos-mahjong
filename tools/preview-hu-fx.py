@@ -58,8 +58,11 @@ def text_width(text, font):
     return sum(font if ord(ch) >= 0x2e80 else font * 0.5 for ch in text)
 
 
-def frame(dim, stamp_main, stamp_sub, theme, summary, subdued, flight=None):
-    """画一帧: 毡布底 + 压暗 + 大字印章 + 摘要胶囊"""
+def frame(dim, stamp_main, stamp_sub, theme, summary, subdued, flight=None, ghost=True, flash=False):
+    """画一帧: 毡布底 + 压暗 + 大字印章 + 摘要胶囊
+
+    flight: 飞行进度 0~1(第 1 拍); ghost: 是否画沿途残影; flash: 落位闪光(第 1 拍尾)
+    """
     w, h = 1180, 700
     scale = w / CONTENT_W
     felt = (26, 96, 62)
@@ -86,14 +89,22 @@ def frame(dim, stamp_main, stamp_sub, theme, summary, subdued, flight=None):
         end = (w / 2 + 150 * scale, h - 150)
         def lerp(t):
             return (start[0] + (end[0] - start[0]) * t, start[1] + (end[1] - start[1]) * t)
-        # 落位金环
+        # 落位处的"闪光"(flashBurst: 比牌大一圈的金色方块, 0.05s 淡入后 0.6s 淡出)
+        if flash:
+            ex, ey = end
+            ew, eh = 62 * scale, 82 * scale
+            d.rounded_rectangle([ex - ew * 0.62, ey - eh * 0.62, ex + ew * 0.62, ey + eh * 0.62],
+                                radius=12 * scale, fill=(255, 214, 120, 120))
+            d.ellipse([ex - ew * 1.05, ey - eh * 0.95, ex + ew * 1.05, ey + eh * 0.95],
+                      outline=(255, 214, 120, 90), width=max(2, int(3 * scale)))
+        # 落位金环(RING_LIFE=0.3s, 一闪即收 —— 明显短于闪光)
         ex, ey = end
         ew, eh = 62 * scale, 82 * scale
         d.rounded_rectangle([ex - ew / 2 - 7, ey - eh / 2 - 7, ex + ew / 2 + 7, ey + eh / 2 + 7],
                             radius=10 * scale, outline=(255, 214, 120, 235), width=max(2, int(5 * scale)))
         # 残影 + 本体(从斜到正, 越飞越大)
         for t, alpha in ((flight - 0.22, 60), (flight - 0.11, 120), (flight, 255)):
-            if t < 0:
+            if t < 0 or (not ghost and alpha < 255):   # 落位帧只留本体, 不留沿途残影
                 continue
             fx_, fy_ = lerp(t)
             ang = (1 - t) * 40
@@ -148,12 +159,16 @@ def frame(dim, stamp_main, stamp_sub, theme, summary, subdued, flight=None):
 
 
 def main():
+    # 方案二(完全串行 / 零重叠): 时间从**点胡**起算, 每一拍连余韵播完 + 留一眼才进下一拍
+    # 0.00 翻面 ~1.15s | 1.15 起飞 | 1.85 落位(金环 0.3 + 闪光 0.65) | 3.00 压暗 | 3.60 大字 | 4.60 摘要 | 5.15 交棒 ≈5.65s 就位
     cases = [
-        ('第 0 拍 · 和牌归位(飞行中 0.55s)', DIM_FULL, '', '', C_TSUMO, '', False, 0.55),
-        ('自摸 · 玩家(全量)', DIM_FULL, '自摸', '', C_TSUMO, '你 3 番 · +12 分', False, None),
-        ('吃胡 · AI 胡(收着演)', DIM_SUB, '吃胡', '老陈点炮', C_RON, '小雨 2 番 · -4 分', True),
-        ('一炮多响', DIM_FULL, '一炮多响', '你、老陈 同时胡 五萬', C_MULTI, '2家 4 番 · -8 分', False, None),
-        ('流局', DIM_DRAW, '流局', '', C_DRAW, '牌墙已空, 无人胡牌', False, None),
+        ('0.00~1.15s 翻面后 · 副本飞行中(1.15~1.85s, 亮桌面不压暗)', 0, '', '', C_TSUMO, '', False, 0.45, True, False),
+        ('1.85s 落位 · 金环 0.3s + 闪光 0.65s(到 2.50s 之前都不压暗)', 0, '', '', C_TSUMO, '', False, 1.0, False, True),
+        ('2.50~3.00s 留一眼 · 再看 3.00~3.60s 压暗+停一眼(此时还没有大字)', DIM_FULL, '', '', C_TSUMO, '', False, None, True, False),
+        ('3.60s 自摸 · 玩家(全量)', DIM_FULL, '自摸', '', C_TSUMO, '你 3 番 · +12 分', False, None, True, False),
+        ('吃胡 · AI 胡(收着演, 大字 0.72 倍)', DIM_SUB, '吃胡', '老陈点炮', C_RON, '小雨 2 番 · -4 分', True, None, True, False),
+        ('一炮多响', DIM_FULL, '一炮多响', '你、老陈 同时胡 五萬', C_MULTI, '2家 4 番 · -8 分', False, None, True, False),
+        ('流局(不等飞行/闪光, 压暗 0.3s 就起)', DIM_DRAW, '流局', '', C_DRAW, '牌墙已空, 无人胡牌', False, None, True, False),
     ]
     pad, label_h = 12, 30
     imgs = [(t, frame(*rest)) for t, *rest in cases]
