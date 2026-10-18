@@ -1193,6 +1193,8 @@ export class GameManager extends Component {
                 delta: 0,
                 winTile: e.winTile,
                 isSelfDraw: e.isSelfDraw,
+                // 胡牌特效要用: 点炮时"光点从付分方飞来"; 自摸没有付分方
+                fromSeat: e.isSelfDraw ? -1 : payerSeat,
             });
         }
 

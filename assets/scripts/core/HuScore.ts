@@ -66,6 +66,13 @@ export interface WinnerResult {
     /** 和的那张牌 */
     winTile: Tile | null;
     isSelfDraw: boolean;
+    /**
+     * 点炮者座位(胡牌特效"光点从付分方飞来"要用); 自摸 = -1
+     *
+     * ⚠️ 不能从 seats 的 delta 反推: 一炮多响时付分方只付一次,
+     * 而且流局全员 delta 为 0 —— 让 GameManager 在结算时直接带上。
+     */
+    fromSeat: number;
 }
 
 /** 某一家在结算面板里的一行(四家都要有) */

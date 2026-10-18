@@ -13,7 +13,7 @@
  *
  * 【真实问题 2】桌面为了盖住屏幕被放大了 1.08~1.21 倍, 牌却一直是手机尺寸,
  * 于是平板上的牌相对桌子明显偏小、桌子显得空旷。现在牌也按可见高度等比放大
- * (`_applyTileScale`, 上限 1.14), 由满手 14 张手牌与"提示"按钮之间的净空决定。
+ * (`_applyTileScale`, 上限 TILE_SCALE_MAX 1.4), 手牌倍率再由「你·听」标记反算(1.13~1.45)。
  *
  * 锁住四组不变量(数值全部从真实源码提取):
  *   A 手机比例(≥16:9)上一根手指都不许动: 桌面缩放 = 1、牌尺寸 = 基准、牌位半高 = 可见半高;
@@ -148,8 +148,9 @@ function handScale(tk: number): number {
     return Math.max(HAND_SCALE, Math.min(HAND_SCALE_TARGET, markInner / (7 * BASE_TILE_W * tk)));
 }
 /**
- * 复刻 Main._applyTileScale 里"其他牌"的收缩系数: 默认 0.9,
- * 若底部三段把手牌挤到转盘最小半径以下(21:9 最先发生), 继续缩到 OTHERS_SCALE_MIN
+ * 复刻 Main._applyTileScale 里"其他牌"的收缩系数: 默认 1.0(2026-10-18 起从 0.9 放回,
+ * 4:3 上已贴净空天花板, 不能再大), 若底部三段把手牌挤到转盘最小半径以下
+ * (21:9 最先发生), 继续缩到 OTHERS_SCALE_MIN
  */
 function othersScaleFor(tk: number, halfH: number, th: number): number {
     const bottomHalf = bottomHalfOf(halfH);
@@ -330,7 +331,7 @@ for (const [name, aspect] of [['16:9', 16 / 9], ['3:2', 3 / 2], ['4:3', 4 / 3]] 
     const halfH = aspectHalfH(aspect);
     const tk = tileScale(halfH);
     const hs = handScale(tk);
-    // 手牌按反算倍率; 上家 / 左右家 / 牌河再乘收缩系数(默认 0.9, 纵向不够时更低)
+    // 手牌按反算倍率; 上家 / 左右家 / 牌河再乘系数(默认 1.0, 纵向不够时更低)
     const th = BASE_TILE_H * tk * hs;
     const others = othersScaleFor(tk, halfH, th);
     const tileW = BASE_TILE_W * tk * hs;

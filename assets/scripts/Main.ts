@@ -5,6 +5,7 @@ import { TileView, tileRadius } from './ui/TileView';
 import { MenuUI } from './ui/MenuUI';
 import { DrawModeUI } from './ui/DrawModeUI';
 import { SettlementPanel } from './ui/SettlementPanel';
+import { HuEffect, HuFxAnchor } from './ui/HuEffect';
 import { HintPanel } from './ui/HintPanel';
 import { SettingsPanel } from './ui/SettingsPanel';
 import { Hint, HintAdvisor } from './game/HintAdvisor';
@@ -18,7 +19,7 @@ import {
 import { Tile } from './core/Tile';
 import { HAND_SIZE } from './core/TileDefine';
 import { Meld } from './core/Meld';
-import { SettlementData } from './core/HuScore';
+import { SettlementData, WinnerResult } from './core/HuScore';
 
 const { ccclass } = _decorator;
 
@@ -218,6 +219,15 @@ const MELD_SOURCE_CHARS = ['你', '上', '左', '右'];
 const MELD_MARK_GAP = 24;
 
 /**
+ * 胡牌特效的"翻面缓冲": 点胡 → 三家手牌错峰翻面(0.06s/张 + 0.26s 弹入 ≈ 1.1s)
+ * **先单独播完**, HuEffect 才接手(压暗/飞牌/大字)。
+ * 2026-10-18 用户反馈"动画不要一下子都开始" —— 翻面/压暗/飞行并行会互相抢视线。
+ * `onSettle` 用 scheduleOnce 延到这里; 中途重开/返回主页面时 Main 的
+ * `unscheduleAllCallbacks()` 会把这个待播的 play 一起取消, 不会残留。
+ */
+const HU_FX_REVEAL_TAIL = 1.15;
+
+/**
  * 玩家手牌的**额外**放大倍率 —— 只作用于自家手牌, 上家 / 左右家 / 牌河 / 副露都不变。
  *
  * 手牌是玩家视线的落点, 比其它牌再大一圈更好读; 上限仍由**横向净空**决定:
@@ -237,15 +247,16 @@ const HAND_SCALE = 1.13;
  * 于是按"满手 14 张塞进这两者之间"反算上限：手机 16:9 能放到 1.45，
  * 平板因为基准牌本来就 ×1.3，反算出来只有 1.22~1.34 —— 取小值，不会压到标记。
  *
- * 【其他牌 ×0.9】手牌放大后，牌河 / 副露 / 三家手牌按 0.9 收缩：
- * 一是把纵向空间还给中央转盘（21:9 本来就贴着最小半径 30），
- * 二是让"自己的牌"在整张桌上最突出。
+ * 【其他牌 ×1.0】2026-10-18 随"手牌二次放大"曾收到 0.9，用户反馈"牌河/副露/三家手牌
+ * 太小了"改回 1.0。1.0 就是统一系数的**天花板**：4:3 平板上左右家牌河被 340 的老位置
+ * 夹住后内缘净空只剩 ~3px(见 _sideRiverX)，再大就重叠。手牌仍比其他牌大 1.13~1.45 倍，
+ * "自己的牌最突出"不变；纵向不够的屏幕由 _applyTileScale 继续自动收缩。
  */
 const HAND_SCALE_TARGET = 1.45;
 /** 手牌右缘与「你·听」标记内缘之间至少留出的空隙 */
 const HAND_EDGE_GAP = 12;
-/** 其他三家手牌 / 牌河 / 副露的收缩系数（手牌放大后让位） */
-const OTHERS_SCALE = 0.9;
+/** 其他三家手牌 / 牌河 / 副露的系数（1.0 = 与基准同大；4:3 上已到净空天花板，不能再加） */
+const OTHERS_SCALE = 1.0;
 /** 收缩下限：纵向实在挤（21:9）时最多再缩到这里，再小看不清牌面 */
 const OTHERS_SCALE_MIN = 0.8;
 
@@ -315,6 +326,8 @@ export class Main extends Component {
     // ---- 结算面板 / 听牌(立直) ----
     /** 独立结算面板(胡牌或流局时弹出, 显示番型/得失分/四家手牌) */
     private _settlement: SettlementPanel | null = null;
+    /** 胡牌特效(结算面板弹出前的 2.2s 三拍: 定格 → 爆发 → 揭晓) */
+    private _huFx: HuEffect | null = null;
     /** "听牌"宣言按钮(听牌时才出现) */
     private _riichiBtn: Node | null = null;
     /** 四家的"听"标记(已宣告听牌时亮出) */
@@ -484,11 +497,12 @@ export class Main extends Component {
      * 牌尺寸放大倍率上限(手机 16:9 及更宽 = 1)
      *
      * 横向净空是硬约束, 上限由**最挤的一条**决定(数值见 tablet-layout-test 的 E 组):
-     *  - 牌河: 9 张 × 44 × k × 0.9 的半宽要让开左右家牌河的内缘, 留 30px;
+     *  - 牌河: 9 张 × 44 × k × 1.0 的半宽要让开左右家牌河的内缘, 留 30px;
      *  - 手牌: 半宽由 `HAND_SCALE_TARGET` 与「你·听」标记反算, 见 `_applyTileScale`。
      * 2026-10-18 起「听牌 / 提示」已挪到副露行左侧, 不再参与手牌横向净空;
-     * 其他牌又乘了 `OTHERS_SCALE`(0.9), 所以牌河那条比过去宽松, 上限仍取 1.4
-     * (桌面被 `_applyTableScale` 放大后, 再大就会在 4:3 上把牌河顶出桌沿)。
+     * 其他牌乘 `OTHERS_SCALE`(1.0) 后, 4:3 上牌河内缘净空只剩 ~3px —— 这一条
+     * 就是 OTHERS_SCALE 不能再放大的原因(复核跑 tablet-layout-test 的 E#5 / G 组);
+     * k 本身的 1.4 上限则是"桌面被 `_applyTableScale` 放大后, 再大牌河会顶出桌沿"。
      *
      * ⚠️ 改按钮 / 芯片 / 牌河列数后必须重跑 `tools/ai-test/tablet-layout-test.ts`。
      */
@@ -1017,6 +1031,9 @@ export class Main extends Component {
         this._hintedTileIndex = -1;
         // 收起结算面板与听牌标记
         this._settlement?.hide();
+        // 胡牌特效若还在播(重开/返回主页面打断了它): 中止并复位压暗层,
+        // 否则会留下半黑屏盖住新局的牌桌(与 _hideAnnounce 同一个坑)
+        this._huFx?.abort();
         for (const m of this._tenpaiMarkers) if (m) m.active = false;
         if (this._riichiBtn) this._riichiBtn.active = false;
         // 新一局/返回主页面: 倒计时与提示一并收起(下一局需要时会重新起/重新要)
@@ -1148,7 +1165,7 @@ export class Main extends Component {
         this.TILE_H = this.BASE_TILE_H * k * hs;
 
         // ---- 其他牌的收缩系数 ----
-        // 默认 OTHERS_SCALE(0.9)。手牌变大后底部三段(手牌 → 副露 → 牌河)整体上移,
+        // 默认 OTHERS_SCALE(1.0)。手牌变大后底部三段(手牌 → 副露 → 牌河)整体上移,
         // 若把中央转盘挤到最小半径以下(21:9 这类超宽屏最先发生), 就**继续缩**
         // (用户原话:"屏幕不够用就把牌河 / 副露 / 三家手牌等比例缩小"), 下限 OTHERS_SCALE_MIN。
         const bottomHalf = Math.min(halfH, this.FELT_TILE_BOTTOM * tableK);
@@ -1342,6 +1359,7 @@ export class Main extends Component {
         this._halfH = halfH;
         // 结算面板按可见高度自适应(手机横屏比 16:9 矮很多), 转屏/改窗口时跟着重排
         this._settlement?.fit(halfH);
+        this._huFx?.fit(halfH);
         // 设置弹窗同理: 卡片高度随可见高度缩放, 转屏时要重排(否则按钮会被挤出屏幕)
         this._settingsPanel?.fit(halfH);
         this._refreshWall();
@@ -1460,6 +1478,7 @@ export class Main extends Component {
         this._buildAISpeech();
 
         this._buildSettlementPanel();
+        this._buildHuEffect();
 
         // 节点创建顺序带来的层级不对: 副露区是最后建的,会盖在自家手牌上
         // (选中的牌上抬、以及拖牌时,上半截会被自家吃/碰/杠那一行压住),统一排一次
@@ -1509,6 +1528,8 @@ export class Main extends Component {
         // 设置弹窗(含遮罩)压在牌桌之上、结算面板之下:
         // 结算出现时牌局已结束, 不该再被设置弹窗盖住
         push(this._settingsPanel?.node);
+        // 胡牌特效压在设置之上、结算面板之下: 播完由结算的遮罩接管压暗
+        push(this._huFx?.node);
         // 结算面板永远在最上层: 遮罩 + 番型/手牌, 盖住整张牌桌
         push(this._settlement?.node);
     }
@@ -1985,6 +2006,82 @@ export class Main extends Component {
         panel.onRestart = () => this._onRestartClick();
         panel.onBack = () => this._onBackToMenuClick();
         this._settlement = panel;
+    }
+
+    /**
+     * 创建胡牌特效层: 结算面板弹出前的"定格 → 爆发 → 揭晓"三拍。
+     * 层级在设置弹窗之上、结算面板之下 —— 面板一出来就由它的遮罩接管压暗。
+     */
+    private _buildHuEffect(): void {
+        const node = new Node('HuEffect');
+        node.parent = this._gameRoot;
+        node.active = false;
+        this._huFx = node.addComponent(HuEffect);
+    }
+
+    /**
+     * 胡牌特效的锚点: 关键牌的"容器 + 局部坐标"(用 `_handSlots`, 翻牌重建后也是新值),
+     * 无牌时退回该家弃牌河中心 —— 点炮光点的起点。
+     * 特效组件只拿坐标, 不碰牌桌内部节点(它播的 2.2s 里牌节点随时可能被重建)。
+     */
+    private _huFxAnchorOf(seat: number, tile: Tile | null): HuFxAnchor | null {
+        if (tile) {
+            const container = seat === 0 ? this._handContainer : this._aiHandContainers[seat - 1];
+            const local = this._handSlots.get(seat)?.get(tile.id);
+            if (container && local) {
+                // 金环画在特效层(不随容器旋转), 所以左右家(牌竖躺)要交换宽高
+                const tw = seat === 0 ? this.TILE_W : (seat === 1 ? this.TOP_TILE_W : this.SIDE_TILE_W);
+                const th = this._tileH(tw);
+                return {
+                    container, local: local.clone(), w: seat >= 2 ? th : tw, h: seat >= 2 ? tw : th,
+                    angle: container.angle,
+                };
+            }
+        }
+        const river = seat === 0 ? this._discardContainer : this._aiDiscardContainers[seat - 1];
+        if (river) return { container: river, local: new Vec3(0, 0, 0), angle: river.angle };
+        return null;
+    }
+
+    /**
+     * 和牌的"来路"锚点(吃胡/抢杠的飞牌起点):
+     *  - 吃胡: 牌河被取走的那一格 —— `_settleRon` 在同一帧里把牌 pop 掉了,
+     *    所以被取走的下标 = pop 后的 `discards.length`, 槽位按 `_renderRiver`
+     *    的横排公式反推(列数/间距/行进方向与各家的牌河完全一致);
+     *  - 抢杠: 牌是从补杠者**手里**抢的, 不在牌河 → 用他的副露区中心;
+     *  - 自摸: 不会走到这(hooks 只对吃胡/抢杠发问)。
+     */
+    private _huFxOriginOf(w: WinnerResult): HuFxAnchor | null {
+        const payer = w.fromSeat;
+        if (payer < 0 || payer === w.seat) return null;
+        const gm = this.game;
+        if (!gm) return null;
+        const payerPlayer = payer === 0 ? gm.player : gm.getAIPlayer(payer - 1);
+        if (!payerPlayer) return null;
+        const wRiver = this.RIVER_TILE_W;
+        const hRiver = this._tileH(wRiver);
+        const robKan = w.hu.fans.some(f => f.name === '抢杠胡');
+        if (robKan) {
+            const melds = this._meldContainers[payer];
+            if (!melds) return null;
+            return { container: melds, local: new Vec3(0, 0, 0), w: wRiver, h: hRiver, angle: melds.angle };
+        }
+        const idx = payerPlayer.discards.length;
+        const container = payer === 0 ? this._discardContainer : this._aiDiscardContainers[payer - 1];
+        if (!container) return null;
+        // 与 _renderRiver 横排分支同一套算术(三家牌河都是横排, 侧家靠容器旋转)
+        const cols = payer >= 2 ? this.SIDE_RIVER_COLS : this.RIVER_COLS;
+        const dir = payer === 1 ? -1 : 1;
+        const stepX = wRiver + this.RIVER_GAP;
+        const stepY = hRiver + this.RIVER_GAP;
+        const startX = -cols * stepX / 2 + stepX / 2;
+        const col = idx % cols;
+        const row = Math.floor(idx / cols);
+        return {
+            container,
+            local: new Vec3(startX + col * stepX, dir * row * stepY, 0),
+            w: wRiver, h: hRiver, angle: container.angle,
+        };
     }
 
     /**
@@ -2505,12 +2602,11 @@ export class Main extends Component {
             if (seat === 0) this._refreshRiichiButton();
         };
         gm.onNotice = (msg) => this._showToast(msg);
-        gm.onHu = (msg) => this._showHuToast(msg);
+        // onHu 不再接 toast: "谁胡了"由 HuEffect 的大字宣告交代, 顶部小字是重复信息
         gm.onReveal = (winnerSeat, msg) => this._onGameEndReveal(winnerSeat, msg);
         gm.onSettle = (data) => {
-            // 胡牌语音已按需求取消, 这里只走结算面板
-            // 震动挂在结算回调而不是 onHu: 流局也会走 _fireHu, 挂 onHu 流局会白震一下
-            if (data.kind === 'hu') vibrateHu();
+            // 震动挪进 HuEffect 的"爆发"拍(大字弹出那一刻), 流局不震;
+            // 结算面板等特效播完再由特效交棒弹出 —— 不再"啪一下糊在脸上"
             this._onSettle(data);
         };
         // AI 提示: 玩家点"提示"才会回调; 局面一变(出牌/选副露)GM 会给 null 让 UI 收起
@@ -2699,6 +2795,7 @@ export class Main extends Component {
                 node.setPosition(x, 0, 0);
                 this._glideAITile(tile, node, prevSlots);
                 nextSlots.set(tile.id, new Vec3(x, 0, 0));
+                if (reveal) this._popRevealed(node, i);
             }
         } else {
             // 左/右家: 牌背与弃牌河/副露保持同一朝向(随桌面侧边倾斜横躺),
@@ -2718,6 +2815,7 @@ export class Main extends Component {
                 node.setPosition(x, 0, 0);
                 this._glideAITile(tile, node, prevSlots);
                 nextSlots.set(tile.id, new Vec3(x, 0, 0));
+                if (reveal) this._popRevealed(node, i);
             }
         }
         this._storeHandSlots(seat, nextSlots);
@@ -2728,6 +2826,19 @@ export class Main extends Component {
     private _glideAITile(tile: Tile, node: Node, prevSlots: Map<number, Vec3> | undefined): void {
         const prev = prevSlots?.get(tile.id);
         if (prev) glideTo(node, prev);
+    }
+
+    /**
+     * 亮牌弹入: 牌局结束翻面时按张错峰"pop"一下(0.035s/张),
+     * 不再是同一帧全部变正面 —— 与 HuEffect 的节奏衔接。
+     */
+    private _popRevealed(node: Node, index: number): void {
+        node.setScale(0.3, 0.3, 1);
+        const op = ensureOpacity(node);
+        op.opacity = 0;
+        const delay = index * 0.06;
+        tween(node).delay(delay).to(0.26, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
+        tween(op).delay(delay).to(0.16, { opacity: 255 }).start();
     }
 
     /**
@@ -3023,34 +3134,42 @@ export class Main extends Component {
         if (this._infoLabel) this._infoLabel.string = '';
     };
 
-    private _showHuToast(msg: string): void {
-        this._showMessage(`【${msg}】`, 3);
-    }
-
     /**
      * 牌局结束(任意一家胡牌或流局): 亮出四家手牌
      * - 自己手牌本来就是正面,无需处理
      * - 三家 AI 手牌由牌背改为牌面,重新排版并刷新
+     *
+     * 2026-10-18: 顶部那行"【谁胡了】四家手牌已亮出"小字删掉了 ——
+     * "谁胡了"由 HuEffect 的大字宣告交代; 翻牌本身加了 0.035s/张 的错峰弹入,
+     * 不再是同一帧"啪"地全变正面。
      */
     private _onGameEndReveal(winnerSeat: number, message: string): void {
         this._revealAll = true;
         // 正面牌比牌背多出顶侧厚度,需要重排(上家手牌整组下移,避免被屏幕裁掉)
         this._applyLayout(this._halfH);
         for (let i = 0; i < 3; i++) this._refreshAIHand(i);
-        const who = winnerSeat >= 0 ? `${seatLabel(winnerSeat)} 胡牌` : '流局';
-        this._showMessage(`【${who}】四家手牌已亮出`, 4);
         // 牌局结束: 确保设置按钮还在(正常对局中它一直亮着)
         this._showSettingsButton();
         console.log(`[结束] ${message} → 亮出四家手牌`);
     }
 
     /**
-     * 牌局结算: 弹出独立结算面板(番型列表 + 四家得失分 + 四家手牌)
-     * 牌桌上的四家手牌同时已亮出, 面板里再集中看一遍
+     * 牌局结算: 三家翻面先单独播完(HU_FX_REVEAL_TAIL), 再进胡牌特效
+     * (压暗 → 飞牌 → 大字 → 摘要, 严格串行), 播完最后弹出独立结算面板。
      */
     private _onSettle(data: SettlementData): void {
         this._refreshRiichiButton();
-        this._settlement?.show(data);
+        this.scheduleOnce(() => {
+            if (this._huFx) {
+                this._huFx.play(data, {
+                    anchorOf: (seat, tile) => this._huFxAnchorOf(seat, tile),
+                    originOf: (winner) => this._huFxOriginOf(winner),
+                }, () => this._settlement?.show(data));
+            } else {
+                // 特效层没建起来(理论上到不了): 退回旧行为, 面板直接弹
+                this._settlement?.show(data);
+            }
+        }, HU_FX_REVEAL_TAIL);
         console.log(`[结算] ${data.title} ${data.subtitle}`, data.winners.map(w => `${w.name} ${w.hu.totalFan}番 ${w.hu.points}分`));
     }
 

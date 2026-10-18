@@ -21,10 +21,10 @@ TILE_W, TILE_H, TILE_GAP = 63, 84, 3          # 牌基准(手牌另乘 HAND_SCAL
 # 镜像 UIFactory: 牌节点比格位缩 TILE_GAP; 三家手牌格位只有 32~34 宽, 用更窄的 TILE_GAP_THIN
 TILE_GAP_THIN = 1.5
 # 镜像 Main: 手牌倍率由「你·听」标记反算(下限 1.13 / 目标 1.45);
-# 其他牌(三家手牌 / 牌河 / 副露)乘 OTHERS_SCALE 收缩
+# 其他牌(三家手牌 / 牌河 / 副露)乘 OTHERS_SCALE(1.0 = 与基准同大, 4:3 净空天花板)
 HAND_SCALE_MIN, HAND_SCALE_TARGET = 1.13, 1.45
 HAND_EDGE_GAP = 12
-OTHERS_SCALE = 0.9
+OTHERS_SCALE = 1.0
 TENPAI_MARK_INSET, TENPAI_MARK_W = 70, 112
 MARK_INNER = (CONTENT_W / 2 - TENPAI_MARK_INSET) - TENPAI_MARK_W / 2 - HAND_EDGE_GAP
 MELD_MARK_GAP = 24

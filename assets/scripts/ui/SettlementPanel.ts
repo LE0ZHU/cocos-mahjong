@@ -1,4 +1,5 @@
-import { _decorator, Component, Node, Color, Label, Graphics, UITransform } from 'cc';
+import { _decorator, Component, Node, Color, Label, Graphics, UITransform, Vec3, tween } from 'cc';
+import { ensureOpacity } from './Anim';
 import {
     createLabelNode, createButtonNode, bindSafeClick, repaintButtons,
     createTileNode, setTileBgColor, tileFaceSize, ButtonStyle,
@@ -174,6 +175,8 @@ export class SettlementPanel extends Component {
     onBack: (() => void) | null = null;
 
     private _card: Node | null = null;
+    /** 全屏遮罩(胡牌特效交棒后由它接管压暗; 入场时淡入) */
+    private _mask: Node | null = null;
     private _isOpen = false;
     /** 可见区半高(内容坐标), 由 Main 在 _applyLayout 里告知 */
     private _halfH = 0;
@@ -214,7 +217,25 @@ export class SettlementPanel extends Component {
         this._isOpen = true;
         // show 可能早于第一次 fit(理论上 Main 先排版), 这里补一次兜底缩放
         const k = this._layout.scale;
-        this._card?.setScale(k, k, 1);
+        const card = this._card;
+        if (card) {
+            card.setScale(k, k, 1);
+            // 入场(2026-10-18 胡牌特效交棒): 卡片从下方 70 滑到位 + 遮罩淡入,
+            // 不再"啪一下"糊在脸上。hide() 里会把透明度/位移复位。
+            const targetY = card.position.y;
+            const cardOp = ensureOpacity(card);
+            cardOp.opacity = 0;
+            card.setPosition(card.position.x, targetY - 70, 0);
+            tween(cardOp).to(0.28, { opacity: 255 }).start();
+            tween(card)
+                .to(0.5, { position: new Vec3(card.position.x, targetY, 0) }, { easing: 'backOut' })
+                .start();
+        }
+        if (this._mask) {
+            const maskOp = ensureOpacity(this._mask);
+            maskOp.opacity = 0;
+            tween(maskOp).to(0.34, { opacity: 255 }).start();
+        }
         // 原生平台: 按钮底框按"显示时补画"处理一次(与牌桌按钮同一套约定)
         this.scheduleOnce(() => repaintButtons(this._card), 0);
     }
@@ -223,6 +244,12 @@ export class SettlementPanel extends Component {
     hide(): void {
         this._isOpen = false;
         this._data = null;
+        // 复位入场动画的残留: 下一局 show 时必须从"不透明 + 原位"开始
+        if (this._card) {
+            ensureOpacity(this._card).opacity = 255;
+            this._card.setPosition(this._card.position.x, 0, 0);
+        }
+        if (this._mask) ensureOpacity(this._mask).opacity = 255;
         this.node.active = false;
     }
 
@@ -279,6 +306,7 @@ export class SettlementPanel extends Component {
         g.fillColor = new Color(0, 0, 0, 178);
         g.rect(-MASK_SIZE / 2, -MASK_SIZE / 2, MASK_SIZE, MASK_SIZE);
         g.fill();
+        this._mask = mask;
 
         const card = new Node('Card');
         card.parent = this.node;
