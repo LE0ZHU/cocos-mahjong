@@ -1,6 +1,6 @@
 import { _decorator, Component, Node, Color, Label, Graphics, UITransform, Vec3, view, Canvas, Camera, UIOpacity, tween, Button } from 'cc';
 import { GameManager, GamePhase, MeldPromptItem, MeldPromptRequest, seatLabel, TenpaiInfo } from './managers/GameManager';
-import { createTileNode, createTileBackNode, createLabelNode, createButtonNode, createIconButton, repaintButtons, registerButtonPainter, setTileBgColor, applyDesignResolution, BTN_COLOR_GREY, ButtonStyle, bindSafeClick } from './ui/UIFactory';
+import { createTileNode, createTileBackNode, createLabelNode, createButtonNode, createIconButton, repaintButtons, registerButtonPainter, setTileBgColor, tileFaceSize, applyDesignResolution, TILE_GAP_THIN, BTN_COLOR_GREY, ButtonStyle, bindSafeClick } from './ui/UIFactory';
 import { TileView, tileRadius } from './ui/TileView';
 import { MenuUI } from './ui/MenuUI';
 import { DrawModeUI } from './ui/DrawModeUI';
@@ -42,14 +42,15 @@ const HINT_BTN_H = 46;
 /** 提示按钮与"听牌"按钮之间的水平间距 */
 const HINT_BTN_GAP = 14;
 /**
- * 平板(牌被放大)时, 两个按钮改成**竖排贴左边缘**:
- * 横排会吃掉手牌行左侧 309px, 手牌因此只能放大到 1.14 倍;
- * 竖排只占 140px 宽, 手牌行的横向净空就能全部让给牌。
+ * 「听牌 / 提示」两个按钮**横排贴左边缘**, 位置在**副露行**(不再是手牌行)。
  *
- * 竖排的两个按钮以手牌行中心上下对称, 总高 100 < 手牌高(118), 不会顶到副露行。
+ * 2026-10-18: 手牌的放大目标提到 1.45, 手牌行左侧必须完全让开 ——
+ * 这两个按钮原来横排占掉手牌行左侧 309px(牌最多只能到 1.18 倍),
+ * 平板分支还专门改成竖排来省宽度。现在两者都不需要了:
+ * 按钮移到副露行左侧那條常驻空闲的通道(副露本身居中, 左侧留空),
+ * 手牌从内容左缘一路可用到「你·听」标记。
  */
 const LEFT_BTN_PAD = 20;
-const BTN_STACK_GAP = 8;
 /** 听牌芯片贴在内容右边缘时的留白(平板分支用) */
 const CHIP_EDGE_PAD = 14;
 /** 提示面板与吃/碰按钮行之间的垂直间距 */
@@ -228,6 +229,25 @@ const MELD_MARK_GAP = 24;
  * (可用空隙 33 > 30)。复核见 `tools/ai-test/tablet-layout-test.ts` 的 E / F 组。
  */
 const HAND_SCALE = 1.13;
+/**
+ * 手牌的放大目标 / 其他牌的收缩系数（2026-10-18 二次放大）
+ *
+ * 【为什么不再是固定 1.13】用户两次要求"自己的手牌再大一点"。手牌左右只有两样东西挡着：
+ * 「听牌 / 提示」两个按钮（已挪到副露行左侧，不再占手牌行）和常驻在行右端的「你·听」标记。
+ * 于是按"满手 14 张塞进这两者之间"反算上限：手机 16:9 能放到 1.45，
+ * 平板因为基准牌本来就 ×1.3，反算出来只有 1.22~1.34 —— 取小值，不会压到标记。
+ *
+ * 【其他牌 ×0.9】手牌放大后，牌河 / 副露 / 三家手牌按 0.9 收缩：
+ * 一是把纵向空间还给中央转盘（21:9 本来就贴着最小半径 30），
+ * 二是让"自己的牌"在整张桌上最突出。
+ */
+const HAND_SCALE_TARGET = 1.45;
+/** 手牌右缘与「你·听」标记内缘之间至少留出的空隙 */
+const HAND_EDGE_GAP = 12;
+/** 其他三家手牌 / 牌河 / 副露的收缩系数（手牌放大后让位） */
+const OTHERS_SCALE = 0.9;
+/** 收缩下限：纵向实在挤（21:9）时最多再缩到这里，再小看不清牌面 */
+const OTHERS_SCALE_MIN = 0.8;
 
 /** 把数值限制在 [min, max] 内 */
 function clamp(v: number, min: number, max: number): number {
@@ -418,6 +438,16 @@ export class Main extends Component {
     private _halfH = 0;
     /** 当前牌尺寸倍率(`_applyTileScale` 的结果); 0 = 还没应用过 */
     private _tileK = 0;
+    /** 其他牌的收缩系数(0.8~0.9, 由纵向余量决定; 见 _applyTileScale) */
+    private _othersScale = OTHERS_SCALE;
+    /**
+     * 上一次建牌用的尺寸签名(手牌 / 上家 / 侧家 / 牌河四种牌宽)
+     *
+     * 为什么不用 `_tileK` 判断: 手牌倍率还取决于横向反算、其他牌倍率取决于纵向余量,
+     * 两者都可能在 **k 不变**的情况下变化(例如 16:9 → 21:9 都是 k=1, 但纵向更挤)。
+     * 只比 k 会漏掉重建, 牌照旧按旧尺寸画。
+     */
+    private _builtSizeSig = '';
 
     /** 各座位在中央转盘上的指向角度(度): 0=朝上(上家), 180=朝下(自己), 90=朝左(左家), -90=朝右(右家) */
     private readonly POINTER_ANGLES = [180, 0, 90, -90];
@@ -454,16 +484,13 @@ export class Main extends Component {
      * 牌尺寸放大倍率上限(手机 16:9 及更宽 = 1)
      *
      * 横向净空是硬约束, 上限由**最挤的一条**决定(数值见 tablet-layout-test 的 E 组):
-     *  - 牌河: 9 张 × 44 × k 的半宽要让开左右家牌河的内缘(340 − 22k), 留 30px → k ≤ 1.41;
-     *  - 手牌: 14 张的半宽要让开左侧竖排按钮的右缘(-700) → k ≤ 1.58;
-     *          右侧让开「你·听」标记(左缘 714) → k ≤ 1.62。
-     * 所以真正卡住的是牌河那一条, 取 1.4。
+     *  - 牌河: 9 张 × 44 × k × 0.9 的半宽要让开左右家牌河的内缘, 留 30px;
+     *  - 手牌: 半宽由 `HAND_SCALE_TARGET` 与「你·听」标记反算, 见 `_applyTileScale`。
+     * 2026-10-18 起「听牌 / 提示」已挪到副露行左侧, 不再参与手牌横向净空;
+     * 其他牌又乘了 `OTHERS_SCALE`(0.9), 所以牌河那条比过去宽松, 上限仍取 1.4
+     * (桌面被 `_applyTableScale` 放大后, 再大就会在 4:3 上把牌河顶出桌沿)。
      *
-     * ⚠️ 1.4 的前提是**手牌行两侧已经让干净**(平板分支):
-     *  - 「听牌 / 提示」按钮竖排贴左边缘(`LEFT_BTN_PAD`), 不再横排吃 309px;
-     *  - 听牌芯片移到「你·听」标记上方、右缘贴内容边(`CHIP_EDGE_PAD`), 不再卡在 706。
-     * 手机(k = 1)仍走原来的横排 + 手牌右侧芯片, 排版一个像素都不变。
-     * 改按钮 / 芯片位置或牌河列数后必须重跑 `tools/ai-test/tablet-layout-test.ts`。
+     * ⚠️ 改按钮 / 芯片 / 牌河列数后必须重跑 `tools/ai-test/tablet-layout-test.ts`。
      */
     private readonly TILE_SCALE_MAX = 1.4;
 
@@ -1109,15 +1136,37 @@ export class Main extends Component {
      * 其它牌的尺寸和排版一个像素都不变。
      * 尺寸改完后, 已经建好的牌必须重建(长宽写在节点 UITransform 里), 见 `_rebuildTiles`。
      */
-    private _applyTileScale(halfH: number): number {
+    private _applyTileScale(halfH: number, tableK: number): number {
         const k = clamp(halfH / this.TILE_REF_HALF_H, 1, this.TILE_SCALE_MAX);
-        // 手牌额外再放大一圈(HAND_SCALE, 只作用于自家手牌);
-        // 宽高同乘, 3:4 比例不变, `_tileH(w)` 推导其它牌高度时也不受影响
-        this.TILE_W = this.BASE_TILE_W * k * HAND_SCALE;
-        this.TILE_H = this.BASE_TILE_H * k * HAND_SCALE;
-        this.TOP_TILE_W = this.BASE_TOP_TILE_W * k;
-        this.SIDE_TILE_W = this.BASE_SIDE_TILE_W * k;
-        this.RIVER_TILE_W = this.BASE_RIVER_TILE_W * k;
+        // 手牌横向到哪儿为止: 右端常驻「你·听」标记, 它的内缘就是上限(左边是内容边缘, 远得多);
+        // 满手 14 张整排居中 → 半宽 = 7 × 牌宽, 由此反算允许的最大手牌倍率
+        const markInner = (this.CONTENT_W / 2 - TENPAI_MARK_INSET) - TENPAI_MARK_W / 2 - HAND_EDGE_GAP;
+        const baseW = this.BASE_TILE_W * k;
+        const hs = clamp(markInner / (7 * baseW), HAND_SCALE, HAND_SCALE_TARGET);
+        // 手牌: 目标倍率与横向上限取小; 宽高同乘, 3:4 比例不变
+        this.TILE_W = baseW * hs;
+        this.TILE_H = this.BASE_TILE_H * k * hs;
+
+        // ---- 其他牌的收缩系数 ----
+        // 默认 OTHERS_SCALE(0.9)。手牌变大后底部三段(手牌 → 副露 → 牌河)整体上移,
+        // 若把中央转盘挤到最小半径以下(21:9 这类超宽屏最先发生), 就**继续缩**
+        // (用户原话:"屏幕不够用就把牌河 / 副露 / 三家手牌等比例缩小"), 下限 OTHERS_SCALE_MIN。
+        const bottomHalf = Math.min(halfH, this.FELT_TILE_BOTTOM * tableK);
+        const rivBase = this.BASE_RIVER_TILE_W * k;
+        /** 底部牌河上沿到屏幕中心的距离: 手牌 + 副露 + 牌河三段 */
+        const roomOf = (rivH: number): number =>
+            (bottomHalf - this.TILE_H - 8 - 2 * MELD_MARK_GAP) - 3 * rivH;
+        let others = OTHERS_SCALE;
+        if (roomOf(rivBase * OTHERS_SCALE * (this.BASE_TILE_H / this.BASE_TILE_W)) < TURN_DISC_R_MIN) {
+            const maxRivH = (bottomHalf - this.TILE_H - 8 - 2 * MELD_MARK_GAP - TURN_DISC_R_MIN) / 3;
+            others = clamp(maxRivH / (rivBase * (this.BASE_TILE_H / this.BASE_TILE_W)),
+                OTHERS_SCALE_MIN, OTHERS_SCALE);
+        }
+        // 其他三家手牌 / 牌河 / 副露: 统一乘同一个系数, 大小关系保持不变
+        this.TOP_TILE_W = this.BASE_TOP_TILE_W * k * others;
+        this.SIDE_TILE_W = this.BASE_SIDE_TILE_W * k * others;
+        this.RIVER_TILE_W = this.BASE_RIVER_TILE_W * k * others;
+        this._othersScale = others;
         return k;
     }
 
@@ -1166,13 +1215,9 @@ export class Main extends Component {
         const tableK = this._applyTableScale(halfH);
         // 牌也跟着可见高度等比放大(平板 3:2 / 4:3; 手机 16:9 及更宽恒为 1),
         // 否则牌相对被放大的桌面会明显偏小 —— 见 _applyTileScale
-        const tileK = this._applyTileScale(halfH);
-        /** 上一轮的倍率: 末尾用它判断"牌尺寸变了, 已画好的牌要重建" */
-        const prevTileK = this._tileK;
+        const tileK = this._applyTileScale(halfH, tableK);
         // 先落字段: `_placeTenpaiChip` / `_rebuildTiles` 里都要读它选分支
         this._tileK = tileK;
-        /** 牌是否被放大(平板分支): 手牌行两侧的常驻元素要让位, 见下面的按钮 / 芯片 */
-        const wideTiles = tileK > 1.001;
         /**
          * 牌位可用半高(上下各一个, 因为毡布上下不对称)。
          *
@@ -1259,20 +1304,14 @@ export class Main extends Component {
             if (b && b.isValid && b.active) b.setPosition(this._aiBubblePos[i]);
         }
 
-        // ---- 手牌行左侧: 听牌(立直) + 提示 ----
+        // ---- 听牌(立直) + 提示: 放在**副露行左侧** ----
+        // 不再占手牌行: 手牌要放大, 行左侧必须让干净(见 HAND_SCALE_TARGET)。
+        // 副露行本身是居中的, 左侧这条通道常驻空闲; 超宽屏上这一排也不会碰到牌河。
         const halfW = this.CONTENT_W / 2;
-        if (wideTiles) {
-            // 平板: **竖排贴左边缘**。横排会吃掉手牌行左侧 309px, 手牌就永远放不大;
-            // 竖排只占 140px(左留白 20 + 按钮宽 120), 手牌能一直用到 -617。
+        {
             const bx = -halfW + LEFT_BTN_PAD + HINT_BTN_W / 2;
-            const dy = (HINT_BTN_H + BTN_STACK_GAP) / 2;
-            this._riichiBtn?.setPosition(bx, handY + dy, 0);
-            this._hintBtn?.setPosition(bx, handY - dy, 0);
-        } else {
-            // 手机: 横排在自家手牌左侧(原样; "提示"排在"听牌"右边)
-            const riichiX = -halfW + 115;
-            this._riichiBtn?.setPosition(riichiX, handY, 0);
-            this._hintBtn?.setPosition(riichiX + HINT_BTN_W / 2 + HINT_BTN_GAP + HINT_BTN_W / 2, handY, 0);
+            this._riichiBtn?.setPosition(bx, meldY, 0);
+            this._hintBtn?.setPosition(bx + HINT_BTN_W + HINT_BTN_GAP, meldY, 0);
         }
         // "你·听"标记: 只有玩家自己这一块(三家的听牌状态并进了各自名牌)
         this._tenpaiMarkers[0]?.setPosition(halfW - TENPAI_MARK_INSET, handY, 0);
@@ -1308,7 +1347,12 @@ export class Main extends Component {
         this._refreshWall();
         // 倍率变了 → 桌上已经画好的牌必须按新尺寸重建(长宽写在节点 UITransform 里,
         // 光改 TILE_W 不会让它们变大)。首次进布局时桌上还没有牌, 这里是空操作。
-        if (Math.abs(tileK - prevTileK) > 1e-4) {
+        // 牌尺寸变了才重建(尺寸写在节点 UITransform 里)。签名含四种牌宽:
+        // 手牌倍率看横向反算、其他牌看纵向余量, 都可能与 k 无关地变化。
+        const sizeSig = [this.TILE_W, this.TOP_TILE_W, this.SIDE_TILE_W, this.RIVER_TILE_W]
+            .map(v => v.toFixed(2)).join('/');
+        if (sizeSig !== this._builtSizeSig) {
+            this._builtSizeSig = sizeSig;
             // 上家手牌变宽/变窄后比分条的可用宽度跟着变, 而它的指纹只看分数文本 ——
             // 转屏时得强制重建一次, 否则芯片不会按新宽度重新缩放
             this._refreshScoreStrip(true);
@@ -1815,17 +1859,15 @@ export class Main extends Component {
         if (!chip || !chip.active) return;
         const halfW = this.CONTENT_W / 2;
         const right = halfW - CHIP_EDGE_PAD;
-        // 满手 14 张时手牌右缘(手牌整排居中, 张数只会更少 —— 这是最坏情况)
-        const handRight = (14 * this.TILE_W) / 2 + TENPAI_HAND_GAP;
-        const maxW = right - handRight;
+        // 手牌放大到 1.45 后, 手牌行右端只剩「你·听」标记那点空间 ——
+        // 芯片**整块抬到手牌上方**(不再压手牌上沿), 于是横向只受副露最右沿约束。
+        const meldRight = (16 * this.RIVER_TILE_W) / 2 + 16;
+        const maxW = right - meldRight;
         const scale = this._tenpaiChipW > maxW && maxW > 0
             ? Math.max(CHIP_MIN_SCALE, maxW / this._tenpaiChipW)
             : 1;
         chip.setScale(scale, scale, 1);
-        const dy = Math.max(
-            this.TILE_H / 2 - 7,
-            TENPAI_MARK_H / 2 + TENPAI_CHIP_H / 2 + 8,
-        );
+        const dy = this.TILE_H / 2 + TENPAI_CHIP_H / 2 + 8;
         chip.setPosition(right - (this._tenpaiChipW * scale) / 2, this._handRowY + dy, 0);
     }
 
@@ -2651,7 +2693,7 @@ export class Main extends Component {
                 const tile = ai.hand[i];
                 const node = reveal
                     ? this._createFaceTile(tile, this.TOP_TILE_W, h, container)
-                    : createTileBackNode(this.TOP_TILE_W, h);
+                    : createTileBackNode(this.TOP_TILE_W, h, TILE_GAP_THIN);
                 node.parent = container;
                 const x = startX + i * step;
                 node.setPosition(x, 0, 0);
@@ -2670,7 +2712,7 @@ export class Main extends Component {
                 const tile = ai.hand[i];
                 const node = reveal
                     ? this._createFaceTile(tile, w, h, container)
-                    : createTileBackNode(w, h);
+                    : createTileBackNode(w, h, TILE_GAP_THIN);
                 node.parent = container;
                 const x = startX + i * step;
                 node.setPosition(x, 0, 0);
@@ -2695,7 +2737,7 @@ export class Main extends Component {
      * 否则 TileView 取不到牌面子节点,会被误判为无图片而退化成矢量牌面。
      */
     private _createFaceTile(tile: Tile, w: number, h: number, parent: Node): Node {
-        const node = createTileNode(w, h, false);
+        const node = createTileNode(w, h, false, TILE_GAP_THIN);
         node.parent = parent;
         setTileBgColor(node, tile.suit, false);
         const view = node.addComponent(TileView);
@@ -3581,6 +3623,10 @@ function meldMarkDir(seat: number): number {
  * 圆角若另取一套比例(这里曾是 0.16), 弧线在角上会离牌边而去, 露出一道缝。
  */
 function addClaimedRing(node: Node, w: number, h: number): void {
+    // 传进来的是格位尺寸; 牌面比格位小 TILE_GAP, 圈要贴着**牌面**画
+    const face = tileFaceSize(w, h);
+    w = face.w;
+    h = face.h;
     const ring = new Node('ClaimedRing');
     ring.parent = node;
     ring.addComponent(UITransform).setContentSize(w, h);

@@ -138,7 +138,9 @@ const abortBody = methodBody(mainCode, 'private _abortDealing(): void');
 check(abortBody.includes('_dealing = false') && abortBody.includes('_dealShown = 0'),
     '_abortDealing 同时清 _dealing 与 _dealShown');
 // 返回主页面与重新开始都必须调它
-const backBody = methodBody(mainCode, 'private _backToMenu');
+// ⚠️ 签名要写到 `(): void`: 抽牌模式新增了 `_backToMenuFromDraw`,
+// 只写 `private _backToMenu` 会先命中那个方法(它是切抽牌页用的, 不含发牌中断)。
+const backBody = methodBody(mainCode, 'private _backToMenu(): void');
 check(backBody.includes('_abortDealing'), '返回主页面时中断发牌');
 const restartBody = methodBody(mainCode, 'private _onRestartClick');
 check(restartBody.includes('_abortDealing'), '重新开始时中断发牌');

@@ -87,8 +87,17 @@ const BASE_SIDE_TILE_W = num(mainCode, /BASE_SIDE_TILE_W\s*=\s*([\d.]+)/, 'BASE_
 const BASE_RIVER_TILE_W = num(mainCode, /BASE_RIVER_TILE_W\s*=\s*([\d.]+)/, 'BASE_RIVER_TILE_W');
 const TILE_REF_HALF_H = num(mainCode, /TILE_REF_HALF_H\s*=\s*([\d.]+)/, 'TILE_REF_HALF_H');
 const TILE_SCALE_MAX = num(mainCode, /TILE_SCALE_MAX\s*=\s*([\d.]+)/, 'TILE_SCALE_MAX');
-/** 自家手牌的额外放大倍率(只作用于手牌, 见 Main.HAND_SCALE) */
+/**
+ * 自家手牌倍率: 下限 `HAND_SCALE` / 目标 `HAND_SCALE_TARGET`，
+ * 实际值由"满手 14 张塞进内容左缘与「你·听」标记之间"反算（复刻 Main._applyTileScale）
+ */
 const HAND_SCALE = num(mainCode, /HAND_SCALE\s*=\s*([\d.]+)/, 'HAND_SCALE');
+const HAND_SCALE_TARGET = num(mainCode, /HAND_SCALE_TARGET\s*=\s*([\d.]+)/, 'HAND_SCALE_TARGET');
+const HAND_EDGE_GAP = num(mainCode, /HAND_EDGE_GAP\s*=\s*([\d.]+)/, 'HAND_EDGE_GAP');
+const OTHERS_SCALE = num(mainCode, /OTHERS_SCALE\s*=\s*([\d.]+)/, 'OTHERS_SCALE');
+const OTHERS_SCALE_MIN = num(mainCode, /OTHERS_SCALE_MIN\s*=\s*([\d.]+)/, 'OTHERS_SCALE_MIN');
+const TENPAI_MARK_INSET = num(mainCode, /TENPAI_MARK_INSET\s*=\s*([\d.]+)/, 'TENPAI_MARK_INSET');
+const TENPAI_MARK_W = num(mainCode, /TENPAI_MARK_W\s*=\s*([\d.]+)/, 'TENPAI_MARK_W');
 const TABLE_NEAR_HH = num(mainCode, /TABLE_NEAR_HH\s*=\s*([\d.]+)/, 'TABLE_NEAR_HH');
 const TABLE_FAR_HH = num(mainCode, /TABLE_FAR_HH\s*=\s*([\d.]+)/, 'TABLE_FAR_HH');
 const FELT_TILE_TOP = num(mainCode, /FELT_TILE_TOP\s*=\s*([\d.]+)/, 'FELT_TILE_TOP');
@@ -96,7 +105,6 @@ const FELT_TILE_BOTTOM = num(mainCode, /FELT_TILE_BOTTOM\s*=\s*([\d.]+)/, 'FELT_
 // 手牌两侧的常驻元素(它们的位置不能动, 牌只能放大到"不撞它们"为止)
 const HINT_BTN_W = num(mainCode, /HINT_BTN_W\s*=\s*([\d.]+)/, 'HINT_BTN_W');
 const HINT_BTN_GAP = num(mainCode, /HINT_BTN_GAP\s*=\s*([\d.]+)/, 'HINT_BTN_GAP');
-const RIICHI_X_OFFSET = num(mainCode, /riichiX\s*=\s*-halfW\s*\+\s*([\d.]+)/, 'riichiX 偏移');
 const TENPAI_HAND_GAP = num(mainCode, /TENPAI_HAND_GAP\s*=\s*([\d.]+)/, 'TENPAI_HAND_GAP');
 const LEFT_BTN_PAD = num(mainCode, /LEFT_BTN_PAD\s*=\s*([\d.]+)/, 'LEFT_BTN_PAD');
 const CHIP_EDGE_PAD = num(mainCode, /CHIP_EDGE_PAD\s*=\s*([\d.]+)/, 'CHIP_EDGE_PAD');
@@ -130,6 +138,27 @@ function tableScale(halfH: number): number {
 /** 复刻 Main._applyTileScale */
 function tileScale(halfH: number): number {
     return Math.max(1, Math.min(TILE_SCALE_MAX, halfH / TILE_REF_HALF_H));
+}
+/**
+ * 复刻 Main._applyTileScale 里的手牌倍率: 目标 1.45, 但满手 14 张要让开
+ * 「你·听」标记(内缘 = 内容右半宽 − TENPAI_MARK_INSET − 半个标记宽)
+ */
+function handScale(tk: number): number {
+    const markInner = (CONTENT_HALF_W - TENPAI_MARK_INSET) - TENPAI_MARK_W / 2 - HAND_EDGE_GAP;
+    return Math.max(HAND_SCALE, Math.min(HAND_SCALE_TARGET, markInner / (7 * BASE_TILE_W * tk)));
+}
+/**
+ * 复刻 Main._applyTileScale 里"其他牌"的收缩系数: 默认 0.9,
+ * 若底部三段把手牌挤到转盘最小半径以下(21:9 最先发生), 继续缩到 OTHERS_SCALE_MIN
+ */
+function othersScaleFor(tk: number, halfH: number, th: number): number {
+    const bottomHalf = bottomHalfOf(halfH);
+    const rivBase = BASE_RIVER_TILE_W * tk;
+    const pitch = BASE_TILE_H / BASE_TILE_W;
+    const roomOf = (rivH: number): number => (bottomHalf - th - 8 - 2 * MELD_MARK_GAP) - 3 * rivH;
+    if (roomOf(rivBase * OTHERS_SCALE * pitch) >= TURN_DISC_R_MIN) return OTHERS_SCALE;
+    const maxRivH = (bottomHalf - th - 8 - 2 * MELD_MARK_GAP - TURN_DISC_R_MIN) / 3;
+    return Math.max(OTHERS_SCALE_MIN, Math.min(OTHERS_SCALE, maxRivH / (rivBase * pitch)));
 }
 /** 复刻 Main._applyLayout 里的牌位上限(上下各一个, 毡布不对称) */
 function topHalfOf(halfH: number): number {
@@ -191,10 +220,10 @@ for (const [name, aspect] of [['16:9', 16 / 9], ['19.5:9', 19.5 / 9], ['21:9', 2
     const tk = tileScale(halfH);
     check(k === 1, `${name} 桌面缩放 = 1`, `实际 ${k.toFixed(3)}`);
     check(tk === 1, `${name} 桌面牌尺寸倍率 = 1(${BASE_TILE_W}×${BASE_TILE_H})`, `实际 ${tk.toFixed(3)}`);
-    check(near(BASE_TILE_W * tk * HAND_SCALE, BASE_TILE_W * HAND_SCALE) &&
-        near(BASE_TILE_H * tk * HAND_SCALE, BASE_TILE_H * HAND_SCALE),
-        `${name} 手牌 = 基准 × HAND_SCALE ${HAND_SCALE}`,
-        `实际 ${(BASE_TILE_W * tk * HAND_SCALE).toFixed(1)}×${(BASE_TILE_H * tk * HAND_SCALE).toFixed(1)}`);
+    const hs = handScale(tk);
+    check(near(BASE_TILE_W * tk * hs, BASE_TILE_W * hs) && near(BASE_TILE_H * tk * hs, BASE_TILE_H * hs),
+        `${name} 手牌 = 基准 × ${hs.toFixed(2)}(目标 ${HAND_SCALE_TARGET}, 下限 ${HAND_SCALE})`,
+        `实际 ${(BASE_TILE_W * tk * hs).toFixed(1)}×${(BASE_TILE_H * tk * hs).toFixed(1)}`);
     check(Math.abs(topHalfOf(halfH) - halfH) < 1e-6 && Math.abs(bottomHalfOf(halfH) - halfH) < 1e-6,
         `${name} 牌位半高 = 可见半高 ${halfH.toFixed(1)}`,
         `实际 上${topHalfOf(halfH).toFixed(1)} / 下${bottomHalfOf(halfH).toFixed(1)}`);
@@ -239,18 +268,23 @@ console.log('\n[D] 源码接线');
 const applyLayout = body(mainCode, 'private _applyLayout(');
 check(applyLayout.length > 0, '_applyLayout() 能定位到');
 check(applyLayout.includes('_applyTableScale(halfH)'), '_applyLayout() 先算桌面缩放');
-check(applyLayout.includes('_applyTileScale(halfH)'), '_applyLayout() 同时算牌尺寸倍率');
+check(applyLayout.includes('_applyTileScale(halfH, tableK)'),
+    '_applyLayout() 同时算牌尺寸倍率(带上桌面倍率, 其他牌要按纵向余量收缩)');
 check(applyLayout.includes('FELT_TILE_TOP') && applyLayout.includes('FELT_TILE_BOTTOM'),
     '_applyLayout() 用 FELT_TILE_TOP / FELT_TILE_BOTTOM 夹牌位');
 check(/handY\s*=\s*-bottomHalf/.test(applyLayout), 'handY 用夹过的 bottomHalf');
 check(/topHandY\s*=\s*topHalf/.test(applyLayout), 'topHandY 用夹过的 topHalf');
 check(applyLayout.includes('_rebuildTiles'), '_applyLayout() 在倍率变化后重建牌(否则牌尺寸改了不生效)');
-// 平板要让位: 手牌行两侧的按钮 / 芯片不挪走, 牌就永远卡在 1.14
-check(applyLayout.includes('wideTiles'), '_applyLayout() 分出"牌被放大"的平板分支');
-check(applyLayout.includes('LEFT_BTN_PAD'), '平板分支把听牌/提示按钮竖排贴左边缘');
+// 2026-10-18: 手牌放大到 1.45 → 「听牌/提示」挪出**手牌行**, 放到副露行左侧
+check(/setPosition\(bx, meldY, 0\)/.test(applyLayout) && applyLayout.includes('LEFT_BTN_PAD'),
+    '「听牌/提示」放在副露行左侧, 不再占手牌行');
+check(!/setPosition\([^)]*handY[^)]*\)[\s\S]{0,80}_hintBtn/.test(applyLayout),
+    '两个按钮都不再贴在手牌行(否则手牌永远放不大)');
 const chipBody = body(mainCode, 'private _placeTenpaiChip(');
-check(chipBody.includes('CHIP_EDGE_PAD') && chipBody.includes('TENPAI_MARK_H'),
-    '_placeTenpaiChip() 贴内容右边缘, 并抬到「你·听」标记上方(横向错开手牌)');
+check(chipBody.includes('CHIP_EDGE_PAD') && chipBody.includes('this.TILE_H / 2'),
+    '_placeTenpaiChip() 贴内容右边缘, 并整块抬到手牌上方(不再压手牌上沿)');
+check(chipBody.includes('RIVER_TILE_W'),
+    '芯片左界以"满副露右沿"为界, 不再按手牌右缘(手牌已占满整行)');
 const scaleBody = body(mainCode, 'private _applyTableScale(');
 check(scaleBody.includes('setScale'), '_applyTableScale() 真的缩放了桌面节点');
 check(scaleBody.includes('TABLE_FAR_HH'), '_applyTableScale() 用 TABLE_FAR_HH 算倍率');
@@ -259,8 +293,10 @@ check(tileScaleBody.length > 0, '_applyTileScale() 能定位到');
 check(tileScaleBody.includes('TILE_SCALE_MAX') && tileScaleBody.includes('TILE_REF_HALF_H'),
     '_applyTileScale() 用同一组倍率常量');
 check(['TILE_W', 'TILE_H', 'TOP_TILE_W', 'SIDE_TILE_W', 'RIVER_TILE_W']
-    .every(f => tileScaleBody.indexOf(`this.${f} = this.BASE`) >= 0),
+    .every(f => tileScaleBody.indexOf(`this.${f} =`) >= 0),
     '_applyTileScale() 覆盖了全部五档牌尺寸');
+check(tileScaleBody.includes('OTHERS_SCALE') && tileScaleBody.includes('OTHERS_SCALE_MIN'),
+    '_applyTileScale() 里的"其他牌"有收缩系数与下限');
 const rebuildBody = body(mainCode, 'private _rebuildTiles(');
 check(rebuildBody.length > 0, '_rebuildTiles() 能定位到');
 check(['_refreshHand', '_refreshAIHand', '_refreshDiscard', '_refreshAIDiscard', '_refreshMelds']
@@ -284,47 +320,52 @@ check(tableBody.includes('this.TABLE_NEAR_HH') && tableBody.includes('this.TABLE
 
 // ---------------------------------------------------------------- E 组
 console.log('\n[E] 放大后的牌不撞常驻 UI(横向最坏情况)');
-// 手机: 两个按钮横排, "提示"右缘 = -840 + 115 + 120 + 14 + 60
-const hintRightMobile = -CONTENT_HALF_W + RIICHI_X_OFFSET + HINT_BTN_W + HINT_BTN_GAP + HINT_BTN_W / 2;
-// 平板: 竖排贴左边缘, 右缘 = -840 + 20 + 120
-const stackRight = -CONTENT_HALF_W + LEFT_BTN_PAD + HINT_BTN_W;
-// 平板: 听牌芯片右缘贴内容边
+// 「听牌 / 提示」已挪到**副露行左侧**: 右缘 = -840 + LEFT_BTN_PAD + 120 + 14 + 120
+const btnRight = -CONTENT_HALF_W + LEFT_BTN_PAD + HINT_BTN_W * 2 + HINT_BTN_GAP;
+// 手牌行的右端是常驻的「你·听」标记 —— 满手 14 张必须让开它的内缘
+const markInner = CONTENT_HALF_W - TENPAI_MARK_INSET - TENPAI_MARK_W / 2;
+// 听牌芯片: 抬到手牌上方后, 右缘贴内容边、左边以"满副露"右沿为界
 const chipRightWide = CONTENT_HALF_W - CHIP_EDGE_PAD;
-// 手机(k = 1)仍走横排按钮, 老约束必须继续成立
-check((FULL_HAND * BASE_TILE_W) / 2 + 28 <= -hintRightMobile,
-    `手机 满手14张半宽 ${((FULL_HAND * BASE_TILE_W) / 2).toFixed(0)} 让开横排按钮右缘 ${(-hintRightMobile).toFixed(0)}`,
-    `净空只剩 ${(-hintRightMobile - (FULL_HAND * BASE_TILE_W) / 2).toFixed(1)}px`);
-check(-CONTENT_HALF_W + LEFT_BTN_PAD >= -CONTENT_HALF_W,
-    `平板竖排按钮左缘 ${(-CONTENT_HALF_W + LEFT_BTN_PAD).toFixed(0)} 在内容坐标内`);
-for (const [name, aspect] of [['3:2', 3 / 2], ['4:3', 4 / 3]] as Array<[string, number]>) {
+for (const [name, aspect] of [['16:9', 16 / 9], ['3:2', 3 / 2], ['4:3', 4 / 3]] as Array<[string, number]>) {
     const halfH = aspectHalfH(aspect);
     const tk = tileScale(halfH);
-    // 手牌额外乘 HAND_SCALE; 上家 / 左右家 / 牌河只看 tk
-    const tileW = BASE_TILE_W * tk * HAND_SCALE;
-    const topW = BASE_TOP_TILE_W * tk;
-    const sideW = BASE_SIDE_TILE_W * tk;
-    const riverW = BASE_RIVER_TILE_W * tk;
+    const hs = handScale(tk);
+    // 手牌按反算倍率; 上家 / 左右家 / 牌河再乘收缩系数(默认 0.9, 纵向不够时更低)
+    const th = BASE_TILE_H * tk * hs;
+    const others = othersScaleFor(tk, halfH, th);
+    const tileW = BASE_TILE_W * tk * hs;
+    const topW = BASE_TOP_TILE_W * tk * others;
+    const sideW = BASE_SIDE_TILE_W * tk * others;
+    const riverW = BASE_RIVER_TILE_W * tk * others;
+    const handHalf = (FULL_HAND * tileW) / 2;
 
-    // 1) 满手 14 张手牌 ←→ 左侧竖排按钮右缘(留 24px 呼吸)
-    const handRight = (FULL_HAND * tileW) / 2;
-    check(handRight + 24 <= -stackRight,
-        `${name} 满手14张半宽 ${handRight.toFixed(0)} 让开竖排按钮右缘 ${(-stackRight).toFixed(0)}`,
-        `净空只剩 ${(-stackRight - handRight).toFixed(1)}px`);
+    // 1) 满手 14 张 ←→「你·听」标记内缘(右边)/ 内容左缘(左边)
+    check(handHalf + HAND_EDGE_GAP <= markInner + 0.01,
+        `${name} 满手14张半宽 ${handHalf.toFixed(0)} 让开「你·听」标记内缘 ${markInner.toFixed(0)}`,
+        `重叠 ${(handHalf + HAND_EDGE_GAP - markInner).toFixed(1)}px`);
+    check(handHalf <= CONTENT_HALF_W - 12,
+        `${name} 满手半宽 ${handHalf.toFixed(0)} 不出内容左缘 ${-CONTENT_HALF_W}`);
 
-    // 2) 听牌芯片(平板分支): 右缘贴内容边, 左边以满手 14 张为界
-    const chipMaxW = chipRightWide - (handRight + TENPAI_HAND_GAP);
-    check(chipMaxW >= 150,
-        `${name} 听牌芯片可用宽 ${chipMaxW.toFixed(0)} ≥ 150(缩放下限之上)`,
+    // 2) 按钮在副露行左侧: 只可能撞"满副露"的最左沿
+    const meldHalfW = (FULL_MELD * riverW) / 2;
+    check(btnRight + 12 <= -meldHalfW,
+        `${name} 按钮右缘 ${btnRight.toFixed(0)} 让开满副露左沿 ${(-meldHalfW).toFixed(0)}`,
+        `重叠 ${(btnRight + 12 + meldHalfW).toFixed(0)}px`);
+
+    // 3) 听牌芯片: 抬到手牌上方, 左界是满副露右沿
+    const chipMaxW = chipRightWide - (meldHalfW + 16);
+    check(chipMaxW >= 240,
+        `${name} 听牌芯片可用宽 ${chipMaxW.toFixed(0)} ≥ 240(不必缩到下限)`,
         `仅 ${chipMaxW.toFixed(0)}px`);
 
-    // 3) 上家 14 张手牌 ←→ 左/右家手牌列(内缘)
+    // 4) 上家 14 张手牌 ←→ 左/右家手牌列(内缘)
     const topHalfW = (FULL_HAND * topW) / 2;
     const sideInner = SIDE_HAND_X - sideW / 2;
     check(topHalfW + 20 < sideInner,
         `${name} 上家手牌半宽 ${topHalfW.toFixed(0)} 不撞侧家手牌列 ${sideInner.toFixed(0)}`,
         `重叠 ${(topHalfW - sideInner).toFixed(0)}px`);
 
-    // 4) 自家/上家 9 张牌河 ←→ 左/右家牌河(内缘) —— 牌放大后最挤的一条。
+    // 5) 自家/上家 9 张牌河 ←→ 左/右家牌河(内缘) —— 牌放大后最挤的一条。
     //    侧家那块是斜的: 内缘 = x − [(半排长 + 半牌宽)·sin + 半牌高·cos],
     //    不能用 x − 牌宽/2(会高估净空), 见 sideRiverOverhang
     const riverHalfW = (RIVER_COLS * riverW) / 2;
@@ -334,12 +375,11 @@ for (const [name, aspect] of [['3:2', 3 / 2], ['4:3', 4 / 3]] as Array<[string, 
         `${name} 侧家牌河内缘 ${(riverHalfW + sideGap).toFixed(0)} 让开牌河外沿 ${riverHalfW.toFixed(0)}(净空 ${sideGap.toFixed(0)})`,
         `重叠 ${(-sideGap).toFixed(0)}px`);
 
-    // 5) 副露最坏情况 16 张仍在内容宽度内
-    const meldHalfW = (FULL_MELD * riverW) / 2;
+    // 6) 副露最坏情况 16 张仍在内容宽度内
     check(meldHalfW + 20 < CONTENT_HALF_W,
         `${name} 满副露16张半宽 ${meldHalfW.toFixed(0)} 在内容宽度 ${CONTENT_HALF_W} 内`);
 
-    // 6) 侧家 13 张手牌列纵向不超出可见区
+    // 7) 侧家 13 张手牌列纵向不超出可见区
     const sideColH = 13 * sideW;
     check(sideColH / 2 + 20 < halfH,
         `${name} 侧家手牌列半高 ${(sideColH / 2).toFixed(0)} 在可见半高 ${halfH.toFixed(0)} 内`);
@@ -349,9 +389,10 @@ for (const [name, aspect] of [['3:2', 3 / 2], ['4:3', 4 / 3]] as Array<[string, 
 {
     const halfH = aspectHalfH(4 / 3);
     const tk = tileScale(halfH);
-    const th = BASE_TILE_H * tk * HAND_SCALE;
-    const rivH = (BASE_RIVER_TILE_W * tk * BASE_TILE_H) / BASE_TILE_W;
-    const topTileH = (BASE_TOP_TILE_W * tk * BASE_TILE_H) / BASE_TILE_W;
+    const th = BASE_TILE_H * tk * handScale(tk);
+    const others43 = othersScaleFor(tk, halfH, th);
+    const rivH = (BASE_RIVER_TILE_W * tk * others43 * BASE_TILE_H) / BASE_TILE_W;
+    const topTileH = (BASE_TOP_TILE_W * tk * others43 * BASE_TILE_H) / BASE_TILE_W;
     const bottomHalf = bottomHalfOf(halfH);
     const topHalf = topHalfOf(halfH);
     const gap = MELD_MARK_GAP;
@@ -383,8 +424,8 @@ console.log('\n[F] 超宽屏的中央转盘不会被手牌挤到牌河上');
 for (const [name, aspect] of [['21:9', 21 / 9], ['19.5:9', 19.5 / 9], ['16:9', 16 / 9]] as Array<[string, number]>) {
     const halfH = aspectHalfH(aspect);
     const tk = tileScale(halfH);
-    const th = BASE_TILE_H * tk * HAND_SCALE;
-    const rivH = (BASE_RIVER_TILE_W * tk * BASE_TILE_H) / BASE_TILE_W;
+    const th = BASE_TILE_H * tk * handScale(tk);
+    const rivH = (BASE_RIVER_TILE_W * tk * othersScaleFor(tk, halfH, th) * BASE_TILE_H) / BASE_TILE_W;
     const bottomHalf = bottomHalfOf(halfH);
     // 复刻 _applyLayout 的底部三段(手牌 → 副露 → 牌河), 取到牌河上沿的距离
     const handY = -bottomHalf + th / 2 + 8;
@@ -404,7 +445,7 @@ for (const [name, aspect] of [['21:9', 21 / 9], ['19.5:9', 19.5 / 9], ['16:9', 1
     ['3:2', 3 / 2], ['4:3', 4 / 3]] as Array<[string, number]>) {
     const halfH = aspectHalfH(aspect);
     const tk = tileScale(halfH);
-    const riverW = BASE_RIVER_TILE_W * tk;
+    const riverW = BASE_RIVER_TILE_W * tk * othersScaleFor(tk, halfH, BASE_TILE_H * tk * handScale(tk));
     const rivH = (riverW * BASE_TILE_H) / BASE_TILE_W;
     const x = sideRiverX(riverW, rivH);
     const gap = sideRiverClearance(riverW, rivH);

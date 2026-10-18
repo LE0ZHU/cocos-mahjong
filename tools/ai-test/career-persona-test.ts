@@ -263,10 +263,18 @@ console.log('\n[B4] AI 台词气泡的落位(按最坏情况算)');
     const SIDE_DX = num(mainSrc, 'SPEECH_SIDE_DX');
     const HALF_W = num(mainSrc, 'CONTENT_W') / 2;
     const HAND_SCALE = num(mainSrc, 'HAND_SCALE');
-    const TILE_W = num(mainSrc, 'BASE_TILE_W') * HAND_SCALE;
-    const TILE_H = num(mainSrc, 'BASE_TILE_H') * HAND_SCALE;
-    const TOP_W = num(mainSrc, 'BASE_TOP_TILE_W');
-    const RIVER_W = num(mainSrc, 'BASE_RIVER_TILE_W');
+    const HAND_SCALE_TARGET = num(mainSrc, 'HAND_SCALE_TARGET');
+    const HAND_EDGE_GAP = num(mainSrc, 'HAND_EDGE_GAP');
+    const OTHERS_SCALE = num(mainSrc, 'OTHERS_SCALE');
+    // 手机(k=1): 手牌倍率由「你·听」标记反算(复刻 Main._applyTileScale)
+    const MARK_INNER = (num(mainSrc, 'CONTENT_W') / 2 - num(mainSrc, 'TENPAI_MARK_INSET'))
+        - num(mainSrc, 'TENPAI_MARK_W') / 2 - HAND_EDGE_GAP;
+    const HS = Math.max(HAND_SCALE, Math.min(HAND_SCALE_TARGET,
+        MARK_INNER / (7 * num(mainSrc, 'BASE_TILE_W'))));
+    const TILE_W = num(mainSrc, 'BASE_TILE_W') * HS;
+    const TILE_H = num(mainSrc, 'BASE_TILE_H') * HS;
+    const TOP_W = num(mainSrc, 'BASE_TOP_TILE_W') * OTHERS_SCALE;
+    const RIVER_W = num(mainSrc, 'BASE_RIVER_TILE_W') * OTHERS_SCALE;
     const RIVER_GAP = num(mainSrc, 'RIVER_GAP');
     const SIDE_COLS = num(mainSrc, 'SIDE_RIVER_COLS');
     const MELD_GAP = num(mainSrc, 'MELD_MARK_GAP');

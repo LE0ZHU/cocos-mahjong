@@ -177,5 +177,37 @@ for (const [name, b] of Object.entries(bodies)) {
     }
 }
 
+console.log('\n[E] 牌与牌之间留缝(TILE_GAP): 节点比格位小一圈, 相邻两张透出桌布绿线');
+const factoryCode = stripComments(fs.readFileSync(findFile('assets/scripts/ui/UIFactory.ts'), 'utf8'));
+const drawCode = stripComments(fs.readFileSync(findFile('assets/scripts/ui/DrawModeUI.ts'), 'utf8'));
+const gapM = /export const TILE_GAP = ([\d.]+);/.exec(factoryCode);
+check(!!gapM, 'UIFactory 里定义了 TILE_GAP');
+const gap = gapM ? parseFloat(gapM[1]) : 0;
+check(gap >= 2 && gap <= 4, `TILE_GAP = ${gap}(2~4: 刚好一条看得见的细线, 再大牌就散了)`);
+const thinM = /export const TILE_GAP_THIN = ([\d.]+);/.exec(factoryCode);
+const thin = thinM ? parseFloat(thinM[1]) : -1;
+check(thin > 0 && thin < gap,
+    `TILE_GAP_THIN = ${thin} 在 (0, ${gap}) 之间(小牌缝更窄, 但不为零)`);
+check(/export function tileFaceSize\(w: number, h: number, gap = TILE_GAP\)/.test(factoryCode),
+    '导出 tileFaceSize(w, h, gap)(默认整条缝, 小牌传窄缝)');
+check(/w: Math\.max\(4, w - gap\),/.test(factoryCode) && /h: Math\.max\(6, h - gap\),/.test(factoryCode),
+    '牌面 = 格位尺寸 - gap');
+const faceUses = (factoryCode.match(/const face = tileFaceSize\(width, height, gap\);/g) || []).length;
+check(faceUses === 2, `createTileNode / createTileBackNode 都按牌面尺寸建节点(实测 ${faceUses} 处)`);
+// 三家手牌格位只有 32~34 宽, 用整条缝会显得"牌散了" → 必须传窄缝(上家 + 左右家 + 亮牌)
+const thinBacks = (mainCode.match(/createTileBackNode\([^;]*TILE_GAP_THIN\)/g) || []).length;
+check(thinBacks === 2, `上家 / 左右家手牌背都用窄缝(实测 ${thinBacks} 处)`);
+check(/createTileNode\(w, h, false, TILE_GAP_THIN\)/.test(mainCode),
+    '牌局结束亮出三家手牌时也用窄缝(与牌背同一视觉)');
+// 牌背再内缩的话, 那圈会叠进缝隙里(实际缝 = gap + 内缩量), 三家手牌就看着"散了"
+check(/drawTileBackFlat\(g, w, h,/.test(factoryCode),
+    '牌背按节点满尺寸画(不额外内缩, 否则缝隙变宽 gap+2)');
+// 三处"贴牌边画圈"必须换算成牌面尺寸, 否则框会比牌面大一圈、浮在牌外
+check(/const face = tileFaceSize\(w, h\);\s*w = face\.w;\s*h = face\.h;/.test(mainCode),
+    'addClaimedRing(副露金边)用牌面尺寸');
+check(/const faceSize = tileFaceSize\(this\._tileW, this\._tileH\);/.test(drawCode),
+    '_ensureRing(抽牌选中框)用牌面尺寸');
+check(/const face = tileFaceSize\(w, h\);/.test(settle), '_placeTile(和牌金边)用牌面尺寸');
+
 console.log(`\n${fails === 0 ? '全部通过' : fails + ' 项失败'}\n`);
 process.exit(fails === 0 ? 0 : 1);

@@ -57,6 +57,45 @@ function getInset(w: number, h: number): number {
     return Math.max(2, Math.round(Math.min(w, h) * 0.08));
 }
 
+/**
+ * 牌与牌之间露出的桌面缝(内容坐标)
+ *
+ * 手牌 / 牌河 / 副露 / 明牌阵都是按**格位尺寸**摆位的(间距恒等于牌宽),
+ * 所以只要让**牌节点本身**比格位小这一圈, 相邻两张之间就自然透出一条桌布绿线,
+ * 而所有排版算术(居中对齐、容量反推、贴边净空)一个字都不用改。
+ *
+ * 【为什么是 3】内容宽 1680 按屏幕宽度铺满 —— 1080p 手机上 1 内容像素 ≈ 0.64
+ * 屏幕像素, 3 ≈ 2 屏幕像素: 刚好是一条看得见的细线, 再大就变成"散了"。
+ * ⚠️ 别改成按牌宽的比例: 侧家手牌只有 33 宽, 按比例会让小牌被吃掉一大截。
+ */
+export const TILE_GAP = 3;
+
+/**
+ * 小牌专用窄缝(其他三家手牌): 2
+ *
+ * 缝隙是**绝对值**, 而三家手牌的格位只有 32~34 宽(自家手牌 91) —— 同样 3px
+ * 在大牌上是 3%、在小牌上却有 9%, 看着像"牌散了"。所以小牌单独用更窄的缝;
+ * 仍非零, 相邻两张之间照样透出桌布绿线。
+ *
+ * ⚠️ 牌背 Graphics 必须按**节点满尺寸**画(不要再内缩 2px): 那 2px 会额外叠进
+ * 缝隙里, 实际缝 = gap + 2, 曾让三家手牌看着有 15% 的空隙(用户报"间隙太宽")。
+ */
+export const TILE_GAP_THIN = 2;
+
+/**
+ * 按格位尺寸算牌面(节点)的实际尺寸: 四周各让出 `gap / 2`(默认整条 `TILE_GAP`)
+ *
+ * **所有"贴着牌边画"的描边必须用这个尺寸**(摸牌金框 / 副露金边 / 和牌框 /
+ * 抽牌选中框): 它们画在牌身之下或之上, 用的是节点矩形; 若还按格位尺寸画,
+ * 就会比牌面大一圈、与牌边之间空出半个缝, 看起来像"框飘在牌外面"。
+ */
+export function tileFaceSize(w: number, h: number, gap = TILE_GAP): { w: number; h: number } {
+    return {
+        w: Math.max(4, w - gap),
+        h: Math.max(6, h - gap),
+    };
+}
+
 /** 正面视角露出的顶侧厚度(薄,避免整张牌错位造成"两层"观感) */
 export function getFrontBand(w: number, h: number): number {
     return Math.max(2, Math.round(w * 0.1));
@@ -784,35 +823,44 @@ export function bindSafeClick(node: Node, callback: () => void, target?: unknown
  * 创建一张麻将牌节点
  * 结构: TileNode > Bg(牌身3D) + Pattern(凹槽内图案) + Label(文字)
  * 调用方随后 addComponent(TileView) 挂载交互逻辑
+ *
+ * 【牌面比格位小 TILE_GAP】参数 `width/height` 是**格位尺寸**(调用方按它摆位),
+ * 节点实际按 `tileFaceSize()` 缩一圈 —— 相邻两张牌之间因此透出一条桌布绿线,
+ * 而排版算术完全不变。贴牌边的描边请同样用 `tileFaceSize()` 取尺寸。
+ *
+ * @param gap 缝隙宽度(默认 `TILE_GAP`); 小牌(三家手牌)传 `TILE_GAP_THIN`
  */
-export function createTileNode(width = 70, height = 100, frontView = false): Node {
+export function createTileNode(width = 70, height = 100, frontView = false, gap = TILE_GAP): Node {
+    const face = tileFaceSize(width, height, gap);
+    const w = face.w;
+    const h = face.h;
     const node = new Node('Tile');
 
     const transform = node.addComponent(UITransform);
-    transform.setContentSize(width, height);
+    transform.setContentSize(w, h);
 
-    const inset = getInset(width, height);
-    const faceW = width - inset * 2;
-    const faceH = height - inset * 2;
+    const inset = getInset(w, h);
+    const faceW = w - inset * 2;
+    const faceH = h - inset * 2;
 
     // ---- 背景: 自家用正面立体牌身(含凹槽),其他三家平面牌面 ----
     const bgNode = new Node('Bg');
     bgNode.parent = node;
     const bgTransform = bgNode.addComponent(UITransform);
-    bgTransform.setContentSize(width, height);
+    bgTransform.setContentSize(w, h);
     const g = bgNode.addComponent(Graphics);
     // 底色用纯白(与 tiles 里牌面图片的白底一致),否则图片四周会露出一圈米白"边框"
-    drawTileBg(g, width - 2, height - 2, new Color(255, 255, 255, 255), frontView);
+    drawTileBg(g, w - 2, h - 2, new Color(255, 255, 255, 255), frontView);
 
     // ---- 牌面图片层: 素材图 1:1 铺满(叠在牌身之上),由 TileView 按需设置 ----
-    // 尺寸 = 整张牌(width × height), 素材按 3:4 等比铺满、无变形。
+    // 尺寸 = 整张牌(w × h), 素材按 3:4 等比铺满、无变形。
     // 素材本身已裁好圆角并带透明边(tools/make-tile-faces.py 加工, 尺寸未补),
     // 所以有图片时**不叠加任何程序化牌身装饰**——TileView 会把 Bg 隐藏,
     // 圆角外直接透出桌面。Bg 保留只为"图片缺失"时供矢量绘制(Pattern/Label)兜底。
     const faceNode = new Node('Face');
     faceNode.parent = node;
     const faceTransform = faceNode.addComponent(UITransform);
-    faceTransform.setContentSize(width, height);
+    faceTransform.setContentSize(w, h);
     const faceSprite = faceNode.addComponent(Sprite);
     faceSprite.sizeMode = Sprite.SizeMode.CUSTOM;
     faceSprite.type = Sprite.Type.SIMPLE;
@@ -859,18 +907,25 @@ export function createTileNode(width = 70, height = 100, frontView = false): Nod
 /**
  * 创建一张牌背节点(用于显示其他三家手牌背面)
  * 结构: TileBackNode > Bg(平面牌背,无 3D 效果)
+ *
+ * 与 `createTileNode` 同理: 参数是格位尺寸, 节点按 `tileFaceSize()` 缩一圈,
+ * 三家手牌之间也透出桌布绿线(牌小, 默认用更窄的 `TILE_GAP_THIN`)。
  */
-export function createTileBackNode(width = 40, height = 56): Node {
+export function createTileBackNode(width = 40, height = 56, gap = TILE_GAP): Node {
+    const face = tileFaceSize(width, height, gap);
+    const w = face.w;
+    const h = face.h;
     const node = new Node('TileBack');
     const transform = node.addComponent(UITransform);
-    transform.setContentSize(width, height);
+    transform.setContentSize(w, h);
 
     const bgNode = new Node('Bg');
     bgNode.parent = node;
     const bgTransform = bgNode.addComponent(UITransform);
-    bgTransform.setContentSize(width, height);
+    bgTransform.setContentSize(w, h);
     const g = bgNode.addComponent(Graphics);
-    drawTileBackFlat(g, width - 2, height - 2, new Color(60, 90, 160, 255), 4);
+    // 按节点**满尺寸**画: 再内缩的话这圈会额外叠进牌缝里(见 TILE_GAP_THIN 的说明)
+    drawTileBackFlat(g, w, h, new Color(60, 90, 160, 255), 4);
 
     return node;
 }

@@ -16,6 +16,7 @@ import type { MeldType } from '../core/Meld';
  *   1wan ~ 9tong / dongfeng ~ beifeng / hongzhong、facai、baipi
  *            → 34 种牌型各自的播报(出牌时按牌型播)
  *   chi / peng / gang / hule / guo → 吃/碰/杠/胡/过 的动作播报
+ *   xiaochu   → 抽牌模式: 成功抽走一对时的反馈音
  *
  * 【音量与开关】
  * 音量不写死在这里, 而是运行时读 GAME_RULES(可在设置页调整)。
@@ -39,6 +40,8 @@ const SFX_PENG = 'peng';
 const SFX_GANG = 'gang';
 const SFX_HULE = 'hule';
 const SFX_GUO = 'guo';
+/** 抽牌模式: 成功抽走一对 */
+const SFX_XIAOCHU = 'xiaochu';
 
 /** 各音效的相对音量系数(在玩家设定的总音量之上再乘这个) */
 const CLICK_VOLUME = 1;
@@ -52,6 +55,13 @@ const DISCARD_VOLUME = 1;
 const TILE_VOICE_VOLUME = 0.9;
 /** 动作播报音量: 胡最大(全场唯一的结束音), 其余次之 */
 const ACTION_VOICE_VOLUME = 1;
+/**
+ * 抽牌成功音: 比动作播报略低一档
+ *
+ * 抽牌一局要抽 34 次, 每次都是同一声; 音量给满会很快变得聒噪,
+ * 但又不能太轻(它是"这张抽对了"的唯一听觉确认)。
+ */
+const DRAW_PAIR_VOLUME = 0.8;
 
 /**
  * 牌型 → 音频文件名的映射
@@ -171,6 +181,16 @@ export function playPassVoice(): void {
 }
 
 /**
+ * 抽牌模式: 成功抽走一对时播(玩家与电脑都播)
+ *
+ * 抽牌没有"出牌"的概念, 这一声就是"抽成了"的唯一听觉反馈;
+ * 和出牌声分开计价, 别拿 discard 顶替(那是落牌的"啪", 语义不同)。
+ */
+export function playDrawPair(): void {
+    play(SFX_XIAOCHU, DRAW_PAIR_VOLUME);
+}
+
+/**
  * 播放背景音乐(循环)
  * 重复调用无副作用: 已经在播就直接返回;clip 还没加载完则记下意图,加载完成后自动补播。
  * 设置里关掉 BGM 时本函数不会开声(preload 完成后会自动补播,那里同样会判开关)。
@@ -237,7 +257,7 @@ export function syncAudioSettings(): void {
 export function preloadSounds(onReady?: () => void): void {
     const names = [
         CLICK, DISCARD, BGM,
-        SFX_CHI, SFX_PENG, SFX_GANG, SFX_HULE, SFX_GUO,
+        SFX_CHI, SFX_PENG, SFX_GANG, SFX_HULE, SFX_GUO, SFX_XIAOCHU,
         ...Object.keys(TILE_VOICE_NAMES).map(k => TILE_VOICE_NAMES[Number(k)]),
     ];
     const finish = (): void => {

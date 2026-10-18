@@ -14,13 +14,15 @@ from PIL import Image, ImageDraw, ImageFont
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = open(os.path.join(ROOT, 'assets/scripts/ui/DrawModeUI.ts'), encoding='utf-8').read()
+FACTORY = open(os.path.join(ROOT, 'assets/scripts/ui/UIFactory.ts'), encoding='utf-8').read()
 GAME = open(os.path.join(ROOT, 'assets/scripts/game/DrawGame.ts'), encoding='utf-8').read()
 
 FONT_PATH = 'C:/Windows/Fonts/msyh.ttc'
 
 
-def num(name):
-    m = re.search(r'(?:const|readonly)\s+' + name + r'\s*(?::[^=]*)?=\s*([^;\n]+);', SRC)
+def num(name, text=None):
+    body = SRC if text is None else text
+    m = re.search(r'(?:const|readonly)\s+' + name + r'\s*(?::[^=]*)?=\s*([^;\n]+);', body)
     if not m:
         raise SystemExit('源码里找不到常量 ' + name)
     return float(eval(m.group(1).strip().rstrip(',')))
@@ -29,6 +31,8 @@ def num(name):
 DRAW_ROWS = int(re.search(r'export const DRAW_ROWS\s*=\s*(\d+)', GAME).group(1))
 DRAW_COLS = int(re.search(r'export const DRAW_COLS\s*=\s*(\d+)', GAME).group(1))
 CONTENT_W = num('CONTENT_W')
+# 牌与牌之间露出的桌布缝(定义在 UIFactory: 牌节点比格位小这一圈)
+TILE_GAP = num('TILE_GAP', FACTORY)
 TILE_W_MAX = num('TILE_W_MAX')
 TILE_W_MIN = num('TILE_W_MIN')
 TILE_SCALE_MAX = num('TILE_SCALE_MAX')
@@ -69,6 +73,9 @@ ANNOUNCE_PAD_X = num('ANNOUNCE_PAD_X')
 ANNOUNCE_PAD_Y = num('ANNOUNCE_PAD_Y')
 ANNOUNCE_Y = num('ANNOUNCE_Y')
 TAG_COUNT = 3      # 每侧画几张收牌, 看比例
+
+# 内容单位 → 画布像素的缩放(render() 里设置; tile() 画缝隙时要用)
+_PX = 1.0
 
 FELT_FAR = (36, 72, 45)
 FELT_NEAR = (19, 42, 26)
@@ -140,7 +147,12 @@ def layout(half_h):
 
 
 def tile(d, cx, cy, w, h, back):
-    """一张牌: 米白牌身 + 花色色块(只求看清布局, 不画真牌面)"""
+    """一张牌: 米白牌身 + 花色色块(只求看清布局, 不画真牌面)
+
+    按 TILE_GAP 缩一圈 —— 游戏里牌节点就是比格位小这一圈, 相邻两张之间透出桌布绿线。
+    """
+    w = max(2, w - TILE_GAP * _PX)
+    h = max(2, h - TILE_GAP * _PX)
     box = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
     r = max(2, min(w, h) * 0.12)
     d.rounded_rectangle(box, radius=r, fill=TILE_FACE, outline=(120, 120, 110), width=1)
@@ -152,6 +164,8 @@ def render(half_h, title, width=1180, announce=None):
     L = layout(half_h)
     pad = 46
     s = (width - pad * 2) / CONTENT_W
+    global _PX
+    _PX = s
     H = int((half_h * 2) * s) + pad * 2 + 40
     img = Image.new('RGBA', (width, H), (18, 18, 20, 255))
     d = ImageDraw.Draw(img, 'RGBA')

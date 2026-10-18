@@ -73,17 +73,18 @@ _gameRoot.scale = design.width / 1680        // CONTENT_W = 1680
 而是运行期字段，由 `_applyTileScale(halfH)` 按 `halfH / TILE_REF_HALF_H`（472.5）
 统一乘倍率；基准值收在 `BASE_*`，改牌大小只改 `BASE_*`。
 
-**放大上限 `TILE_SCALE_MAX = 1.4` 的前提是"手牌行两侧已经让干净"**：
-14 张手牌本来就占 882px，横向净空由两侧的常驻元素决定 ——
-平板（`wideTiles = tileK > 1`）把按钮竖排，手机保持横排；听牌芯片两种屏幕都贴内容右边缘：
+**放大上限 `TILE_SCALE_MAX = 1.4` 的前提是"手牌行两侧已经让干净"**。
+2026-10-18 起「听牌 / 提示」**移出到手牌行之外**（放副露行左侧、横排贴左边），
+手牌行左右再无障碍，只剩右端的「你·听」标记；听牌芯片也整块抬到手牌**上方**
+（右贴内容边、左以"满副露右沿"为界，`meldRight = 16×RIVER_TILE_W/2 + 16`）：
 
-| 元素 | 手机（k = 1） | 平板（k > 1） |
-|---|---|---|
-| 听牌 / 提示按钮 | 手牌左侧**横排**，右缘 -531 | **竖排贴左边缘**（`LEFT_BTN_PAD`），右缘 -700 |
-| 听牌芯片 | 贴内容右边缘（`CHIP_EDGE_PAD`）+ 抬到手牌上沿上方 | 同左 |
+| 元素 | 位置 |
+|---|---|
+| 听牌 / 提示按钮 | **副露行左侧横排**（`LEFT_BTN_PAD`），右缘 -840+20+240+14 = -566 |
+| 听牌芯片 | 手牌**上方**（`TILE_H/2 + 芯片半高 + 8`），右缘贴 `CHIP_EDGE_PAD` |
+| 「你·听」标记 | 仍在手牌行右端（`halfW − TENPAI_MARK_INSET`），是手牌横向的硬上限 |
 
-芯片为什么两种屏幕都贴边：手牌还要再乘 `HAND_SCALE`（见下），"手牌右侧"那条净空
-只剩 202px（手机）/ 156px（4:3），长文案缩到 `CHIP_MIN_SCALE` 都塞不下。
+手牌倍率不再是常数，而是**反算**出来的（见下面 `HAND_SCALE_TARGET`）。
 
 让位后真正卡住上限的是**牌河**：9 张 × 44 × k 的半宽要让开左右家牌河内缘。
 
@@ -104,16 +105,22 @@ k=1 时居中就会把左缘推到 -793，直接压住两个按钮；放大后�
 `_applyLayout` 在倍率变化时调 `_rebuildTiles()` 重建四家手牌 / 牌河 / 副露
 （发牌动画期间跳过，那一帧本来就在按 `_dealing` 重画）。
 
-⚠️ **自家手牌再额外乘 `HAND_SCALE`（1.13）**：手牌是玩家的视线落点，比其它三档再大一圈
-（手机 63×84 → 71×95，4:3 平板 84×112 → 95×127）。上家 / 左右家 / 牌河 / 副露**都不变**，
-所以手牌与副露的大小对比会比以前明显，这是有意的。两条连带影响：
+⚠️ **自家手牌倍率是"反算"出来的**（2026-10-18 二次放大，用户要求"再大一点"）：
 
-- 手牌行变高会把副露与牌河整体往上推：21:9 这类超宽屏的转盘会被挤到下限 30
-  （可用空隙 33 > 30，仍不压牌；见测试 F 组）；
-- 听牌芯片必须从"手牌右侧"挪到**手牌右上角、贴内容右边缘**（`CHIP_EDGE_PAD`）：
-  满手 14 张只剩 202px（手机）/ 156px（4:3），长文案缩到 `CHIP_MIN_SCALE` 都塞不下。
-  芯片与「你·听」标记靠**纵向**错开（`max(TILE_H/2 − 7, 标记半高 + 芯片半高 + 8)`）。
-- 手牌横向净空：手机 498 半宽 vs 横排按钮 -531（留 33），平板 664 vs 竖排按钮 -700（留 35）。
+```
+markInner = 840 − TENPAI_MARK_INSET(70) − TENPAI_MARK_W/2(56) − HAND_EDGE_GAP(12) = 702
+hs = clamp(markInner / (7 × BASE_TILE_W × k), HAND_SCALE(1.13), HAND_SCALE_TARGET(1.45))
+```
+
+手机（k=1）拿满 **1.45**（每张 63→91），3:2 / 4:3 因为基准牌本来就 ×1.3，反算出来只有
+1.22~1.34（每张约 100）—— 都被「你·听」标记挡住。**改标记位置 / 宽度就会改变手牌上限。**
+
+其他三家手牌 / 牌河 / 副露统一乘 `OTHERS_SCALE`(0.9)，让手牌成为视觉重心；若手牌变大后
+底部三段把中央转盘挤到最小半径 30 以下（21:9 最先发生），这张系数会**继续缩**
+（下限 `OTHERS_SCALE_MIN` 0.8），保证转盘不会被牌河压住 —— 见 `_applyTileScale`。
+
+⚠️ 牌尺寸是否变化**不能只比 `_tileK`**：手牌看横向反算、其他牌看纵向余量，都会在 k 不变时
+变化（16:9 → 21:9）。`_applyLayout` 用四种牌宽拼成 `sizeSig` 判断重建。
 
 出图：`python tools/preview-layout.py --tablet`
 （`tablet-preview.png`，16:9 / 3:2 / 4:3 三张叠一起，会打印牌倍率与"牌是否越界"）。
@@ -310,14 +317,19 @@ n?.getComponent(TileView)?.setHinted(false);
 **整个隐藏**，`Face`（素材图）按 `width × height` 铺满整张牌。要点：
 
 - **素材四角必须是"圆角 + 透明"**：`assets/resources/tiles/*.png` 不是原始素材，
-  而是 `tools/make-tile-faces.py` 从 jpg 加工的（圆角半径 = 短边 × 12%，**尺寸不变、
-  不补边**，`meta` 里 `hasAlpha=true`、`trimType=none`，uuid 沿用旧的）。
-  **换素材必须重跑该脚本**，直接丢直角 jpg 进去四角会在桌面上露出白色直角。
-- **原始 jpg 不在 assets 里**，在仓库根的 `majiang_paimian/`（34 张，75×100）。
-  改圆角 / 换素材要跑 `python tools/make-tile-faces.py --src majiang_paimian`
-  （写回 `assets/resources/tiles`，**保留已有 `*.png.meta`**，uuid 不变）。
-  就地模式（不带 `--src`）只在源目录还留着 jpg 时才有得转，别指望它。
+  而是 `tools/make-tile-faces.py` 从高清原图加工的（先按 3:4 居中裁、再缩到 **240×320**、
+  最后裁圆角，半径 = 短边 × 12%，不补边；`meta` 里 `hasAlpha=true`、`trimType=none`，uuid 沿用旧的）。
+  **换素材必须重跑该脚本**，直接丢直角图进去四角会在桌面上露出白色直角。
+- **高清原图不入库**（34 张 1344×1792 PNG，约 45MB），放在
+  `C:\Users\28337\Desktop\mahjong\paimian`。换素材 / 改圆角：
+  `python tools/make-tile-faces.py --src "C:/Users/28337/Desktop/mahjong/paimian"`
+  （写回 `assets/resources/tiles`，**保留已有 `*.png.meta`** 并同步里面的像素尺寸，uuid 不变）。
+  就地模式（不带 `--src`）只会迁移残留的 jpg，对已加工的 png 直接跳过（二次 mask 会让角发虚）。
   改完圆角必须同步 `TileView.ts` 的 `TILE_RADIUS_RATIO`，否则高光框与牌边不同心。
+- **为什么输出 240×320**：真机上牌最高约 175 屏幕像素（手牌 122 内容 × 屏宽倍率），
+  320 已是 1.8 倍超采样；再大只是吃显存（RGBA 每张 300KB × 34 张 ≈ 10MB）。
+  旧的 75×100 在真机上是被放大 1.7 倍，这才是"糊"的原因。改 `--height` 只影响清晰度与包体，
+  不动任何排版（牌尺寸全由 `TILE_W/BASE_*` 决定，图片按 `Sprite.SizeMode.CUSTOM` 铺满节点）。
 - **不要同时存在同名 `.jpg` 和 `.png`**（`resources.load('tiles/1W/spriteFrame')` 按名加载，
   脚本会删旧 jpg，正是为了避免歧义）。
 - `Bg` 只在"图片缺失"时作矢量兜底（筒/条图案、Label 都画在它上面）；`setTileBgColor`
@@ -360,9 +372,10 @@ n?.getComponent(TileView)?.setHinted(false);
   着色、名字始终米白），两段字宽 + 一个空格宽必须正好等于整串宽。
 - **听牌芯片**（`_buildTenpaiChip` / `_showTenpaiChip` / `_placeTenpaiChip`）：
   **右缘固定**（`halfW − CHIP_EDGE_PAD`，贴内容右边缘）→ 文案变长时向左伸、位置不跳；
-  左缘以满手 14 张的右缘为界，多面听长文案同样靠缩放兜底。
-  纵向**抬到手牌行上方**（`dy = max(TILE_H/2 − 7, 标记半高 + 芯片半高 + 8)`），
-  与「你·听」标记靠纵向错开（同一排会互相顶），也不会侵入提示面板的落位通道（硬约束 13b）。
+  左缘以**满副露右沿**为界（`16 × RIVER_TILE_W / 2 + 16`，手牌已经占满整行），
+  多面听长文案同样靠缩放兜底。
+  纵向**整块抬到手牌上方**（`dy = TILE_H/2 + 芯片半高 + 8`，与手牌不再重叠），
+  也不侵入提示面板落位通道（硬约束 13b）。
 - **座位名牌**（`_buildSeatPlates` / `_refreshSeatPlates` / `_placeSeatPlates`，2026-10-17）：
   **只给三家 AI 做**（自己坐哪不用提示，四角净空也都占满了）。内容 = `seatLabel` + 听牌标签
   `·听` + 连庄角标 `×N`，**不带分数** —— 分数只在比分条里，两处各写一份必然出现
@@ -406,7 +419,7 @@ node temp/infovis/tools/ai-test/info-visibility-test.js
 ```
 
 五组：①各屏幕比例下比分条不压齿轮/上家手牌/副露行/听标记（含四位数分的最坏文案）
-②听牌芯片不压满手 14 张牌与「你·听」标记、不侵入提示面板通道 ③文案格式**打真实
+②听牌芯片整体在手牌上方、右贴边不越界、左不压满副露与提示面板 ③文案格式**打真实
 `HintAdvisor`**（花色合并、排序、张数口径）④刷新点与跨局归零的源码级断言
 ⑤座位名牌：上家在手牌右端之外、侧名牌在桌沿列且不压按钮行/手牌（含 3:2 / 4:3），
 角标口径与 JSB 补画、跨局指纹归零的源码级断言。
@@ -659,6 +672,39 @@ node "$TSC" --target ES2020 --module commonjs --strict false --skipLibCheck \
 node temp/d/tools/ai-test/draw-mode-test.js
 ```
 
+### 6m. 牌与牌之间留缝（TILE_GAP）：缩牌面，不改格位
+
+需求是"相邻两张牌之间透出一条桌布绿线"。实现上**不是**把牌摆开一点，而是让
+**牌节点比格位小** `TILE_GAP`（`UIFactory.ts`，当前 3 内容像素 ≈ 1080p 手机上 2 屏幕像素）：
+
+```ts
+export const TILE_GAP = 3;          // 大牌（手牌 / 牌河 / 副露 / 抽牌）
+export const TILE_GAP_THIN = 2;     // 小牌（其他三家手牌）
+export function tileFaceSize(w, h, gap = TILE_GAP) { return { w: w - gap, h: h - gap }; }
+```
+
+`createTileNode` / `createTileBackNode` 收到的是**格位尺寸**，内部按 `tileFaceSize()`
+建节点 —— 所以手牌 / 牌河 / 副露 / 三家手牌背 / 抽牌明牌阵 / 结算面板**同时**出现缝隙，
+而所有排版算术（居中、`HAND_SCALE` 后的净空、牌河反推、抽牌容量）一个数都不用动。
+
+⚠️ **三家手牌用 `TILE_GAP_THIN`**（`createTileBackNode(w, h, TILE_GAP_THIN)`，亮牌时
+`createTileNode(w, h, false, TILE_GAP_THIN)`）：缝隙是**绝对值**，而三家手牌格位只有
+32~34 宽（自家手牌 91），同样 3px 在大牌上占 3%、在小牌上占 9%，看着"牌散了"。
+调这个值只影响观感，不影响排版；改完跑 `tile-ring-test` E 组。
+
+⚠️ **牌背 Graphics 必须按节点满尺寸画**（`drawTileBackFlat(g, w, h, …)`）。曾经写成
+`w-2, h-2`，那 2px 会额外叠进缝隙，实际缝 = `gap + 2`，三家手牌看着有 15% 的空隙
+（用户报"间隙太宽"）。`tile-ring-test` E 组有断言锁住。
+
+⚠️ **贴牌边画圈的 5 处必须换算成牌面尺寸**：`TileView` 的三个（摸牌框 / 提示框 / 拖牌光晕，
+它们读节点尺寸所以自动适配）、`Main.addClaimedRing`、`SettlementPanel._placeTile`、
+`DrawModeUI._ensureRing` —— 后三处传进来的是格位尺寸，要先过 `tileFaceSize()`，
+否则框会比牌面大一圈、与牌边之间空出 1.5px（看着像"框飘在牌外面"）。
+断言在 `tools/ai-test/tile-ring-test.ts` 的 E 组。
+
+⚠️ **不要用"加大间距"来留缝**：那会让 14 张手牌、9 张牌河、34 张收牌的宽度统统变宽，
+平板/超宽屏上本来就只剩 3~35px 的净空会立刻撞车。
+
 ### 7. 牌对象是引用，不是拷贝
 
 `Meld.sourceTile` 用 `===` 比较；`Player.removeTileRef()` 按引用删。
@@ -783,6 +829,11 @@ AI 每次决策都是一次性算完（实测 0.31ms/回合）。
 | 风牌 4 | `dongfeng` `nanfeng` `xifeng` `beifeng` | 同序于 `FENG_CHARS` |
 | 箭牌 3 | `hongzhong` `facai` `baipi` | 中/发/白，**文件名是俗名不是字面** |
 | 动作 5 | `chi` `peng` `gang` `hule` `guo` | `MeldType` → 动作词 |
+| 抽牌 1 | `xiaochu` | `DrawModeUI._applyDraw` → `playDrawPair()`（抽牌模式专用） |
+
+> `xiaochu` 是**抽牌模式**"成功抽走一对"的反馈音（约 2s，音量 `DRAW_PAIR_VOLUME` 0.8），
+> 与麻将的 `discard`（落牌的"啪"）语义不同，别互相顶替；玩家与电脑抽成功都播。
+> 它同样要进 `preloadSounds()` 的名单，否则第一次抽会是静音。
 
 **接线点（都在 `Main.ts`）**：
 
@@ -792,6 +843,7 @@ AI 每次决策都是一次性算完（实测 0.31ms/回合）。
 | 吃/碰/杠（自家与 AI 都会走） | `onMeld` | `playMeldVoice(meld.type)` |
 | 胡牌 | `onSettle` 且 `kind === 'hu'` | `playHuVoice()` |
 | 玩家点"过" | `_onMeldChoiceClick(index < 0)` | `playPassVoice()` |
+| 抽牌模式抽成功一对 | `DrawModeUI._applyDraw()` | `playDrawPair()` |
 
 **两个必须记住的坑**：
 

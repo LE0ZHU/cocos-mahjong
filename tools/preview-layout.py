@@ -17,8 +17,16 @@ from PIL import Image, ImageDraw, ImageFont
 CONTENT_W = 1680
 BASE_W, BASE_H = 1920, 1080
 TILE_H_RATIO = 4 / 3             # 所有牌统一宽高比 3:4(与 Main.ts 一致)
-TILE_W, TILE_H, TILE_GAP = 63, 84, 4          # 自家手牌基准(实际还有 HAND_SCALE)
-HAND_SCALE = 1.13                              # 镜像 Main.HAND_SCALE: 只手牌再放大一圈
+TILE_W, TILE_H, TILE_GAP = 63, 84, 3          # 牌基准(手牌另乘 HAND_SCALE)
+# 镜像 UIFactory: 牌节点比格位缩 TILE_GAP; 三家手牌格位只有 32~34 宽, 用更窄的 TILE_GAP_THIN
+TILE_GAP_THIN = 1.5
+# 镜像 Main: 手牌倍率由「你·听」标记反算(下限 1.13 / 目标 1.45);
+# 其他牌(三家手牌 / 牌河 / 副露)乘 OTHERS_SCALE 收缩
+HAND_SCALE_MIN, HAND_SCALE_TARGET = 1.13, 1.45
+HAND_EDGE_GAP = 12
+OTHERS_SCALE = 0.9
+TENPAI_MARK_INSET, TENPAI_MARK_W = 70, 112
+MARK_INNER = (CONTENT_W / 2 - TENPAI_MARK_INSET) - TENPAI_MARK_W / 2 - HAND_EDGE_GAP
 MELD_MARK_GAP = 24
 DEFAULT_AI_LAYOUT = [               # [hx, 横向, dx]
     (0, True, 0),                   # 上家
@@ -169,14 +177,15 @@ def resolve_layout(v, design_w, design_h):
     # 牌尺寸也跟着可见高度放大(平板), 否则牌相对被放大的桌面会明显偏小;
     # 自家手牌再乘 HAND_SCALE, 三家 AI / 牌河 / 副露都只看 tk
     tk = tile_scale(half_h)
-    tile_w, tile_h_full = TILE_W * tk * HAND_SCALE, TILE_H * tk * HAND_SCALE
+    hs = max(HAND_SCALE_MIN, min(HAND_SCALE_TARGET, MARK_INNER / (7 * TILE_W * tk)))
+    tile_w, tile_h_full = TILE_W * tk * hs, TILE_H * tk * hs
     # 牌位可用半高: 屏幕越方, 可见半高越大, 但桌面只有那么大 —— 必须夹住, 否则牌摆到桌外。
     # 毡布上下不对称(近端更低), 所以上下各夹一次
     top_half = min(half_h, FELT_TILE_TOP * k)
     bottom_half = min(half_h, FELT_TILE_BOTTOM * k)
 
-    riv_w = v.river_w * tk
-    top_w = v.top_tile_w * tk
+    riv_w = v.river_w * tk * OTHERS_SCALE
+    top_w = v.top_tile_w * tk * OTHERS_SCALE
     riv_h = tile_h(riv_w)
     top_tile_h = tile_h(top_w)
     meld_h = tile_h(v.meld_width(0) * tk) if not v.meld_matches_river else riv_h
@@ -201,7 +210,7 @@ def resolve_layout(v, design_w, design_h):
 
     return dict(scale=scale, half_h=half_h, top_half=top_half, bottom_half=bottom_half,
                 table_k=k, tile_k=tk, tile_w=tile_w, tile_h=tile_h_full,
-                top_tile_w=top_w, side_tile_w=v.side_tile_w * tk, river_w=riv_w,
+                top_tile_w=top_w, side_tile_w=v.side_tile_w * tk * OTHERS_SCALE, river_w=riv_w,
                 riv_h=riv_h, meld_h=meld_h, top_meld_h=top_meld_h,
                 hand_y=hand_y, meld_y=meld_y, disc_y=disc_y,
                 top_hand_y=top_hand_y, top_meld_y=top_meld_y, top_disc_y=top_disc_y,
@@ -360,23 +369,25 @@ def seat_origin_angle(seat, v, lay):
 def hand_tiles(seat, v, lay, count):
     """某家手牌每张牌的 (中心x, 中心y, 宽, 高, 旋转角)"""
     origin, angle = seat_origin_angle(seat, v, lay)
+    # 游戏里格位间距恒等于牌宽, 相邻两张的缝靠"节点比格位缩一圈"实现;
+    # 所以这里 step 用格位宽、画出来的牌面减去 gap, 才和真机一致
     if seat == 0:
-        w, h, step = lay['tile_w'], lay['tile_h'], lay['tile_w'] + TILE_GAP
+        w, h, step, gap = lay['tile_w'], lay['tile_h'], lay['tile_w'], TILE_GAP
     elif seat == 1:
         w = lay['top_tile_w']
         h = tile_h(w)
-        step = w + v.top_tile_gap
+        step, gap = w + v.top_tile_gap, TILE_GAP_THIN
     else:
         w = lay['side_tile_w']
         h = tile_h(w)
-        step = v.side_hand_step(lay, count)
+        step, gap = v.side_hand_step(lay, count), TILE_GAP_THIN
     start = -((count - 1) * step) / 2
     a = math.radians(angle)
     ca, sa = math.cos(a), math.sin(a)
     out = []
     for i in range(count):
         lx = start + i * step
-        out.append((origin[0] + lx * ca, origin[1] + lx * sa, w, h, angle))
+        out.append((origin[0] + lx * ca, origin[1] + lx * sa, w - gap, h - gap, angle))
     return out
 
 

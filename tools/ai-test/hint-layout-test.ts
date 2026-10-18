@@ -61,10 +61,20 @@ function num(file: string, name: string): number {
 // 手牌另乘 HAND_SCALE(只作用于自家手牌), 手牌行高度按它算。
 const CONTENT_W = num(src, 'CONTENT_W');
 const HAND_SCALE = num(src, 'HAND_SCALE');
-const TILE_W = num(src, 'BASE_TILE_W') * HAND_SCALE;
-const TILE_H = num(src, 'BASE_TILE_H') * HAND_SCALE;
-const TOP_TILE_W = num(src, 'BASE_TOP_TILE_W');
-const RIVER_TILE_W = num(src, 'BASE_RIVER_TILE_W');
+const HAND_SCALE_TARGET = num(src, 'HAND_SCALE_TARGET');
+const HAND_EDGE_GAP = num(src, 'HAND_EDGE_GAP');
+const OTHERS_SCALE = num(src, 'OTHERS_SCALE');
+const TENPAI_MARK_INSET = num(src, 'TENPAI_MARK_INSET');
+const TENPAI_MARK_W = num(src, 'TENPAI_MARK_W');
+const LEFT_BTN_PAD = num(src, 'LEFT_BTN_PAD');
+// 手机(k=1)的手牌倍率: 目标与「你·听」标记反算取小(复刻 Main._applyTileScale)
+const MARK_INNER = (CONTENT_W / 2 - TENPAI_MARK_INSET) - TENPAI_MARK_W / 2 - HAND_EDGE_GAP;
+const HAND_SCALE_NOW = Math.max(HAND_SCALE, Math.min(HAND_SCALE_TARGET,
+    MARK_INNER / (7 * num(src, 'BASE_TILE_W'))));
+const TILE_W = num(src, 'BASE_TILE_W') * HAND_SCALE_NOW;
+const TILE_H = num(src, 'BASE_TILE_H') * HAND_SCALE_NOW;
+const TOP_TILE_W = num(src, 'BASE_TOP_TILE_W') * OTHERS_SCALE;
+const RIVER_TILE_W = num(src, 'BASE_RIVER_TILE_W') * OTHERS_SCALE;
 const TURN_DISC_R_MIN = num(src, 'TURN_DISC_R_MIN');
 const TURN_DISC_R_MAX = num(src, 'TURN_DISC_R_MAX');
 const MELD_MARK_GAP = num(src, 'MELD_MARK_GAP');
@@ -126,26 +136,23 @@ function fit(maxH: number, altMax: number): { h: number; scale: number; alts: nu
     return { h: measureH(alts) * scale, scale, alts };
 }
 
-console.log('=== 1. 横向: 提示按钮与"听牌"按钮 / 手牌 / "听"标记 ===');
+console.log('=== 1. 横向: 「听牌/提示」在副露行左侧, 手牌用满整行 ===');
 {
     const halfW = CONTENT_W / 2;
-    const riichiX = -halfW + 115;
-    const hintX = riichiX + HINT_BTN_W / 2 + HINT_BTN_GAP + HINT_BTN_W / 2;
-    const hintL = hintX - HINT_BTN_W / 2;
-    const hintR = hintX + HINT_BTN_W / 2;
-    const riichiR = riichiX + 60;   // 听牌按钮宽 120
-    check(hintL - riichiR >= 0, '提示按钮在"听牌"按钮右侧且不重叠',
-        `gap=${(hintL - riichiR).toFixed(1)}`);
+    // 2026-10-18: 两个按钮挪到副露行左侧(横排), 不再占手牌行
+    const btnL = -halfW + LEFT_BTN_PAD;
+    const btnR = btnL + HINT_BTN_W * 2 + HINT_BTN_GAP;
+    const handHalf = (14 * TILE_W) / 2;
+    const meldHalf = (16 * RIVER_TILE_W) / 2;
 
-    // 满手 14 张时手牌占多宽(居中)
-    const handHalf = 14 * TILE_W / 2;
-    check(hintR < -handHalf, '提示按钮不压手牌',
-        `hintR=${hintR.toFixed(0)} handL=${(-handHalf).toFixed(0)}`);
-
-    // 右侧"你·听"标记: 中心 halfW-70, 宽 112
-    const chipL = halfW - 70 - 56;
-    check(hintR < chipL, '提示按钮不压右侧"听"标记', `hintR=${hintR} chipL=${chipL}`);
-    check(hintR <= halfW, '提示按钮不横向出界(内容 x 恒 ±840)', `hintR=${hintR} halfW=${halfW}`);
+    check(btnL >= -halfW, '按钮不出内容左缘', `btnL=${btnL.toFixed(0)}`);
+    check(btnR + 12 <= -meldHalf, '按钮让开满副露左沿(副露居中, 左侧常驻空闲)',
+        `btnR=${btnR.toFixed(0)} meldL=${(-meldHalf).toFixed(0)}`);
+    // 手牌行完全让给牌: 左侧到内容边缘, 右侧让开「你·听」标记
+    check(handHalf + HAND_EDGE_GAP <= MARK_INNER + 0.01,
+        '满手 14 张让开「你·听」标记内缘',
+        `handHalf=${handHalf.toFixed(0)} markInner=${MARK_INNER.toFixed(0)}`);
+    check(handHalf <= halfW - 12, '满手不出内容左缘', `handHalf=${handHalf.toFixed(0)}`);
 }
 
 console.log('=== 2. 面板纵向: 完整可见 + 不压关键信息 ===');

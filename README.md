@@ -97,7 +97,7 @@ assets/
   game.scene              唯一场景（Canvas + Camera + Main）
   resources/              运行时 resources.load 的资源
     menu_bg.jpg           主菜单背景（JPEG，约 440KB）
-    tiles/                34 种牌面图（圆角 PNG，由 tools/make-tile-faces.py 加工）
+    tiles/                34 种牌面图（240×320 圆角 PNG，由 tools/make-tile-faces.py 从高清原图加工）
     audio/                bgm + 牌名报牌 / 动作音效
   scripts/
     Main.ts               主场景脚本：牌桌 UI、交互、动画、布局（3015 行）

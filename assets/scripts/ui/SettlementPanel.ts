@@ -1,7 +1,7 @@
 import { _decorator, Component, Node, Color, Label, Graphics, UITransform } from 'cc';
 import {
     createLabelNode, createButtonNode, bindSafeClick, repaintButtons,
-    createTileNode, setTileBgColor, ButtonStyle,
+    createTileNode, setTileBgColor, tileFaceSize, ButtonStyle,
 } from './UIFactory';
 import { TileView, tileRadius } from './TileView';
 import { Tile } from '../core/Tile';
@@ -601,13 +601,20 @@ export class SettlementPanel extends Component {
             // 路径压在牌边上时内侧会被牌面盖掉, 圆角取别的值就会在角上露出缝。
             const ring = new Node('WinRing');
             ring.parent = node;
-            ring.addComponent(UITransform).setContentSize(w, h);
-            const g = ring.addComponent(Graphics);
-            const r = tileRadius(w, h);
-            g.strokeColor = new Color(255, 206, 110, 220);
-            g.lineWidth = 3;
-            g.roundRect(-w / 2 - 1, -h / 2 - 1, w + 2, h + 2, r + 1);
-            g.stroke();
+            // 牌面比格位小 TILE_GAP, 金边要贴着**牌面**画(内层沿用 w/h,
+            // 与其余四处"贴牌边画圈"的代码保持同一形状, 测试也按这个形状复核)
+            const face = tileFaceSize(w, h);
+            {
+                const w = face.w;
+                const h = face.h;
+                ring.addComponent(UITransform).setContentSize(w, h);
+                const g = ring.addComponent(Graphics);
+                const r = tileRadius(w, h);
+                g.strokeColor = new Color(255, 206, 110, 220);
+                g.lineWidth = 3;
+                g.roundRect(-w / 2 - 1, -h / 2 - 1, w + 2, h + 2, r + 1);
+                g.stroke();
+            }
             ring.setSiblingIndex(0);
         }
         return x + w;

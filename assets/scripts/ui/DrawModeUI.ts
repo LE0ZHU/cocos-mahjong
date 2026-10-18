@@ -3,12 +3,13 @@ import {
 } from 'cc';
 import {
     createLabelNode, createButtonNode, bindSafeClick, repaintButtons,
-    createTileNode, setTileBgColor, ButtonStyle,
+    createTileNode, setTileBgColor, tileFaceSize, ButtonStyle,
 } from './UIFactory';
 import { TileView, tileRadius } from './TileView';
 import { Tile } from '../core/Tile';
 import { DrawGame, DRAW_ROWS, DRAW_COLS, DRAW_CELLS, tilePoint } from '../game/DrawGame';
 import { stopTweensDeep, ensureOpacity } from './Anim';
+import { playDrawPair } from '../audio/Sound';
 
 const { ccclass } = _decorator;
 
@@ -962,8 +963,10 @@ export class DrawModeUI extends Component {
         const old = this._rings[index];
         if (old && old.isValid) return old;
 
-        const w = this._tileW;
-        const h = this._tileH;
+        // 传进来的是格位尺寸; 牌面比格位小 TILE_GAP, 选中框要贴着牌面画
+        const faceSize = tileFaceSize(this._tileW, this._tileH);
+        const w = faceSize.w;
+        const h = faceSize.h;
         const ring = new Node('SelRing');
         ring.parent = tileNode;
         ring.addComponent(UITransform).setContentSize(w, h);
@@ -994,6 +997,8 @@ export class DrawModeUI extends Component {
         this._selected = -1;
         this._removeTileNode(a);
         this._removeTileNode(b);
+        // 抽成了: 一声"消除"(玩家与电脑都播 —— 这是"这组抽对了"的唯一听觉确认)
+        playDrawPair();
         // 每组只收一张代表牌, 从被抽走的格位飞向本方侧栏(电脑在左、玩家在右)
         if (tile) this._collectTile(tile, seat, a);
         const who = seat === 0 ? '你' : '电脑';

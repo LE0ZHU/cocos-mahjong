@@ -498,6 +498,20 @@ console.log('\n[4] 接线: 收牌飞入 / 新局清侧栏 / 说明页文案同�
     // 芯片右对齐: 最左一枚的左缘不压到左侧按钮(按钮右缘 -436)
     check(CHIP_EDGE_PAD <= 16, `芯片距右缘 ${CHIP_EDGE_PAD}(贴边排)`);
 
+    // 抽牌成功音效(2026-10-18 加): resources/audio/xiaochu.mp3 + Sound.playDrawPair()
+    const soundSrc = stripComments(fs.readFileSync(findFile('assets/scripts/audio/Sound.ts'), 'utf8'));
+    check(/import \{ playDrawPair \} from '\.\.\/audio\/Sound';/.test(code), 'DrawModeUI 引入 playDrawPair');
+    check(/playDrawPair\(\);/.test(code), '_applyDraw 抽对成功后播放音效');
+    check(/const SFX_XIAOCHU = 'xiaochu';/.test(soundSrc), 'Sound.ts 登记了 xiaochu 音效名');
+    check(/SFX_HULE, SFX_GUO, SFX_XIAOCHU/.test(soundSrc), 'xiaochu 进了预加载列表(第一抽就有声)');
+    check(/export function playDrawPair\(\): void/.test(soundSrc), '导出 playDrawPair()');
+    const audioPath = findFile('assets/resources/audio/xiaochu.mp3');
+    const metaPath = findFile('assets/resources/audio/xiaochu.mp3.meta');
+    check(fs.existsSync(audioPath) && fs.existsSync(metaPath), '音频与 .meta 都在 resources/audio 下');
+    const clipMeta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    check(clipMeta.importer === 'audio-clip' && /^[0-9a-f-]{36}$/.test(clipMeta.uuid),
+        '.meta 的 importer/uuid 合法(缺 meta 打包会漏资源)');
+
     // 玩法说明页标签: 首次进入只有"麻将"选中(创建时占位样式 + 构建末尾落定选中态)
     const menuCode = stripComments(helpSrc);
     check(/_styleHelpTabs\(\);[\s\S]{0,80}_createScrollPage\('HelpScrollView'/.test(menuCode),

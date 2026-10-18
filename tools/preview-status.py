@@ -53,10 +53,14 @@ def const(name):
 
 
 CONTENT_W = const('CONTENT_W')
-TILE_W = const('BASE_TILE_W') * const('HAND_SCALE')   # 手牌额外放大(只作用于自家)
-TILE_H = const('BASE_TILE_H') * const('HAND_SCALE')
-TOP_TILE_W = const('BASE_TOP_TILE_W')
-RIVER_TILE_W = const('BASE_RIVER_TILE_W')
+# 镜像 Main._applyTileScale: 手牌倍率由「你·听」标记反算(下限/目标), 其他牌乘 OTHERS_SCALE
+_MARK_INNER = (CONTENT_W / 2 - const('TENPAI_MARK_INSET')) - const('TENPAI_MARK_W') / 2 - const('HAND_EDGE_GAP')
+_HS = max(const('HAND_SCALE'), min(const('HAND_SCALE_TARGET'), _MARK_INNER / (7 * const('BASE_TILE_W'))))
+TILE_W = const('BASE_TILE_W') * _HS
+TILE_H = const('BASE_TILE_H') * _HS
+_OTHERS = const('OTHERS_SCALE')
+TOP_TILE_W = const('BASE_TOP_TILE_W') * _OTHERS
+RIVER_TILE_W = const('BASE_RIVER_TILE_W') * _OTHERS
 MELD_MARK_GAP = const('MELD_MARK_GAP')
 HINT_BTN_W = const('HINT_BTN_W')
 HINT_BTN_H = const('HINT_BTN_H')
@@ -157,14 +161,14 @@ def layout_for(ratio):
     total = sum(widths) + (len(widths) - 1) * SCORE_CHIP_GAP
     strip_scale = max(CHIP_MIN_SCALE, strip_max_w / total) if total > strip_max_w else 1.0
 
-    # _placeTenpaiChip
+    # _placeTenpaiChip(2026-10-18: 芯片整块抬到手牌上方, 左界是"满副露右沿")
     chip_right = half_w - CHIP_EDGE_PAD
-    hand_right = (14 * TILE_W) / 2 + TENPAI_HAND_GAP
-    chip_max_w = chip_right - hand_right
+    hand_right = (14 * TILE_W) / 2          # 满手 14 张的右缘(参考线)
+    meld_right = (16 * RIVER_TILE_W) / 2 + 16
+    chip_max_w = chip_right - meld_right
     chip_w = text_width(TENPAI_TEXT, TENPAI_FONT) + TENPAI_CHIP_PAD * 2
     chip_scale = max(CHIP_MIN_SCALE, chip_max_w / chip_w) if chip_w > chip_max_w else 1.0
-    # 镜像 _placeTenpaiChip: 芯片中心在手牌行上方 dy, 与"你·听"标记纵向错开
-    chip_dy = max(TILE_H / 2 - 7, TENPAI_MARK_H / 2 + TENPAI_CHIP_H / 2 + 8)
+    chip_dy = TILE_H / 2 + TENPAI_CHIP_H / 2 + 8
 
     # ---- 座位名牌(镜像 _placeSeatPlates) ----
     plate_names = ['', '老陈', '小雨', '阿虎']   # 自家没有名牌(见 Main._buildSeatPlates)
@@ -197,7 +201,7 @@ def layout_for(ratio):
         gear_x=gear_x, gear_y=gear_y, strip_left=strip_left, strip_right=strip_right,
         strip_cx=strip_cx, strip_max_w=strip_max_w, widths=widths, total=total,
         strip_scale=strip_scale, chip_right=chip_right, hand_right=hand_right,
-        chip_w=chip_w, chip_scale=chip_scale, chip_dy=chip_dy,
+        meld_right=meld_right, chip_w=chip_w, chip_scale=chip_scale, chip_dy=chip_dy,
     )
 
 
@@ -289,11 +293,11 @@ def render(ratio, title, out):
         cx = (i - 6.5) * tw
         d.rounded_rectangle([W / 2 + cx - tw / 2, hy - th / 2, W / 2 + cx + tw / 2, hy + th / 2],
                             radius=4, fill=IVORY, outline=(200, 190, 160))
-    # 听牌/提示按钮(手牌左侧)
-    riichi_x = -L['half_w'] + 115
-    hint_x = riichi_x + HINT_BTN_W / 2 + HINT_BTN_GAP + HINT_BTN_W / 2
+    # 听牌/提示按钮(2026-10-18 起在**副露行左侧**, 不再占手牌行)
+    riichi_x = -L['half_w'] + 20 + HINT_BTN_W / 2
+    hint_x = riichi_x + HINT_BTN_W + HINT_BTN_GAP
     for x, text, col in ((riichi_x, '听牌', (226, 182, 74)), (hint_x, '提示', (96, 186, 190))):
-        px, py = P(x, L['hand_y'])
+        px, py = P(x, L['meld_y'])
         d.rounded_rectangle([px - HINT_BTN_W / 2 * sx, py - HINT_BTN_H / 2 * sx,
                              px + HINT_BTN_W / 2 * sx, py + HINT_BTN_H / 2 * sx],
                             radius=HINT_BTN_H / 2 * sx, fill=col + (235,))
@@ -356,6 +360,7 @@ def render(ratio, title, out):
 
     # 关键边界线: 手牌右缘 / 芯片右缘 / 手牌上沿
     for x, col, label in ((L['hand_right'], (255, 200, 120), '手牌右缘(14 张最坏)'),
+                          (L['meld_right'], (255, 150, 200), '满副露右沿(芯片左界)'),
                           (L['chip_right'], (120, 255, 180), '芯片右缘'),
                           (L['half_w'] - 70 - 56, (160, 200, 255), '“你·听”左缘')):
         px2, _ = P(x, 0)
@@ -368,7 +373,7 @@ def render(ratio, title, out):
     # ---- 标题与数据 ----
     T(8, 6, f"{title}  halfH={L['half_h']:.0f}  比分条: 预算 {L['strip_max_w']:.0f}px / 实际 "
             f"{L['total']:.0f}px × {L['strip_scale']:.2f}  听牌芯片: 预算 "
-            f"{L['chip_right'] - L['hand_right']:.0f}px / 实际 {L['chip_w']:.0f}px × {L['chip_scale']:.2f}",
+            f"{L['chip_right'] - L['meld_right']:.0f}px / 实际 {L['chip_w']:.0f}px × {L['chip_scale']:.2f}",
       (255, 240, 190), 17)
 
     img.save(out)

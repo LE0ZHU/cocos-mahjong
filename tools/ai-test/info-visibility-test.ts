@@ -98,10 +98,18 @@ function bodyOf(code: string, signature: string): string {
 // 手牌还要再乘 HAND_SCALE(只作用于自家手牌), 名牌 / 芯片的净空都按它算。
 const CONTENT_W = num(mainSrc, 'CONTENT_W');
 const HAND_SCALE = num(mainSrc, 'HAND_SCALE');
-const TOP_TILE_W = num(mainSrc, 'BASE_TOP_TILE_W');
-const TILE_W = num(mainSrc, 'BASE_TILE_W') * HAND_SCALE;
-const TILE_H = num(mainSrc, 'BASE_TILE_H') * HAND_SCALE;
-const RIVER_TILE_W = num(mainSrc, 'BASE_RIVER_TILE_W');
+const HAND_SCALE_TARGET = num(mainSrc, 'HAND_SCALE_TARGET');
+const HAND_EDGE_GAP = num(mainSrc, 'HAND_EDGE_GAP');
+const OTHERS_SCALE = num(mainSrc, 'OTHERS_SCALE');
+const TOP_TILE_W = num(mainSrc, 'BASE_TOP_TILE_W') * OTHERS_SCALE;
+// 手机(k=1)的手牌倍率: 目标与「你·听」标记反算取小(复刻 Main._applyTileScale)
+const MARK_INNER = (CONTENT_W / 2 - num(mainSrc, 'TENPAI_MARK_INSET'))
+    - num(mainSrc, 'TENPAI_MARK_W') / 2 - HAND_EDGE_GAP;
+const HAND_SCALE_NOW = Math.max(HAND_SCALE, Math.min(HAND_SCALE_TARGET,
+    MARK_INNER / (7 * num(mainSrc, 'BASE_TILE_W'))));
+const TILE_W = num(mainSrc, 'BASE_TILE_W') * HAND_SCALE_NOW;
+const TILE_H = num(mainSrc, 'BASE_TILE_H') * HAND_SCALE_NOW;
+const RIVER_TILE_W = num(mainSrc, 'BASE_RIVER_TILE_W') * OTHERS_SCALE;
 const RIVER_GAP = num(mainSrc, 'RIVER_GAP');
 const MELD_MARK_GAP = num(mainSrc, 'MELD_MARK_GAP');
 const SCORE_CHIP_H = num(mainSrc, 'SCORE_CHIP_H');
@@ -207,19 +215,19 @@ console.log('\n[1] 比分条: 左上角齿轮右侧那条净空里完整放得�
 }
 
 // ================================================================ 2
-console.log('\n[2] 听牌详情芯片: 手牌右上角那条净空里完整放得下');
+console.log('\n[2] 听牌详情芯片: 抬到手牌上方, 右贴边、左让满副露');
 {
-    // 芯片右缘贴内容右边缘(见 Main._placeTenpaiChip; 手牌被 HAND_SCALE 放大后必须让位)
+    // 芯片整块在手牌上沿之上(手牌放到 1.45 后, 行内右侧只剩「你·听」标记那点空)
     const chipRight = halfW - CHIP_EDGE_PAD;
-    // 与右侧"你·听"标记靠**纵向**错开: 芯片中心距手牌行中心 = max(TILE_H/2−7, 标记半高+芯片半高+8)
-    const chipDy = Math.max(TILE_H / 2 - 7, TENPAI_MARK_H / 2 + TENPAI_CHIP_H / 2 + 8);
-    const markTop = TENPAI_MARK_H / 2;
-    const chipBottom = chipDy - TENPAI_CHIP_H / 2;
-    check(chipBottom > markTop, '听牌芯片抬在“你·听”标记上方', `gap=${(chipBottom - markTop).toFixed(1)}`);
-    // 满手 14 张时手牌右缘(最坏情况; 副露越多手牌越少)
-    const handRight = (14 * TILE_W) / 2 + TENPAI_HAND_GAP;
-    const maxW = chipRight - handRight;
-    check(maxW > 200, `可用宽度 ${maxW.toFixed(0)} 够放典型文案`);
+    const chipDy = TILE_H / 2 + TENPAI_CHIP_H / 2 + 8;
+    const chipBottomRel = chipDy - TENPAI_CHIP_H / 2;
+    check(chipBottomRel >= TILE_H / 2 + 8 - 0.01,
+        `芯片底 ${chipBottomRel.toFixed(0)} 在手牌上沿 ${(TILE_H / 2).toFixed(0)} 之上`,
+        `gap=${(chipBottomRel - TILE_H / 2).toFixed(1)}`);
+    // 左界 = 满副露右沿 + 16 呼吸(副露居中, 最多 16 张)
+    const meldRight = (16 * RIVER_TILE_W) / 2 + 16;
+    const maxW = chipRight - meldRight;
+    check(maxW > 300, `可用宽度 ${maxW.toFixed(0)} 够放典型文案`);
 
     /**
      * 文案最坏组合(实际会出现的字符串):
@@ -232,21 +240,21 @@ console.log('\n[2] 听牌详情芯片: 手牌右上角那条净空里完整放�
         '听 1/4/7條 3/6筒 · 余 8 张',
         '听 1/4/7萬 2/5筒 东/中 · 余 9 张',
     ];
+    let widest = 0;
     for (const text of CASES) {
         const w = textWidth(text, TENPAI_FONT) + TENPAI_CHIP_PAD * 2;
+        widest = Math.max(widest, w);
         const scale = w > maxW ? Math.max(CHIP_MIN_SCALE, maxW / w) : 1;
         check(w * scale <= maxW + 0.5, `"${text}" 缩放后 ${(w * scale).toFixed(0)} ≤ 预算 ${maxW.toFixed(0)}`,
             `未缩放 ${w.toFixed(0)} scale=${scale.toFixed(2)}`);
         check(scale >= CHIP_MIN_SCALE - 1e-6, `"${text}" 缩放不低于下限`, `实际 ${scale.toFixed(2)}`);
-        // 左缘不能压到手牌
+        // 左缘不能压到满副露(它和芯片同一纵向带)
         const left = chipRight - w * scale;
-        check(left >= handRight - 0.5, `"${text}" 左缘 ${left.toFixed(0)} ≥ 手牌右缘 ${handRight.toFixed(0)}`);
+        check(left >= meldRight - 0.5, `"${text}" 左缘 ${left.toFixed(0)} ≥ 满副露右沿 ${meldRight.toFixed(0)}`);
         check(w - 4 >= textWidth(text, TENPAI_FONT), `"${text}" 文本域够宽(不 SHRINK)`);
     }
 
-    // 提示面板(居中的浮动卡片)与芯片的横向关系:
-    // 面板走"按钮行上方/下方"两条通道, 落位下通道时纵向会靠近手牌区,
-    // 所以必须确认它的**半宽**也够不着芯片(否则长文案的面板会横着压到芯片上)
+    // 提示面板(居中的浮动卡片)最宽时也不能横着压到芯片
     const hintPadX = num(hintPanelSrc, 'PAD_X');
     const HINT_WORST: { t: string; f: number }[] = [
         { t: '打出 三萬', f: 40 },
@@ -257,27 +265,27 @@ console.log('\n[2] 听牌详情芯片: 手牌右上角那条净空里完整放�
     let hintContentW = 64 + 16;   // 关闭按钮占位(与 HintPanel._buildContent 一致)
     for (const h of HINT_WORST) hintContentW = Math.max(hintContentW, textWidth(h.t, h.f) + 8);
     const hintHalfW = (hintContentW + hintPadX * 2) / 2;
-    check(hintHalfW < handRight, '提示面板最宽情形也够不到芯片(横向错开)',
-        `面板半宽 ${hintHalfW.toFixed(0)} < 芯片左缘 ${handRight.toFixed(0)}`);
+    check(hintHalfW + 12 < chipRight - widest,
+        '提示面板最宽情形也够不到芯片(横向错开)',
+        `面板半宽 ${hintHalfW.toFixed(0)} + 12 < 芯片左缘 ${(chipRight - widest).toFixed(0)}`);
 
-    // 纵向: 与手牌同一排; 既要留在可见区内, 也不能侵入上方的副露行与提示面板落位通道
+    // 纵向: 芯片整体在手牌上方, 且不侵入上方的副露行 / 牌河
     const rivH = tileH(RIVER_TILE_W);
     for (const s of SCREENS) {
         const halfH = s.halfH;
         const handY = -halfH + TILE_H / 2 + 8;
-        const chipTop = handY + TENPAI_CHIP_H / 2;
-        const chipBottom = handY - TENPAI_CHIP_H / 2;
+        const chipTop = handY + chipDy + TENPAI_CHIP_H / 2;
+        const chipBottom = handY + chipDy - TENPAI_CHIP_H / 2;
         check(chipTop <= halfH && chipBottom >= -halfH, `${s.name}: 听牌芯片在可见区内`,
             `[${chipBottom.toFixed(0)}, ${chipTop.toFixed(0)}]`);
-        // 自家副露行下沿 = handY + TILE_H/2 + MELD_MARK_GAP
-        const meldBottom = handY + TILE_H / 2 + MELD_MARK_GAP;
-        check(meldBottom - chipTop > 0, `${s.name}: 听牌芯片不压自家副露行`, `gap=${(meldBottom - chipTop).toFixed(1)}`);
-        // 提示面板落位通道下界是"手牌上沿"(handY + TILE_H/2): 芯片必须整体在它之下
         const handTop = handY + TILE_H / 2;
-        check(handTop - chipTop > 0, `${s.name}: 听牌芯片不侵入提示面板落位通道`,
-            `gap=${(handTop - chipTop).toFixed(1)}`);
-        // 芯片与手牌同排, 纵向不越出手牌行(rivH 仅用于说明副露行与牌河同高)
-        check(TENPAI_CHIP_H <= TILE_H, `芯片高 ${TENPAI_CHIP_H} ≤ 手牌高 ${TILE_H}(不会顶到副露行)`, `riverH=${rivH.toFixed(0)}`);
+        check(chipBottom >= handTop - 0.01, `${s.name}: 听牌芯片整体在手牌上沿之上`,
+            `gap=${(chipBottom - handTop).toFixed(1)}`);
+        // 副露行中心在上方一处, 牌河再上一层: 芯片只允许压到副露行的纵向带
+        const meldY = handY + TILE_H / 2 + rivH / 2 + MELD_MARK_GAP;
+        const riverBottom = meldY + rivH / 2 + MELD_MARK_GAP;
+        check(chipTop <= riverBottom + 0.01, `${s.name}: 芯片不顶到牌河行`,
+            `chipTop=${chipTop.toFixed(0)} riverBottom=${riverBottom.toFixed(0)}`);
     }
 }
 
