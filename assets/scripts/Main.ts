@@ -228,6 +228,14 @@ const MELD_MARK_GAP = 24;
 const HU_FX_REVEAL_TAIL = 1.15;
 
 /**
+ * 和牌"归位"那一段的飞行时长 —— 必须与 `HuEffect.T_FLY_DUR` 相等:
+ * 吃胡是副本在飞, 自摸是 UI 把真牌滑过去(见 `_onTsumoLaunch`), 两条路要在
+ * 同一时刻(T_HL + 飞行)落位, 后面的金环/交棒才是同一套节奏。
+ * `tools/ai-test/hu-effect-test.ts` 的 [H]/[I] 组会核对两边常量一致。
+ */
+const HU_FX_FLY_DUR = 0.7;
+
+/**
  * 玩家手牌的**额外**放大倍率 —— 只作用于自家手牌, 上家 / 左右家 / 牌河 / 副露都不变。
  *
  * 手牌是玩家视线的落点, 比其它牌再大一圈更好读; 上限仍由**横向净空**决定:
@@ -337,6 +345,24 @@ export class Main extends Component {
     private _pendingWinNodes: Node[] = [];
     /** 待归位牌在**弃牌河**里那个补回显示的节点(落位后销毁: 牌被拿走了) */
     private _pendingRiverNode: Node | null = null;
+    /**
+     * 自摸的"待归位"和牌: 那张刚摸到的牌在**赢家手牌**里的节点(2026-10-19)
+     *
+     * 与吃胡不同, 它一直看得见(规则层没搬过它) —— 归位前先紧贴手牌摆着,
+     * 特效点亮它之后由 `_onTsumoLaunch` 滑到手牌最右的"和牌位"。
+     */
+    private _tsumoWinNode: Node | null = null;
+    /** 上面那个节点的落点(赢家手牌容器内的局部 x) */
+    private _tsumoTargetX = 0;
+    /** 各座位和牌的**目标**槽位(单列拉开后的位置; HuEffect 的金环画在这里) */
+    private _winSlot = new Map<number, Vec3>();
+    /**
+     * 本局各座位和的是哪张(结算后一直有效, 到清台为止)
+     *
+     * 手牌渲染靠它把和牌**单列摆在最右**(与结算面板"和的那张金边"口径一致);
+     * 归位标记被收掉之后再重渲(转屏)也不会弹回紧贴位。
+     */
+    private _settledWin = new Map<number, Tile>();
     /** "听牌"宣言按钮(听牌时才出现) */
     private _riichiBtn: Node | null = null;
     /** 四家的"听"标记(已宣告听牌时亮出) */
@@ -1046,6 +1072,10 @@ export class Main extends Component {
         // 待归位的隐形牌/补回的河牌: 特效被中止后它们不该再挂着(新一局会整体重建)
         this._pendingWinNodes = [];
         this._pendingRiverNode = null;
+        this._tsumoWinNode = null;
+        this._tsumoTargetX = 0;
+        this._winSlot.clear();
+        this._settledWin.clear();
         for (const m of this._tenpaiMarkers) if (m) m.active = false;
         if (this._riichiBtn) this._riichiBtn.active = false;
         // 新一局/返回主页面: 倒计时与提示一并收起(下一局需要时会重新起/重新要)
@@ -2039,7 +2069,11 @@ export class Main extends Component {
     private _huFxAnchorOf(seat: number, tile: Tile | null): HuFxAnchor | null {
         if (tile) {
             const container = seat === 0 ? this._handContainer : this._aiHandContainers[seat - 1];
-            const local = this._handSlots.get(seat)?.get(tile.id);
+            // 自摸待归位: 手牌里那张此刻还紧贴着(它马上要滑出去), 金环要画在**落点**
+            const tf = this.game?.tsumoFlight;
+            const flying = tf && tf.seat === seat && tf.tile === tile;
+            const local = (flying ? this._winSlot.get(seat) : null)
+                ?? this._handSlots.get(seat)?.get(tile.id);
             if (container && local) {
                 // 金环画在特效层(不随容器旋转), 所以左右家(牌竖躺)要交换宽高
                 const tw = seat === 0 ? this.TILE_W : (seat === 1 ? this.TOP_TILE_W : this.SIDE_TILE_W);
@@ -2065,6 +2099,7 @@ export class Main extends Component {
      */
     private _huFxOriginOf(w: WinnerResult): HuFxAnchor | null {
         const payer = w.fromSeat;
+        if (w.isSelfDraw) return this._huFxTsumoOrigin(w);
         if (payer < 0 || payer === w.seat) return null;
         const gm = this.game;
         if (!gm) return null;
@@ -2097,6 +2132,28 @@ export class Main extends Component {
     }
 
     /**
+     * 自摸的和牌"来路"(2026-10-19): 那张刚摸到的牌此刻在手牌里的位置。
+     *
+     * 它还没滑到手牌最右的和牌位(`_winSlot`), 特效先把这一格用金框点亮 ——
+     * 玩家看到的就是"刚摸到的那张被金框圈住, 然后归位", 与吃胡"牌河那格被点亮"同源。
+     * 找不到槽位(还没渲染过)就返回 null: 那一拍退化成直接落位金环, 不会崩。
+     */
+    private _huFxTsumoOrigin(w: WinnerResult): HuFxAnchor | null {
+        const seat = w.seat;
+        const tile = w.winTile;
+        if (!tile) return null;
+        const container = seat === 0 ? this._handContainer : this._aiHandContainers[seat - 1];
+        const local = this._handSlots.get(seat)?.get(tile.id);
+        if (!container || !local) return null;
+        const tw = seat === 0 ? this.TILE_W : (seat === 1 ? this.TOP_TILE_W : this.SIDE_TILE_W);
+        const th = this._tileH(tw);
+        return {
+            container, local: local.clone(), w: seat >= 2 ? th : tw, h: seat >= 2 ? tw : th,
+            angle: container.angle,
+        };
+    }
+
+    /**
      * 待归位的和牌(2026-10-19): 赢家手牌里这张牌先隐形, 等特效飞过来再填槽
      * @param seat 座位;返回 null 表示该座位没有待归位的牌(自摸/不是赢家)
      */
@@ -2104,6 +2161,35 @@ export class Main extends Component {
         const p = this.game?.ronFlight;
         if (!p || p.winnerSeats.indexOf(seat) < 0) return null;
         return p.tile;
+    }
+
+    /**
+     * 和牌位与手牌之间的留白(2026-10-19)
+     *
+     * 胡牌后和的那张**单列摆在手牌最右**, 与其余手牌拉开这么宽 ——
+     * 现实里也是这么摆的(和牌那张单独亮出来)。自摸的"归位"就是从紧贴位滑到这里。
+     */
+    private _winTileSep(tileW: number): number {
+        return Math.round(tileW * 0.32);
+    }
+
+    /**
+     * 本座位是否要把和牌单列摆在最右
+     *
+     * 只有**自摸**才这样摆: 自摸的和牌是最后摸到的那张, 它本来就排在手牌末尾
+     * (`Player.addDrawnTile` 不理牌), 拎出来单列不改变手牌顺序, 与结算面板里
+     * 那一行手牌的顺序也完全一致。吃胡的和牌已经 `addTile`(会理牌)插进手牌中间,
+     * 再拎出来就跟面板对不上了 —— 那种情况保持原样(空槽在排序位置)。
+     */
+    private _winTileAtEnd(seat: number, hand: Tile[], count: number): Tile | null {
+        const tf = this.game?.tsumoFlight ?? null;
+        const win = this._settledWin.get(seat) ?? (tf && tf.seat === seat ? tf.tile : null);
+        // 吃胡/抢杠不动: 那张牌已经 addTile 理进手牌中间, 空槽就按排序位置摆
+        const rf = this.game?.ronFlight ?? null;
+        if (rf && rf.winnerSeats.indexOf(seat) >= 0) return null;
+        // count <= 1 时没有"手牌 + 和牌"可摆, 单列没有意义(也只有这一张, 不拉开)
+        if (!win || count <= 1) return null;
+        return hand[count - 1] === win ? win : null;
     }
 
     /**
@@ -2136,8 +2222,17 @@ export class Main extends Component {
      * 为什么不在落位后整体重渲: 手牌一重渲就是整排 `_popRevealed` 弹一次,
      * 会把刚落位的那一下顶掉;这里只动那两个节点, 其余牌一动不动。
      */
-    private _onRonTileLanded(): void {
+    private _onWinTileLanded(): void {
         const gm = this.game;
+        // 自摸: 牌一直在赢家手里, 此刻刚滑到和牌位 —— 只收标记, 不搬任何牌。
+        // 槽位记到落点: 之后若再重渲(转屏)就不该弹回紧贴位。
+        const tf = gm?.tsumoFlight ?? null;
+        if (tf) {
+            const target = this._winSlot.get(tf.seat);
+            if (target) this._handSlots.get(tf.seat)?.set(tf.tile.id, target.clone());
+            gm?.consumeTsumoFlight();
+            this._tsumoWinNode = null;
+        }
         if (!gm?.ronFlight) return;
         gm.consumeRonFlight();
         for (const n of this._pendingWinNodes) {
@@ -2152,6 +2247,32 @@ export class Main extends Component {
         const river = this._pendingRiverNode;
         this._pendingRiverNode = null;
         if (river && river.isValid) river.destroy();
+    }
+
+    /**
+     * 自摸归位起飞(特效点亮起点之后回调): 让那张真牌滑到手牌最右的和牌位。
+     *
+     * 为什么不飞副本: 这张牌**一直在场上**(自家是明牌; 三家翻面后也是牌面),
+     * 再飞一张副本就成了"两张一样的牌"。真实麻将里也是把和的那张摸出来单列摆好 ——
+     * 所以这里动真牌, 位移只有那一段留白, 靠"拈起(放大) → 放下(收回)"把这一拍演出来。
+     * 时长与吃胡的飞行相同(`HU_FX_FLY_DUR`), 两条路在同一时刻落位。
+     */
+    private _onTsumoLaunch(w: WinnerResult): void {
+        const gm = this.game;
+        const tf = gm?.tsumoFlight ?? null;
+        if (!tf || tf.seat !== w.seat) return;
+        const node = this._tsumoWinNode;
+        if (!node || !node.isValid) return;
+        const x = this._tsumoTargetX;
+        stopTweensDeep(node);
+        tween(node)
+            .to(HU_FX_FLY_DUR, { position: new Vec3(x, 0, 0) }, { easing: 'quadOut' })
+            .start();
+        // 拈起来再放下: 前 45% 放大到 1.16, 后 55% 收回 —— 位移不大也看得出"这一下"
+        tween(node)
+            .to(HU_FX_FLY_DUR * 0.45, { scale: new Vec3(1.16, 1.16, 1) }, { easing: 'quadOut' })
+            .to(HU_FX_FLY_DUR * 0.55, { scale: new Vec3(1, 1, 1) }, { easing: 'quadOut' })
+            .start();
     }
 
     /**
@@ -2709,11 +2830,16 @@ export class Main extends Component {
         const step = this.TILE_W + this.TILE_GAP;
         // 刚摸到的牌挂在手牌末尾(未理牌),单独放到最右侧并做金色标注
         const hasDrawn = !dealing && !!gm?.playerDrawnTile && count > 0;
-        const normalCount = hasDrawn ? count - 1 : count;
-        const sep = 0; // 摸到的牌与手牌之间不再留额外间隔(仅靠金色标注区分)
+        // 胡牌后和的那张单列摆在最右(自摸: 那张就是刚摸到的), 与其余手牌拉开 winSep
+        const winTile = hasDrawn ? null : this._winTileAtEnd(0, player.hand, count);
+        const winSep = winTile ? this._winTileSep(this.TILE_W) : 0;
+        const normalCount = (hasDrawn || winTile) ? count - 1 : count;
+        const sep = hasDrawn ? 0 : winSep; // 摸到的牌与手牌之间不再留额外间隔(仅靠金色标注区分)
         const blockW = normalCount > 0 ? normalCount * step - this.TILE_GAP : 0;
-        const totalWidth = blockW + (hasDrawn ? sep + this.TILE_W : 0);
-        const startX = -totalWidth / 2 + this.TILE_W / 2;
+        const totalWidth = blockW + ((hasDrawn || winTile) ? sep + this.TILE_W : 0);
+        // 单列的留白往**左侧**挤: 手牌行右端是常驻的「你·听」标记(满手 14 张刚好贴到它的
+        // 内缘), 居中摆放会让和牌压上去 —— 整排左移 sep/2, 右端就还是原来那个位置。
+        const startX = -totalWidth / 2 + this.TILE_W / 2 - sep / 2;
 
         // 上一帧的手牌槽位: 同一张牌这一帧换了位置就滑过去,而不是瞬移
         const prevSlots = this._handSlots.get(0);
@@ -2733,16 +2859,27 @@ export class Main extends Component {
             // 吃胡的那张牌此刻还在弃牌河里: 手牌给它留空槽(位置照算, 只是不显示)
             if (tile === hideTile) this._markPendingWin(node);
         }
-        if (hasDrawn) {
-            const drawnX = startX + normalCount * step + sep;
-            const tile = player.hand[count - 1];
-            const node = this._createHandTile(tile, count - 1, drawnX, true);
-            // 刚摸到的牌: 上一帧若已在手牌里(续杠补摸等)就从旧位置滑来,否则从手牌右侧滑入
+        if (hasDrawn || winTile) {
+            const winX = startX + normalCount * step + sep;
+            const tile = winTile ?? player.hand[count - 1];
+            // 自摸待归位: 先**紧贴**手牌摆着(它刚摸到时的位置), 归位那一段再滑到 winX
+            const pending = !!winTile
+                && !!gm?.tsumoFlight && gm.tsumoFlight.seat === 0 && gm.tsumoFlight.tile === tile;
+            const x0 = pending ? winX - winSep : winX;
+            // 待归位期间保留"刚摸到"的金色标注: 金标 → 特效金框点亮 → 归位, 中间不断档
+            const node = this._createHandTile(tile, count - 1, x0, hasDrawn || pending);
             const prev = prevSlots?.get(tile.id);
             if (prev) glideTo(node, prev);
-            else slideIn(node, new Vec3(78, 0, 0));
-            nextSlots.set(tile.id, new Vec3(drawnX, 0, 0));
+            // 刚摸到的牌(还没胡): 上一帧不在手牌里就从右侧滑入
+            else if (hasDrawn) slideIn(node, new Vec3(78, 0, 0));
+            nextSlots.set(tile.id, new Vec3(x0, 0, 0));
             this._handNodes[count - 1] = node;
+            if (pending) {
+                this._tsumoWinNode = node;
+                this._tsumoTargetX = winX;
+            }
+            // 和牌的目标槽位(金环画在这里, 归位后就停在这里)
+            this._winSlot.set(0, new Vec3(winX, 0, 0));
             if (tile === hideTile) this._markPendingWin(node);
         }
         this._storeHandSlots(0, nextSlots);
@@ -2866,8 +3003,11 @@ export class Main extends Component {
             // 上家: 顶部,牌竖向,横向排列,缩小(高度按手牌比例)
             const step = this.TOP_TILE_W + this.TOP_TILE_GAP;
             const h = this._tileH(this.TOP_TILE_W);
-            const startX = -((count - 1) * step) / 2;
-            for (let i = 0; i < count; i++) {
+            const winTile = this._winTileAtEnd(seat, ai.hand, count);
+            const winSep = winTile ? this._winTileSep(this.TOP_TILE_W) : 0;
+            const normalCount = winTile ? count - 1 : count;
+            const startX = -this._handSpan(normalCount, step, winSep) / 2 - winSep / 2;
+            for (let i = 0; i < normalCount; i++) {
                 const tile = ai.hand[i];
                 const node = reveal
                     ? this._createFaceTile(tile, this.TOP_TILE_W, h, container)
@@ -2881,6 +3021,10 @@ export class Main extends Component {
                 if (tile === hideTile) this._markPendingWin(node);
                 else if (reveal) this._popRevealed(node, i);
             }
+            if (winTile) {
+                this._placeAIWinTile(seat, winTile, container, normalCount, startX, step, winSep,
+                    this.TOP_TILE_W, h, reveal, nextSlots, prevSlots);
+            }
         } else {
             // 左/右家: 牌背与弃牌河/副露保持同一朝向(随桌面侧边倾斜横躺),
             // 不再对每张牌反向旋转;容器已按侧边倾角旋转,沿容器横轴排列即沿侧边纵向排列,
@@ -2888,8 +3032,11 @@ export class Main extends Component {
             const w = this.SIDE_TILE_W;
             const h = this._tileH(w);
             const step = w + this.SIDE_TILE_GAP;
-            const startX = -((count - 1) * step) / 2;
-            for (let i = 0; i < count; i++) {
+            const winTile = this._winTileAtEnd(seat, ai.hand, count);
+            const winSep = winTile ? this._winTileSep(w) : 0;
+            const normalCount = winTile ? count - 1 : count;
+            const startX = -this._handSpan(normalCount, step, winSep) / 2 - winSep / 2;
+            for (let i = 0; i < normalCount; i++) {
                 const tile = ai.hand[i];
                 const node = reveal
                     ? this._createFaceTile(tile, w, h, container)
@@ -2903,9 +3050,54 @@ export class Main extends Component {
                 if (tile === hideTile) this._markPendingWin(node);
                 else if (reveal) this._popRevealed(node, i);
             }
+            if (winTile) {
+                this._placeAIWinTile(seat, winTile, container, normalCount, startX, step, winSep,
+                    w, h, reveal, nextSlots, prevSlots);
+            }
         }
         this._storeHandSlots(seat, nextSlots);
         this._refreshInfo();
+    }
+
+    /**
+     * 手牌行的跨度(首张中心 → 末张中心): 和牌单列时那一段留白也要算进去
+     * @param normalCount 普通手牌张数(不含单列的和牌)
+     */
+    private _handSpan(normalCount: number, step: number, winSep: number): number {
+        if (normalCount <= 0) return winSep;
+        return (normalCount - 1) * step + winSep;
+    }
+
+    /**
+     * 摆 AI 手牌里单列的和牌(2026-10-19): 手牌最右、与其余手牌拉开 winSep。
+     *
+     * 自摸的这张**还处于待归位**: 先紧贴手牌摆着(就是它刚摸到时的位置),
+     * 由 `_onTsumoLaunch` 在特效点亮它之后滑到 winX —— 与吃胡"牌从河里飞进手牌"
+     * 是同一段节奏, 只是这张牌一直在场上, 不用副本。
+     */
+    private _placeAIWinTile(
+        seat: number, tile: Tile, container: Node, normalCount: number, startX: number,
+        step: number, winSep: number, w: number, h: number, reveal: boolean,
+        nextSlots: Map<number, Vec3>, prevSlots: Map<number, Vec3> | undefined,
+    ): void {
+        const winX = startX + normalCount * step + winSep;
+        const gm = this.game;
+        const pending = !!gm?.tsumoFlight && gm.tsumoFlight.seat === seat && gm.tsumoFlight.tile === tile;
+        const x0 = pending ? winX - winSep : winX;
+        const node = reveal
+            ? this._createFaceTile(tile, w, h, container)
+            : createTileBackNode(w, h, TILE_GAP_THIN);
+        node.parent = container;
+        node.setPosition(x0, 0, 0);
+        this._glideAITile(tile, node, prevSlots);
+        nextSlots.set(tile.id, new Vec3(x0, 0, 0));
+        if (pending) {
+            this._tsumoWinNode = node;
+            this._tsumoTargetX = winX;
+        }
+        this._winSlot.set(seat, new Vec3(winX, 0, 0));
+        // 翻面弹入照旧(它和其余手牌一起翻开), 归位那一段是之后的事
+        if (reveal) this._popRevealed(node, normalCount);
     }
 
     /** AI 手牌理牌过渡: 上一帧就在手里的牌从旧位置滑到新位置(牌背平移,读起来是"手牌收拢/张开") */
@@ -3252,6 +3444,9 @@ export class Main extends Component {
         // 正面牌比牌背多出顶侧厚度,需要重排(上家手牌整组下移,避免被屏幕裁掉)
         this._applyLayout(this._halfH);
         for (let i = 0; i < 3; i++) this._refreshAIHand(i);
+        // 自家手牌也要重渲一次: 胡牌后"刚摸到的那张"不再是摸牌态(金标收掉),
+        // 改按"和牌单列摆在最右"排版 —— 自摸归位就是把它从紧贴位滑到那里。
+        this._refreshHand();
         // 牌局结束: 确保设置按钮还在(正常对局中它一直亮着)
         this._showSettingsButton();
         console.log(`[结束] ${message} → 亮出四家手牌`);
@@ -3263,13 +3458,21 @@ export class Main extends Component {
      */
     private _onSettle(data: SettlementData): void {
         this._refreshRiichiButton();
+        // 记下各家和的是哪张: 手牌渲染据此把和牌单列摆在最右(与结算面板同一口径),
+        // 归位标记被收掉之后再重渲也不会弹回去
+        this._settledWin.clear();
+        for (const w of data.winners) {
+            if (w.winTile) this._settledWin.set(w.seat, w.winTile);
+        }
         this.scheduleOnce(() => {
             if (this._huFx) {
                 this._huFx.play(data, {
                     anchorOf: (seat, tile) => this._huFxAnchorOf(seat, tile),
                     originOf: (winner) => this._huFxOriginOf(winner),
+                    // 自摸: 起点金框亮完 → 让那张真牌滑到和牌位(与吃胡飞行同时长)
+                    onLaunch: (winner) => this._onTsumoLaunch(winner),
                     // 牌飞到赢家手牌的那一帧: 手牌空槽填上、弃牌河那张收走
-                    onLanded: () => this._onRonTileLanded(),
+                    onLanded: () => this._onWinTileLanded(),
                 }, () => this._settlement?.show(data));
             } else {
                 // 特效层没建起来(理论上到不了): 退回旧行为, 面板直接弹

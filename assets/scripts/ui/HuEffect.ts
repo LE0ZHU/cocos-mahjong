@@ -30,7 +30,8 @@ const T_LAND = 1.0;         // 落位 = 高亮 0.3 + 飞行 0.7 → 定格金环
 const RING_LIFE = 0.45;
 /** 金环收束 → 交棒之间留的一眼(看清是哪张牌后才让面板上来) */
 const T_BEAT = 0.35;
-const T_TILE = 1.0;         // 自摸(无飞行)的金环时刻(与吃胡落位同一时刻)
+/** 退化路径: 拿不到起点锚点(没渲染过)时, 仍在"落位"这一刻给金环 */
+const T_TILE = 1.0;
 /** 交棒: 面板开始上滑 —— 高亮 0.3 + 飞行 0.7 + 金环 0.45 + 留一眼 0.35(点胡起 ≈3.45s 就位) */
 const T_DONE = 1.8;
 // 流局没有任何"归位"可播(没人胡, 没有关键牌), 陪着等就是纯枯等 —— 立刻交棒
@@ -57,15 +58,25 @@ export interface HuFxAnchor {
 export interface HuFxHooks {
     anchorOf(seat: number, tile: Tile | null): HuFxAnchor | null;
     /**
-     * 和牌的"来路"锚点(仅吃胡/抢杠会问; 自摸不问 —— 牌本来就在手里)。
-     * 吃胡 = 牌河被取走的那一格; 抢杠 = 补杠者的副露区。返回 null = 不做飞行。
+     * 和牌的"来路"锚点(吃胡/抢杠/自摸都会问)
+     *  - 吃胡 = 牌河被取走的那一格; 抢杠 = 补杠者的副露区;
+     *  - 自摸 = 刚摸到的那张此刻在手牌里的位置(它还没滑到和牌位)。
+     * 返回 null = 不做这段"起点高亮 + 归位", 直接落位金环。
      */
     originOf(winner: WinnerResult): HuFxAnchor | null;
     /**
+     * 和牌起飞的那一帧(2026-10-19, 仅自摸会调)
+     *
+     * 自摸的牌**本来就在赢家手里**(亮牌阶段已翻开), 这里不飞副本 ——
+     * 交给 UI 把那张真牌滑到"和牌位"(手牌最右、单列拉开), 与吃胡的飞行同一段时长。
+     */
+    onLaunch?: (winner: WinnerResult) => void;
+    /**
      * 和牌落位到赢家手牌的那一帧(2026-10-19)
      *
-     * UI 在这一刻才把那张牌"从弃牌河收进手牌": 手牌里预留的空槽填上、
-     * 弃牌河补回显示的那张销毁。一炮多响会对每个赢家各调一次(UI 侧要幂等)。
+     * UI 在这一刻才把那张牌"从弃牌河收进手牌"(吃胡/抢杠): 手牌里预留的空槽填上、
+     * 弃牌河补回显示的那张销毁; 自摸则是收掉"待归位"标记(牌已滑到位)。
+     * 一炮多响会对每个赢家各调一次(UI 侧要幂等)。
      */
     onLanded?: (winner: WinnerResult) => void;
 }
@@ -127,20 +138,30 @@ export class HuEffect extends Component {
         const tDone = draw ? DRAW_T_DONE : T_DONE;
 
         // ---- 唯一的一拍: 和牌归位(飞行) + 关键牌定格金环 ----
-        // 全程在亮桌面上演(已删除全桌压暗): 那张带金边的牌才看得清; 吃胡/抢杠的副本从
-        // "来路"(牌河被取走的那格 / 补杠者副露区)飞向手牌落位, 落位即销毁(真牌已在
-        // 手里)并金环定格 —— 宣告那一帧的"凭空消失/凭空出现"就有了来路。
-        // 自摸: 牌本来就在手里(自带金标), 不飞, 只在 T_TILE 时刻给一次金环。
-        // 流局没有关键牌: 整个金环/飞行段都被 data.kind === 'hu' 挡住。
+        // 全程在亮桌面上演(已删除全桌压暗): 那张带金边的牌才看得清。
+        //  - 吃胡/抢杠: 副本从"来路"(牌河被取走的那格 / 补杠者副露区)飞向手牌落位,
+        //    落位即销毁(真牌已在手里)并金环定格 —— 宣告那一帧的"凭空消失"就有了来路;
+        //  - 自摸(2026-10-19): 牌本来就在手里(看得见), **不飞副本**(否则出现两张一样的牌) ——
+        //    只把"刚摸到的那张"用金框点亮 T_HL, 再让 UI 把真牌滑到手牌最右的和牌位
+        //    (onLaunch), 同一时刻落位金环。节奏与吃胡完全一致。
+        // 流局没有关键牌: 整个金环/归位段都被 data.kind === 'hu' 挡住。
         if (data.kind === 'hu') {
             for (const w of data.winners) {
                 const dest = this._anchorOf(w.seat, w.winTile);
                 if (!dest) continue;
-                const origin = (!w.isSelfDraw && w.fromSeat >= 0)
+                const origin = (w.isSelfDraw || w.fromSeat >= 0)
                     ? (this._hooks?.originOf?.(w) ?? null)
                     : null;
                 if (origin) {
-                    this._flyCopy(origin, dest, w.winTile!, subdued);
+                    if (w.isSelfDraw) {
+                        // 自摸: 真牌就在手牌里(看得见), 不飞副本 —— 只把"刚摸到的那张"
+                        // 用金框点亮一拍, 再让 UI 把它滑到和牌位(见 HuFxHooks.onLaunch)。
+                        // 飞副本会出现"两张一样的牌", 那才叫突兀。
+                        this._ghostRing(origin, subdued);
+                        this.scheduleOnce(() => this._hooks?.onLaunch?.(w), T_HL);
+                    } else {
+                        this._flyCopy(origin, dest, w.winTile!, subdued);
+                    }
                     this.scheduleOnce(() => this._land(dest, w, subdued), T_LAND);
                 } else {
                     this.scheduleOnce(() => this._land(dest, w, subdued), T_TILE);
@@ -289,17 +310,27 @@ export class HuEffect extends Component {
                 angle: dest.angle ?? dest.container.angle,
             }, { easing: 'quadOut' })
             .start();
-        // 起点残影: 在牌河末格留一个渐渐消失的金框, 说明"牌是从这里被拿走的"
+        this._ghostRing(origin, subdued, w, h);
+    }
+
+    /**
+     * 起点金框: 把"和牌此刻所在的那格"点亮一拍(T_HL), 起飞后才作为残影淡出 ——
+     * 说明"就是这张牌被拿走了"。吃胡是牌河末格, 自摸是手牌里刚摸到的那张。
+     */
+    private _ghostRing(anchor: HuFxAnchor, subdued: boolean, w = 64, h = 86): void {
+        const start = this._toHere(anchor);
+        const bw = w + 16;
+        const bh = h + 16;
         const ghost = new Node('FlyGhost');
         ghost.parent = this.node;
         ghost.setPosition(start.x, start.y, 0);
         ghost.addComponent(UITransform).setContentSize(bw, bh);
         const gg = ghost.addComponent(Graphics);
         gg.strokeColor = C_GOLD;
-        gg.lineWidth = 3;
+        gg.lineWidth = subdued ? 2.5 : 3;
         gg.roundRect(-bw / 2, -bh / 2, bw, bh, 14);
         gg.stroke();
-        ghost.angle = copy.angle;
+        ghost.angle = anchor.angle ?? anchor.container.angle;
         // 起点高亮: 金框先淡入(0.12s)并在高亮拍里亮着, 起飞(T_HL)之后才作为残影淡出
         const gop = ensureOpacity(ghost);
         gop.opacity = 0;

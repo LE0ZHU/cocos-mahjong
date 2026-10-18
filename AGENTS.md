@@ -721,7 +721,10 @@ export function tileFaceSize(w, h, gap = TILE_GAP) { return { w: w - gap, h: h -
 1.15   HuEffect.play() 接手(= HU_FX_REVEAL_TAIL, onSettle 里 scheduleOnce 延到这里)
 1.15   **起点高亮**(T_HL 0.3s): 和牌此刻还躺在**弃牌河那一格**, 给它套上金色边框亮一下
 1.45   和牌副本起飞(0.7s, 金边框 + 起点 1.25 倍 + 起点残影)
-       吃胡: 牌河那一格; 抢杠: 补杠者副露区; 自摸不飞(牌已在手)
+       吃胡: 牌河那一格; 抢杠: 补杠者副露区
+       自摸: 不飞副本(牌一直看得见, 飞副本=两张一样的牌) —— 金框点亮**手牌里
+       刚摸到的那张**, 然后由 UI 把**真牌**滑到手牌最右的"和牌位"(同一段 0.7s,
+       HuFxHooks.onLaunch → Main._onTsumoLaunch), 同一时刻落位
 2.15   落位: 填进赢家手牌预留的那个空槽 + **描边金环(RING_LIFE=0.45)**
        —— **没有闪光**(2026-10-18 用户反馈"黄色的一块闪一下很突兀"; 实心金色块会糊住牌面,
        描边不会), 金环是唯一的强调手段
@@ -740,6 +743,16 @@ export function tileFaceSize(w, h, gap = TILE_GAP) { return { w: w - gap, h: h -
 - 特效落位(`HuFxHooks.onLanded` → `Main._onRonTileLanded()`): 手牌那个隐形节点显形 +
   销毁河里补回的那张 + `consumeRonFlight()`。之后任何重渲染(转屏/重开)都按真实状态。
 ⚠️ 名字别和内部的 `PendingRon`(等待玩家决定胡/过)搞混 —— 那是两回事。
+
+**自摸的归位是另一套机制**(2026-10-19): 牌本来就在赢家手里, 规则层**不搬任何牌**,
+只留 `GameManager.tsumoFlight`(别叫 PendingRon, 同上)。UI 渲染时把和牌**单列摆到手牌
+最右**(`Main._winTileAtEnd`: 只有和牌在 hand 末尾——自摸 addDrawnTile 不理牌——才单列,
+吃胡那张已理进手牌中间, 保持原样), 归位前先紧贴手牌摆着(它刚摸到时的位置), 特效点亮
+后 `_onTsumoLaunch` 把真牌滑到落点(留白 `_winTileSep`=牌宽×0.32, **整排左移留白/2** ——
+右端有常驻的「你·听」标记, 居中会让和牌压上去, 左端余量足)。落位后 `consumeTsumoFlight()`
++ 槽位记到落点。`_winSlot` 存各座位和牌的落点: **自摸时金环画在落点而不是紧贴位**
+(`_huFxAnchorOf` 对 tsumoFlight 命中的牌优先取 `_winSlot`)。翻面那一步(`_onGameEndReveal`)
+自家手牌也要 `_refreshHand()` 一次 —— 否则"刚摸到的那张"永远停在摸牌态。
 
 **删掉的三拍不要再捡回来**: 全桌压暗层已退化为纯"吞点击的背景层"(只有 UITransform, 没有
 Graphics), 目的是特效期间不许误点牌桌; 大字/摘要/ `vibrateHu()` 连同 `STAMP_*`/`SUMMARY_*`/
@@ -771,8 +784,9 @@ AI 胡"收着演"只剩"金环更暗更细"。
 - ⚠️ 节点在 `play()`（已 active）时才创建/补画 —— 原生平台"隐藏期画的 Graphics 上不了屏"。
 - ⚠️ `_clearTable` 必须 `_huFx.abort()`（停 tween + 节点失活），否则飞行途中的副本会卡在桌面上。
 - `WinnerResult.fromSeat`（点炮者，自摸 -1）由 GameManager 直接带出，不能从 delta 反推。
-- 层级：设置弹窗 < HuEffect < 结算面板。改节奏/文案后重跑 `tools/ai-test/hu-effect-test.ts`，
-  静态分镜 `python tools/preview-hu-fx.py`（亮桌面三帧：起点高亮 / 飞行中 / 落位描边金环）。
+- 层级：设置弹窗 < HuEffect < 结算面板。改节奏/文案后重跑 `tools/ai-test/hu-effect-test.ts`
+  (吃胡归位 [H] 组 + 自摸归位 [I] 组), 静态分镜 `python tools/preview-hu-fx.py`
+  (亮桌面四帧: 起点高亮 / 飞行中 / 落位描边金环 / 自摸归位)。
 
 ### 7. 牌对象是引用，不是拷贝
 

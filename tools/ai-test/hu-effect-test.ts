@@ -138,7 +138,7 @@ console.log('\n[H] 和牌归位: 点炮那张牌先留在弃牌河, 高亮后飞
         '隐形牌缩到 0(光 opacity=0 仍会接收触摸)');
 
     // ---- 落位: 手牌空槽填上 + 河里那张收走 ----
-    check(/onLanded: \(\) => this\._onRonTileLanded\(\),/.test(main), 'Main 接上落位回调');
+    check(/onLanded: \(\) => this\._onWinTileLanded\(\),/.test(main), 'Main 接上落位回调');
     check(/gm\.consumeRonFlight\(\);/.test(main), '落位时收掉待归位标记(后续按真实状态渲染)');
     check(/if \(river && river\.isValid\) river\.destroy\(\);/.test(main), '落位时销毁河里那张');
     check(/this\._pendingWinNodes = \[\];\s*\n\s*this\._pendingRiverNode = null;/.test(main),
@@ -153,6 +153,80 @@ console.log('\n[H] 和牌归位: 点炮那张牌先留在弃牌河, 高亮后飞
     // 落位目标 = 赢家手牌里那个**真实槽位**(隐形但槽位照记), 不是估算出来的位置
     check(/const local = this\._handSlots\.get\(seat\)\?\.get\(tile\.id\);/.test(main),
         '落位坐标取 _handSlots 里的真实手牌槽位(空槽也照记), 不是估出来的位置');
+}
+
+console.log('\n[I] 自摸归位: 刚摸到的那张先被金框点亮, 再滑到手牌最右的和牌位(2026-10-19)');
+{
+    // ---- 规则层: 不搬牌(牌本来就在手里), 只留一个"待归位"标记 ----
+    check(/tsumoFlight: TsumoFlight \| null = null;/.test(gm), 'GameManager 有 tsumoFlight 待归位标记');
+    check(/this\.tsumoFlight = \{ tile, seat \};/.test(gm), '_settleSelfDraw 记下待归位(和牌 / 自摸座位)');
+    check(/consumeTsumoFlight\(\): void \{\s*\n\s*this\.tsumoFlight = null;/.test(gm),
+        'consumeTsumoFlight(): 归位动画播完后收掉标记');
+    const startBody2 = gm.slice(gm.indexOf('startGame('), gm.indexOf('startGame(') + 2500);
+    check(/this\.tsumoFlight = null;/.test(startBody2), 'startGame 清掉上一局的自摸待归位标记');
+    // 与吃胡的关键差别: 自摸**不改任何牌的归属**(牌一直在赢家手里)
+    check(!/removeTileRef|discards\.pop/.test(gm.slice(gm.indexOf('_settleSelfDraw('), gm.indexOf('_settleSelfDraw(') + 900)),
+        '_settleSelfDraw 不搬牌(牌本来就在赢家手里, 只有吃胡才从牌河取走)');
+
+    // ---- UI: 和牌单列摆在最右, 归位前先紧贴手牌 ----
+    check(/private _winTileSep\(tileW: number\): number/.test(main), '和牌位与手牌之间留白(单列摆开)');
+    check(/private _winTileAtEnd\(seat: number, hand: Tile\[\], count: number\)/.test(main),
+        '只有"和牌正好在 hand 末尾"(自摸: addDrawnTile 不理牌)才单列');
+    check(/if \(rf && rf\.winnerSeats\.indexOf\(seat\) >= 0\) return null;/.test(main),
+        '吃胡/抢杠不单列(那张已理进手牌中间, 空槽按排序位置)');
+    check(/const winTile = hasDrawn \? null : this\._winTileAtEnd\(0, player\.hand, count\);/.test(main),
+        '自家手牌按"和牌单列"排版');
+    check(/const x0 = pending \? winX - winSep : winX;/.test(main),
+        '待归位时先紧贴手牌摆着(就是刚摸到时的位置), 归位才滑到 winX');
+    check(/const node = this\._createHandTile\(tile, count - 1, x0, hasDrawn \|\| pending\);/.test(main),
+        '待归位期间保留"刚摸到"的金色标注(金标 → 金框点亮, 中间不断档)');
+    check(/this\._winSlot\.set\(0, new Vec3\(winX, 0, 0\)\);/.test(main), '记下和牌的目标槽位(金环画在落点)');
+    check(/private _placeAIWinTile\(/.test(main) && /this\._placeAIWinTile\(seat, winTile, container,/.test(main),
+        '三家 AI 手牌同样把和牌单列(上家 / 左右家两条分支都接上)');
+    check(/private _handSpan\(normalCount: number, step: number, winSep: number\): number/.test(main)
+        && /const startX = -this\._handSpan\(normalCount, step, winSep\) \/ 2 - winSep \/ 2;/.test(main),
+        'AI 手牌把单列留白算进跨度且整排左移留白/2(右端有名牌/牌河, 留白往左挤)');
+    // 金环要画在**落点**, 而不是此刻紧贴的那个位置
+    check(/const flying = tf && tf\.seat === seat && tf\.tile === tile;/.test(main)
+        && /const local = \(flying \? this\._winSlot\.get\(seat\) : null\)/.test(main),
+        '自摸待归位时锚点取 _winSlot(金环画在落点)');
+
+    // ---- 特效: 自摸不飞副本(会出现两张一样的牌), 只高亮 + 回调 UI 滑真牌 ----
+    check(/onLaunch\?: \(winner: WinnerResult\) => void;/.test(fx), 'HuFxHooks 有 onLaunch(起飞回调)');
+    check(/const origin = \(w\.isSelfDraw \|\| w\.fromSeat >= 0\)/.test(fx),
+        '自摸也向 hooks 要来路锚点(不再只有吃胡/抢杠)');
+    check(/if \(w\.isSelfDraw\) \{\s*\n\s*this\._ghostRing\(origin, subdued\);/.test(fx),
+        '自摸: 只把起点用金框点亮, 不飞副本');
+    check(/this\.scheduleOnce\(\(\) => this\._hooks\?\.onLaunch\?\.\(w\), T_HL\);/.test(fx),
+        '起飞排在起点高亮之后(与吃胡飞行同一时刻)');
+    const playBody = fx.slice(fx.indexOf('play(data: SettlementData'), fx.indexOf('private _finish()'));
+    check(!playBody.includes('_flyCopy(origin, dest, w.winTile!, subdued);\n                        this.scheduleOnce'),
+        '自摸分支里没有 _flyCopy(真牌一直在场上, 飞副本会重影)');
+    check(/private _ghostRing\(anchor: HuFxAnchor, subdued: boolean/.test(fx),
+        '起点金框抽成 _ghostRing(吃胡/自摸共用同一段高亮)');
+    // 真牌滑行: 与吃胡飞行**同时长**, 两条路在同一时刻落位
+    check(Math.abs(num(main, 'HU_FX_FLY_DUR') - num(fx, 'T_FLY_DUR')) < 1e-6,
+        `Main 的滑行时长 ${num(main, 'HU_FX_FLY_DUR')} = HuEffect 飞行时长 ${num(fx, 'T_FLY_DUR')}(同时落位)`);
+    check(/onLaunch: \(winner\) => this\._onTsumoLaunch\(winner\),/.test(main), 'Main 接上起飞回调');
+    check(/private _onTsumoLaunch\(w: WinnerResult\)/.test(main)
+        && /\.to\(HU_FX_FLY_DUR, \{ position: new Vec3\(x, 0, 0\) \}/.test(main),
+        '_onTsumoLaunch: 真牌滑到和牌位(时长与吃胡飞行一致)');
+    check(/stopTweensDeep\(node\);/.test(main), '滑行前先停掉旧补间(翻面弹入可能还没跑完)');
+
+    // ---- 落位 / 清台 ----
+    check(/const tf = gm\?\.tsumoFlight \?\? null;/.test(main)
+        && /gm\?\.consumeTsumoFlight\(\);/.test(main),
+        '落位时收掉自摸待归位标记(后续按最终位置渲染)');
+    check(/if \(target\) this\._handSlots\.get\(tf\.seat\)\?\.set\(tf\.tile\.id, target\.clone\(\)\);/.test(main),
+        '落位后槽位记到和牌位(转屏重渲不弹回紧贴位)');
+    check(/this\._winSlot\.clear\(\);/.test(main) && /this\._settledWin\.clear\(\);/.test(main),
+        '_clearTable 清掉和牌单列的缓存(新一局不带着上一局的和牌)');
+    // 自家手牌要在翻面那一步重渲一次(否则"刚摸到的那张"一直停在摸牌态)
+    check(/for \(let i = 0; i < 3; i\+\+\) this\._refreshAIHand\(i\);\s*\n\s*this\._refreshHand\(\);/.test(main),
+        '翻面时自家手牌一并重渲(应用和牌单列排版)');
+    check(/private _huFxTsumoOrigin\(w: WinnerResult\)/.test(main)
+        && /if \(w\.isSelfDraw\) return this\._huFxTsumoOrigin\(w\);/.test(main),
+        '自摸的来路 = 和牌此刻在手牌里的位置(找不到就退化成直接落位)');
 }
 
 console.log('\n[B] 三拍已删除: 没有压暗 / 大字 / 摘要 / 震动');
@@ -218,7 +292,11 @@ console.log('\n[D] 不引用牌桌节点 + 和牌归位飞行');
         '副本沿容器旋转角起飞/落位(左右家的牌是竖躺的)');
     check(/copy\.destroy\(\)/.test(fly), '落位即销毁副本(真牌已在手里)');
     check(!/_flyDot/.test(fx), '旧的光点飞行已移除(被真牌副本取代)');
-    check(/!w\.isSelfDraw && w\.fromSeat >= 0/.test(fx), '自摸不飞(牌本来就在手里, 只金环)');
+    // 2026-10-19: 自摸也走"起点高亮 → 归位", 只是**不飞副本**(真牌一直在场上, 飞就重影)
+    check(/w\.isSelfDraw \|\| w\.fromSeat >= 0/.test(fx), '自摸也要来路锚点(点亮刚摸到的那张)');
+    const tsumoBranch = /if \(w\.isSelfDraw\) \{([\s\S]*?)\} else \{/.exec(fx);
+    check(!!tsumoBranch && !/_flyCopy/.test(tsumoBranch[1]),
+        '自摸分支(if 块内)不飞副本(真牌一直在场上, 飞一张副本就成了两张一样的牌)');
 }
 
 console.log('\n[E] Main 接线');

@@ -3,8 +3,10 @@
 胡牌特效的静态分镜(不进引擎, 只核对构图)
 
 2026-10-18: 全桌压暗 / 「自摸·吃胡」大字宣告 / 摘要行「你 3 番 · +12 分」三拍已删除,
-现在只剩**和牌归位**一拍 —— 副本飞行 → 落位金环 + 闪光 → 交棒结算面板(面板自带遮罩和结论)。
-所以这张图只画亮桌面上的两帧: 飞行中 / 落位。
+现在只剩**和牌归位**一拍 —— 副本飞行 → 落位金环 → 交棒结算面板(面板自带遮罩和结论)。
+所以这张图只画亮桌面上的几帧: 起点高亮 / 飞行中 / 落位。
+2026-10-19: 自摸也走同一段归位 —— 刚摸到的那张先在**手牌里**被金框点亮, 再滑到手牌
+最右的"和牌位"(真牌在滑, 不飞副本: 它一直看得见, 飞一张副本就成了两张一样的牌)。
 
 常量 regex 解析自 HuEffect.ts, 不手抄 —— 改了常量重跑这张图即可对照。
 
@@ -52,10 +54,12 @@ def text_width(text, font):
     return sum(font if ord(ch) >= 0x2e80 else font * 0.5 for ch in text)
 
 
-def frame(flight=None, ghost=True, subdued=False, start_ring=False):
+def frame(flight=None, ghost=True, subdued=False, start_ring=False, tsumo=False):
     """画一帧亮桌面: 毡布 + 象征性牌河/手牌 + (可选的)飞行副本 / 落位金环
 
     flight: 飞行进度 0~1; ghost: 沿途残影; start_ring: 起点(弃牌河那一格)的高亮金框。
+    tsumo: 自摸那一帧 —— 起点改到**手牌行**(刚摸到的那张紧贴着手牌), 终点是手牌最右
+           的和牌位; 滑的是真牌本身, 所以不画残影(画了就成了两张一样的牌)。
     **没有闪光**: 2026-10-18 用户反馈那块实心金色矩形太突兀 —— 强调只留描边金环。
     2026-10-19: 和牌不再"直接塞进赢家手牌" —— 它先留在弃牌河里(start_ring 那一帧),
     高亮后才飞向赢家手牌的空槽。
@@ -75,6 +79,11 @@ def frame(flight=None, ghost=True, subdued=False, start_ring=False):
     # 和牌归位: 副本从牌河末格飞向手牌落位(沿途转正 + 越飞越大)
     start = (w * 0.5 + 330 * scale, h * 0.30)
     end = (w / 2 + 150 * scale, h - 150)
+    if tsumo:
+        # 自摸: 起点 = 手牌里刚摸到的那张(紧贴手牌), 终点 = 手牌最右单列的和牌位
+        start = (w / 2 - 110 * scale, h - 150)
+        end = (w / 2 + 150 * scale, h - 150)
+        ghost = False
     ew, eh = 62 * scale, 82 * scale
     lw = max(2, int((4 if subdued else 6) * scale))
     gold = (C_GOLD[0], C_GOLD[1], C_GOLD[2], 235)
@@ -126,6 +135,10 @@ def main():
         ('%.2fs 落位: 填进赢家手牌那个空槽 + 描边金环 %.2fs(闪光已删) + 留一眼 %.2fs → %.2fs 交棒结算面板'
          % (REVEAL_TAIL + T_LAND, RING_LIFE, T_BEAT, REVEAL_TAIL + T_DONE),
          dict(flight=1.0, ghost=False)),
+        ('自摸: %.2fs 刚摸到的那张在手牌里被金框点亮 → %.2f~%.2fs 真牌自己滑到手牌最右的'
+         '和牌位(不飞副本) → 同一时刻落位金环'
+         % (REVEAL_TAIL, REVEAL_TAIL + T_HL, REVEAL_TAIL + T_LAND),
+         dict(flight=0.55, tsumo=True, start_ring=True)),
     ]
     pad, label_h = 12, 30
     imgs = [(t, frame(**kw)) for t, kw in cases]

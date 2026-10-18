@@ -122,6 +122,11 @@ const SIDE_RIVER_COLS = num(mainCode, /private readonly SIDE_RIVER_COLS\s*=\s*([
 const SIDE_RIVER_GAP = num(mainCode, /private readonly SIDE_RIVER_GAP\s*=\s*([\d.]+)/, 'SIDE_RIVER_GAP');
 /** 满手张数(含刚摸到的那张), 横向最坏情况 */
 const FULL_HAND = 14;
+/**
+ * 胡牌后和牌单列: 与其余手牌拉开的留白 = 牌宽 × 这个比例(2026-10-19)
+ * 自摸归位就是从紧贴位滑到"手牌最右 + 留白"这个和牌位。
+ */
+const WIN_SEP_RATIO = num(mainCode, /_winTileSep\(tileW: number\): number \{\s*\n?\s*return Math\.round\(tileW \* ([\d.]+)\)/, 'WIN_SEP_RATIO');
 /** 副露最坏情况: 4 组 × 4 张 */
 const FULL_MELD = 16;
 
@@ -384,6 +389,22 @@ for (const [name, aspect] of [['16:9', 16 / 9], ['3:2', 3 / 2], ['4:3', 4 / 3]] 
     const sideColH = 13 * sideW;
     check(sideColH / 2 + 20 < halfH,
         `${name} 侧家手牌列半高 ${(sideColH / 2).toFixed(0)} 在可见半高 ${halfH.toFixed(0)} 内`);
+
+    // 8) 胡牌后和牌单列(2026-10-19): 留白往左挤(整排左移 sep/2), 右端不动 ——
+    //    右端仍要让开「你·听」标记, 左端不能出内容左缘
+    const winSep = tileW * WIN_SEP_RATIO;
+    const sideWinSep = sideW * WIN_SEP_RATIO;
+    check(handHalf + HAND_EDGE_GAP <= markInner + 0.01,
+        `${name} 和牌单列后右端 ${handHalf.toFixed(0)} 仍让开「你·听」标记内缘 ${markInner.toFixed(0)}`,
+        `重叠 ${(handHalf + HAND_EDGE_GAP - markInner).toFixed(1)}px`);
+    check(handHalf + winSep <= CONTENT_HALF_W - 12,
+        `${name} 单列左移后左端 ${(-handHalf - winSep).toFixed(0)} 不出内容左缘 ${(-CONTENT_HALF_W + 12).toFixed(0)}`,
+        `超出 ${(handHalf + winSep - CONTENT_HALF_W + 12).toFixed(1)}px`);
+    // 侧家那列是竖的: 单列留白加在纵向, 14 张 + 留白仍要落在可见半高里
+    const sideColFull = FULL_HAND * sideW + sideWinSep;
+    check(sideColFull / 2 + 20 < halfH,
+        `${name} 侧家满手+单列留白 ${sideColFull.toFixed(0)} 在可见区 ${(halfH * 2).toFixed(0)} 内`,
+        `超出 ${(sideColFull / 2 + 20 - halfH).toFixed(1)}px`);
 }
 
 // 4:3 是最"方"的目标屏幕: 牌放大到上限后, 中央转盘仍要拿到满半径(排版不能被挤变形)

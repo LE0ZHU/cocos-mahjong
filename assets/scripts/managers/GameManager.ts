@@ -113,6 +113,21 @@ export interface RonFlight {
     robKan: boolean;
 }
 
+/**
+ * 自摸的"待归位"和牌(2026-10-19)
+ *
+ * 与 `RonFlight` 同一套过渡, 只是**来路不同**: 自摸的牌是自己刚从牌墙摸的,
+ * 它本来就在赢家手里(亮牌阶段已翻开), 规则层不需要搬动任何牌。
+ * UI 要做的只是: 先用金框把"刚摸到的那张"点亮, 再让它滑到手牌最右的**和牌位**
+ * (和吃胡的"牌从河里飞进手牌"节奏完全一致)。
+ */
+export interface TsumoFlight {
+    /** 和的那张(就是刚摸到的那张) */
+    tile: Tile;
+    /** 自摸的座位 */
+    seat: number;
+}
+
 export interface TenpaiInfo {
     /** 当前听的所有牌型(每型一张; HuChecker.isTenpai 口径) */
     waiting: Tile[];
@@ -319,6 +334,14 @@ export class GameManager extends Component {
      */
     ronFlight: RonFlight | null = null;
     /**
+     * 自摸的"待归位"和牌(2026-10-19)
+     *
+     * 规则层**不搬牌**(牌本来就在赢家手里), 这个标记只告诉 UI:
+     * 那张刚摸到的牌先紧贴手牌摆着, 等特效用金框点亮它、再把它滑到手牌最右的
+     * 和牌位。落位后 UI 调 `consumeTsumoFlight()` 收掉标记。
+     */
+    tsumoFlight: TsumoFlight | null = null;
+    /**
      * AI 说了一句话(碰 / 杠): UI 在对应座位上冒一个短气泡
      *
      * 只给"不改变流程"的副露 —— 胡牌与点炮的台词随 `onSettle` 一起给
@@ -407,6 +430,7 @@ export class GameManager extends Component {
         this._playerDrawnTile = null;
         // 上一局的"待归位"标记: 特效可能被中途 abort, 这里兜底清掉
         this.ronFlight = null;
+        this.tsumoFlight = null;
         // 上一局若停在"等待副露选择",一并清掉,避免新局被卡住
         this.cancelPendingMeld();
         this._firePhaseChanged();
@@ -513,6 +537,9 @@ export class GameManager extends Component {
             this._playerDrawnTile = null;
             this._canDiscard = false;
         }
+        // 记下"待归位": 牌本来就在赢家手里, 规则层不搬它 —— UI 只要把刚摸到的那张
+        // 用金框点亮、再滑到手牌最右的和牌位(与吃胡同一段节奏), 落位后收标记
+        this.tsumoFlight = { tile, seat };
         this._finishWithHu([{
             seat,
             hand: [...player.hand],
@@ -892,6 +919,16 @@ export class GameManager extends Component {
      */
     consumeRonFlight(): void {
         this.ronFlight = null;
+    }
+
+    /**
+     * 收掉自摸的"待归位"标记(UI 播完"刚摸到的牌滑到和牌位"之后调用)
+     *
+     * 与 `consumeRonFlight()` 不同, 这里**不改变任何牌的归属**: 牌一直在赢家手里,
+     * 收标记只是告诉 UI 之后的任何重渲染都按最终位置(手牌最右、单列拉开)来。
+     */
+    consumeTsumoFlight(): void {
+        this.tsumoFlight = null;
     }
 
     /**
