@@ -12,7 +12,7 @@ import { Hint, HintAdvisor } from './game/HintAdvisor';
 import { GAME_RULES } from './game/GameRules';
 import { preloadTileImages } from './ui/TileImage';
 import { preloadSounds, playTileVoice, playMeldVoice, playPassVoice, playBgm, playButtonClick, syncAudioSettings } from './audio/Sound';
-import { vibrateHu, vibrateMeld } from './feedback/Haptics';
+import { vibrateMeld } from './feedback/Haptics';
 import {
     ANIM, centerOf, ensureOpacity, flashBurst, flyToSlot, gatherIn, glideTo, popIn, slideIn, stopTweensDeep, toWorld,
 } from './ui/Anim';
@@ -220,8 +220,8 @@ const MELD_MARK_GAP = 24;
 
 /**
  * 胡牌特效的"翻面缓冲": 点胡 → 三家手牌错峰翻面(0.06s/张 + 0.26s 弹入 ≈ 1.1s)
- * **先单独播完**, HuEffect 才接手(压暗/飞牌/大字)。
- * 2026-10-18 用户反馈"动画不要一下子都开始" —— 翻面/压暗/飞行并行会互相抢视线。
+ * **先单独播完**, HuEffect 才接手(只剩"和牌归位": 飞牌 → 落位金环/闪光)。
+ * 2026-10-18 用户反馈"动画不要一下子都开始" —— 翻面/飞行并行会互相抢视线。
  * `onSettle` 用 scheduleOnce 延到这里; 中途重开/返回主页面时 Main 的
  * `unscheduleAllCallbacks()` 会把这个待播的 play 一起取消, 不会残留。
  */
@@ -2602,11 +2602,11 @@ export class Main extends Component {
             if (seat === 0) this._refreshRiichiButton();
         };
         gm.onNotice = (msg) => this._showToast(msg);
-        // onHu 不再接 toast: "谁胡了"由 HuEffect 的大字宣告交代, 顶部小字是重复信息
+        // onHu 不再接 toast: "谁胡了/几番"由结算面板交代, 顶部小字是重复信息
         gm.onReveal = (winnerSeat, msg) => this._onGameEndReveal(winnerSeat, msg);
         gm.onSettle = (data) => {
-            // 震动挪进 HuEffect 的"爆发"拍(大字弹出那一刻), 流局不震;
-            // 结算面板等特效播完再由特效交棒弹出 —— 不再"啪一下糊在脸上"
+            // 特效已删掉压暗/大字/摘要三拍(2026-10-18), 连带原来挂在大字上的胡牌震动
+            // 也一并去掉了; 结算面板等"和牌归位"播完再由特效交棒弹出 —— 不糊在脸上。
             this._onSettle(data);
         };
         // AI 提示: 玩家点"提示"才会回调; 局面一变(出牌/选副露)GM 会给 null 让 UI 收起
@@ -3140,7 +3140,8 @@ export class Main extends Component {
      * - 三家 AI 手牌由牌背改为牌面,重新排版并刷新
      *
      * 2026-10-18: 顶部那行"【谁胡了】四家手牌已亮出"小字删掉了 ——
-     * "谁胡了"由 HuEffect 的大字宣告交代; 翻牌本身加了 0.035s/张 的错峰弹入,
+     * "谁胡了"到最后由结算面板交代(HuEffect 的大字/摘要二拍已于同日删除);
+     * 翻牌本身加了 0.035s/张 的错峰弹入,
      * 不再是同一帧"啪"地全变正面。
      */
     private _onGameEndReveal(winnerSeat: number, message: string): void {

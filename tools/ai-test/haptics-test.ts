@@ -91,14 +91,15 @@ check(/export function vibrateMeld\(\)/.test(haptics) && /export function vibrat
     '对外只有 vibrateMeld / vibrateHu 两个入口(调用点语义自明)');
 
 // ---------------------------------------------------------------- 3
-console.log('\n[3] Main 接线(碰杠震 / 胡牌震 / 流局不震)');
+console.log('\n[3] Main 接线(只剩碰杠震: 胡牌震已随 HuEffect 的大字一拍删除, 2026-10-18)');
 check(/from '\.\/feedback\/Haptics'/.test(main), 'Main 从 ./feedback/Haptics 导入');
 const meldBody = main.slice(main.indexOf('gm.onMeld ='), main.indexOf('gm.onMeld =') + 400);
 check(/meld\.type !== 'chi'/.test(meldBody), 'onMeld 里吃牌被排除(type !== chi)');
 check(/vibrateMeld\(\)/.test(meldBody), 'onMeld 里调 vibrateMeld()');
 const settleBody = main.slice(main.indexOf('gm.onSettle ='), main.indexOf('gm.onSettle =') + 500);
-check(/data\.kind === 'hu'/.test(settleBody), 'onSettle 里按 kind === hu 区分胡牌/流局');
-check(/vibrateHu\(\)/.test(settleBody), 'onSettle 里调 vibrateHu()');
+// 2026-10-18: HuEffect 的全桌压暗 / 大字宣告 / 摘要行三拍删除, 挂在大字上的 vibrateHu() 一起没了
+// (它曾被从"同帧全抖"挪到"大字弹出那一刻", 现在连那一刻都不存在了)
+check(!/vibrat/i.test(settleBody), 'onSettle 里不再有任何震动(胡牌震随大字一拍删除)');
 const huHandler = main.slice(main.indexOf('gm.onHu ='), main.indexOf('gm.onHu =') + 200);
 check(!/vibrat/i.test(huHandler), 'onHu 上**没有**震动(流局也会走 _fireHu, 同硬约束 11b)');
 // 文件与 meta 都在(Cocos 对新增 .ts 要求同目录 meta)

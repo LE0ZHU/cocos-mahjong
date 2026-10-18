@@ -10,7 +10,7 @@
  *  D 不引用牌桌节点: 锚点走 hooks(toWorld/toLocal 换算), 重建打不断特效
  *  E Main 接线: onSettle 先播特效再交棒面板; _clearTable 必须 abort(否则留半黑屏);
  *    onHu 不再接顶部小字
- *  F SettlementPanel 入场: 卡片上滑 + 遮罩淡入, hide() 复位(否则下局从半透明开始)
+ *  F SettlementPanel 入场: 卡片上滑 + 遮罩淡入(压暗归它), hide() 复位(否则下局从半透明开始)
  *  G WinnerResult.fromSeat: 点炮者座位由 GameManager 直接带出(不能从 delta 反推)
  */
 declare const require: (m: string) => any;
@@ -61,78 +61,61 @@ const score = stripComments(fs.readFileSync(findFile('assets/scripts/core/HuScor
 const gm = stripComments(fs.readFileSync(findFile('assets/scripts/managers/GameManager.ts'), 'utf8'));
 const settle = stripComments(fs.readFileSync(findFile('assets/scripts/ui/SettlementPanel.ts'), 'utf8'));
 
-console.log('\n[A] 节奏: 方案二(完全串行 / 零重叠 —— 每拍连余韵都播完才进下一拍)');
+console.log('\n[A] 节奏: 只剩"和牌归位"一拍(压暗/大字/摘要三拍已删除)');
 {
     const tTile = num(fx, 'T_TILE');
-    const tBanner = num(fx, 'T_BANNER');
-    const tSummary = num(fx, 'T_SUMMARY');
     const tDone = num(fx, 'T_DONE');
-    const bannerIn = num(fx, 'T_BANNER_IN');
-    const tDim = num(fx, 'T_DIM');
-    const tDimIn = num(fx, 'T_DIM_IN');
     const tLand = num(fx, 'T_LAND');
     const ringLife = num(fx, 'RING_LIFE');
     const flashDur = num(fx, 'FLASH_DUR');
     const reveal = num(main, 'HU_FX_REVEAL_TAIL');
-    // 零重叠: 每一拍的起点 ≥ 上一拍的终点(允许首尾相接, 不允许跨进)
-    check(tBanner >= tDim + tDimIn - 1e-6,
-        `大字 ${tBanner} ≥ 压暗完成 ${tDim + tDimIn}(零重叠)`);
-    check(tSummary >= tBanner + bannerIn - 1e-6,
-        `摘要 ${tSummary} ≥ 大字完成 ${tBanner + bannerIn}(零重叠)`);
-    check(tDone >= tSummary + 0.34 - 1e-6,
-        `交棒 ${tDone} ≥ 摘要完成 ${tSummary + 0.34}(零重叠)`);
-    // ---- 方案二新增: 金环与闪光都必须在压暗**开始之前**整段播完 ----
-    check(tLand + ringLife <= tDim + 1e-6,
-        `金环 ${tLand}~${(tLand + ringLife).toFixed(2)} 在压暗 ${tDim} 前收束`);
+    // 归位这一段本身仍然要**整段播完**才交棒: 金环 + 闪光都不能被面板盖掉
+    check(tLand + ringLife <= tDone + 1e-6,
+        `金环 ${tLand}~${(tLand + ringLife).toFixed(2)} 在交棒 ${tDone} 前收束`);
     check(/const FLASH_LIFE = FLASH_DUR \+ 0\.05;/.test(fx),
         '闪光寿命算上 flashBurst 内部的 0.05 淡入(不然少算一截)');
     const flashEnd = tLand + flashDur + 0.05;
-    check(flashEnd <= tDim + 1e-6, `闪光 ${tLand}~${flashEnd.toFixed(2)} 在压暗 ${tDim} 前播完`);
-    check(tDim > flashEnd + 1e-6, `闪光收束 → 压暗之间留一眼 ${(tDim - flashEnd).toFixed(2)}s`);
+    check(flashEnd <= tDone + 1e-6, `闪光 ${tLand}~${flashEnd.toFixed(2)} 在交棒 ${tDone} 前播完`);
+    check(tDone > flashEnd + 1e-6, `闪光收束 → 交棒之间留一眼 ${(tDone - flashEnd).toFixed(2)}s`);
     check(ringLife < flashDur, `金环 ${ringLife}s 明显短于闪光 ${flashDur}s(落位后一闪即收)`);
-    // ---- 端到端: 面板必须在点胡起 ≈5.65s 就位(方案二认了这个节奏) ----
-    check(Math.abs(tDone - 4.0) < 1e-6, `特效时长 ${tDone}s(翻面缓冲 ${reveal}s 之前先单独播)`);
-    check(Math.abs(reveal + tDone + 0.5 - 5.65) < 1e-6,
+    // ---- 端到端: 面板在点胡起 ≈3.5s 就位(比删三拍之前的 5.65s 短 2.15s) ----
+    check(Math.abs(tDone - 1.85) < 1e-6, `特效时长 ${tDone}s(翻面缓冲 ${reveal}s 之前先单独播)`);
+    check(Math.abs(reveal + tDone + 0.5 - 3.5) < 1e-6,
         `点胡 → 面板就位 ${(reveal + tDone + 0.5).toFixed(2)}s`);
-    check(Math.abs(reveal + tBanner - 3.6) < 1e-6,
-        `大字在点胡起 ${(reveal + tBanner).toFixed(2)}s(方案一 2.75, 顺延 0.85)`);
-    check(Math.abs(reveal + tSummary - 4.6) < 1e-6,
-        `摘要在点胡起 ${(reveal + tSummary).toFixed(2)}s(方案一 3.75, 顺延 0.85)`);
-    check(Math.abs(reveal + tDone - 5.15) < 1e-6,
-        `交棒在点胡起 ${(reveal + tDone).toFixed(2)}s(方案一 4.30, 顺延 0.85)`);
-    // ---- 收着演 / 流局 两条支线 ----
-    check(Math.abs(num(fx, 'SUB_T_BANNER') - 2.15) < 1e-6, `AI 胡大字 ${num(fx, 'SUB_T_BANNER')}s`);
-    check(Math.abs(num(fx, 'SUB_T_SUMMARY') - 2.95) < 1e-6, `AI 胡摘要 ${num(fx, 'SUB_T_SUMMARY')}s`);
-    check(Math.abs(num(fx, 'SUB_T_DONE') - 3.4) < 1e-6, `AI 胡收着演 ${num(fx, 'SUB_T_DONE')}s`);
-    check(num(fx, 'SUB_T_BANNER') >= tDim + tDimIn - 1e-6, '收着演的大字也等压暗完成(零重叠)');
-    check(num(fx, 'SUB_T_DONE') <= tDone + 1e-6, '收着演不比玩家胡还长');
-    check(Math.abs(num(fx, 'SUB_T_TILE') - 0.7) < 1e-6, `自摸金环 ${num(fx, 'SUB_T_TILE')}s(与落位同时刻)`);
-    // 流局没有飞行/闪光要等, 压暗早开; 但它自己的压暗必须早于自己的大字
-    check(num(fx, 'DRAW_T_DIM') + tDimIn <= num(fx, 'DRAW_T_BANNER') + 1e-6,
-        `流局压暗 ${num(fx, 'DRAW_T_DIM')}~${(num(fx, 'DRAW_T_DIM') + tDimIn).toFixed(2)} 早于大字 ${num(fx, 'DRAW_T_BANNER')}(零重叠)`);
-    check(num(fx, 'DRAW_T_DIM') < tDim, '流局不等飞行/闪光(陪着拖就成纯枯等了)');
-    check(Math.abs(num(fx, 'SUB_SCALE') - 0.72) < 1e-6, `AI 胡大字缩到 ${num(fx, 'SUB_SCALE')} 倍`);
-    check(num(fx, 'DIM_SUB') < num(fx, 'DIM_FULL'), `AI 胡压暗更浅(${num(fx, 'DIM_SUB')} < ${num(fx, 'DIM_FULL')})`);
+    check(Math.abs(reveal + tDone - 3.0) < 1e-6,
+        `交棒在点胡起 ${(reveal + tDone).toFixed(2)}s`);
+    // ---- 支线: 收着演只剩"闪光更短/金环更细"; 流局没有任何东西可播, 立刻交棒 ----
+    check(Math.abs(num(fx, 'DRAW_T_DONE') - 0.15) < 1e-6,
+        `流局 ${num(fx, 'DRAW_T_DONE')}s 就交棒(没有关键牌, 陪着等是纯枯等)`);
+    check(num(fx, 'DRAW_T_DONE') < tDone, '流局不比胡牌还慢');
+    check(num(fx, 'FLASH_SUB_DUR') < flashDur,
+        `AI 胡闪光更短(${num(fx, 'FLASH_SUB_DUR')} < ${flashDur}) —— 收着演`);
     const subdued = fx.includes("!data.winners.some(w => w.seat === 0)");
     check(subdued, '收着演的判定 = 玩家不在赢家之列');
     check(tTile === tLand, '自摸金环与吃胡落位同一时刻(对称)');
 }
 
-console.log('\n[B] 四种大字 + 流局降级');
+console.log('\n[B] 三拍已删除: 没有压暗 / 大字 / 摘要 / 震动');
 {
-    check(fx.includes("'自摸'") && fx.includes("'吃胡'"), '自摸 / 吃胡 两色大字(暖金 / 赤金)');
-    check(fx.includes("'一炮多响'"), '一炮多响单独文案(赢家可能 2~3 家, 只播一次)');
-    check(fx.includes("'流局'"), '流局灰色大字');
+    check(!/'自摸'|'吃胡'|'一炮多响'|'流局'/.test(fx), '源码里不再有任何大字文案(删干净)');
+    check(!/_stamp|_stampMain|_stampSub|_summary|_summaryLabel|StampInfo/.test(fx),
+        '大字/摘要的节点与绘制方法都已删除');
+    check(!/DIM_FULL|DIM_SUB|DIM_DRAW|T_DIM|T_DIM_IN|ensureOpacity\(this\._dim/.test(fx),
+        '全桌压暗(黑幕层与其 tween)已删除');
+    check(!/vibrateHu/.test(fx) && !/vibrateHu/.test(main),
+        '胡牌震动随大字一拍删除(Main 里也不再 import)');
+    check(!/STAMP_|SUMMARY_|textWidth/.test(fx), '大字/摘要的排版常量与量宽函数一并删除');
     // 流局没有关键牌: 整个金环/飞行段都被 data.kind === 'hu' 挡住
-    check(/if \(data\.kind === 'hu'\) \{\s*\n\s*const tRingStill/.test(fx),
+    check(/if \(data\.kind === 'hu'\) \{\s*\n\s*for \(const w of data\.winners\)/.test(fx),
         '流局不做关键牌强调(金环/飞行整段被 kind 判断挡住)');
-    check(/vibrateHu\(\)/.test(fx), '震动挂在大字弹出那一刻');
 }
 
-console.log('\n[C] 不跳过 + 吞点击');
+console.log('\n[C] 不跳过 + 吞点击(背景层只吞事件, 不再画任何东西)');
 {
-    check(/TOUCH_START/.test(fx), '压暗层注册了触摸监听(吞掉点击, 防误点牌桌)');
+    check(/TOUCH_START/.test(fx), '背景层注册了触摸监听(吞掉点击, 防误点牌桌)');
     check(!/skip|跳过/i.test(fx), '没有跳过逻辑(产品决定不加)');
+    check(/blk\.addComponent\(UITransform\)/.test(fx) && !/blk\.addComponent\(Graphics\)/.test(fx),
+        '背景层只有 UITransform 不再挂 Graphics(压暗删了, 它只负责吞点击)');
 }
 
 console.log('\n[D] 不引用牌桌节点 + 和牌归位飞行');
@@ -155,15 +138,13 @@ console.log('\n[D] 不引用牌桌节点 + 和牌归位飞行');
     check(Math.abs(num(fx, 'T_FLY_DUR') - 0.7) < 1e-6, `飞行时长 ${num(fx, 'T_FLY_DUR')}s`);
     check(Math.abs(num(fx, 'T_LAND') - num(fx, 'T_FLY_DUR')) < 1e-6,
         'play 一开始就起飞(亮桌面, 不等压暗)');
-    // 方案二: 压暗等**闪光的余韵**(含 0.05 淡入)播完 + 留一眼才开始
-    check(num(fx, 'T_DIM') >= num(fx, 'T_LAND') + num(fx, 'FLASH_DUR') + 0.05 - 1e-6,
-        `压暗等闪光播完(${num(fx, 'T_DIM')} ≥ 落位 ${num(fx, 'T_LAND')} + 闪光 ${num(fx, 'FLASH_DUR') + 0.05})`);
+    // 交棒等**闪光的余韵**(含 0.05 淡入)播完 + 留一眼才开始
+    check(num(fx, 'T_DONE') >= num(fx, 'T_LAND') + num(fx, 'FLASH_DUR') + 0.05 - 1e-6,
+        `交棒等闪光播完(${num(fx, 'T_DONE')} ≥ 落位 ${num(fx, 'T_LAND')} + 闪光 ${num(fx, 'FLASH_DUR') + 0.05})`);
     check(Math.abs(num(fx, 'RING_LIFE') - 0.3) < 1e-6,
-        '金环寿命压到 0.3s(落位后一闪即收, 不再拖到压暗前一刻 —— 方案二)');
-    check(num(fx, 'RING_LIFE') < num(fx, 'T_DIM') - num(fx, 'T_LAND') + 1e-6,
-        '金环比"到压暗为止"短: 余下的时间是留给闪光的, 不是金环');
+        '金环寿命 0.3s(落位后一闪即收, 比闪光短)');
     check(Math.abs(num(fx, 'T_TILE') - num(fx, 'T_LAND')) < 1e-6,
-        '自摸金环与吃胡落位同一时刻(对称, 闪光同样在压暗前收束)');
+        '自摸金环与吃胡落位同一时刻(对称)');
     // 副本自带金边框 + 起点残影: 无论牌面素材是否加载, "带金边的牌飞过去"都看得清
     const fly = fx.slice(fx.indexOf('private _flyCopy'));
     check(/FlyBorder/.test(fly) && /roundRect\(-bw \/ 2, -bh \/ 2, bw, bh, 14\)/.test(fly),
@@ -187,7 +168,7 @@ console.log('\n[E] Main 接线');
     check(/this\._settlement\?\.show\(data\);\s*\n\s*\}\s*\n\s*\}, HU_FX_REVEAL_TAIL\);/.test(onSettle),
         '特效层缺失时有退路(直接弹面板, 不走延时)');
     check(/_huFx\?\.abort\(\)/.test(main), '_clearTable 里 abort 特效(重开/返回主页面不留半黑屏)');
-    check(!/_showHuToast/.test(main), 'onHu 顶部小字已移除(大字宣告接管)');
+    check(!/_showHuToast/.test(main), 'onHu 顶部小字已移除(结论由结算面板交代)');
     check(/anchorOf: \(seat, tile\) => this\._huFxAnchorOf/.test(main), '锚点回调接的是 Main 的 _huFxAnchorOf');
     check(/originOf: \(winner\) => this\._huFxOriginOf/.test(main), '来路回调接的是 Main 的 _huFxOriginOf');
     const anchorFn = methodBody(main, 'private _huFxAnchorOf');
@@ -222,7 +203,7 @@ console.log('\n[F] 结算面板入场');
     const showBody = methodBody(settle, 'show(data: SettlementData)');
     const hideBody = methodBody(settle, 'hide(): void');
     check(/backOut/.test(showBody) && /- 70/.test(showBody), '卡片从下方 70 上滑(backOut 0.5s)');
-    check(/maskOp\.opacity = 0/.test(showBody), '遮罩淡入(从特效的压暗层平滑交接)');
+    check(/maskOp\.opacity = 0/.test(showBody), '遮罩淡入(压暗现在由面板自己的遮罩负责: 特效已无压暗层)');
     check(/ensureOpacity\(this\._card\)\.opacity = 255/.test(hideBody) && /setPosition\(this\._card\.position\.x, 0, 0\)/.test(hideBody),
         'hide() 复位透明度与位移(下一局不从半透明/偏移开始)');
 }
