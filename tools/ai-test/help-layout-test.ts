@@ -111,11 +111,11 @@ const TOP_BTN_H = num(menuSrc, 'RULES_TOP_BTN_H');
 const VIEW_TOP_GAP = num(menuSrc, 'PAGE_VIEW_TOP_GAP');
 const BAR_MIN_H = num(menuSrc, 'SCROLL_BAR_MIN_H');
 
-/** 从 HELP_SECTIONS 里解析出各段: 标题 / 正文行 / 是否渲染番型表 */
-function parseSections(): { title: string; lines: string[]; fanTable: boolean }[] {
-    const start = menuSrc.indexOf('export const HELP_SECTIONS');
+/** 从某个玩法说明段落数组里解析出各段: 标题 / 正文行 / 是否渲染番型表 */
+function parseSections(constName: string): { title: string; lines: string[]; fanTable: boolean }[] {
+    const start = menuSrc.indexOf(`export const ${constName}`);
     const end = menuSrc.indexOf('\n];', start);
-    if (start < 0 || end < 0) throw new Error('解析不到 HELP_SECTIONS');
+    if (start < 0 || end < 0) throw new Error(`解析不到 ${constName}`);
     const body = menuSrc.slice(start, end);
     const out: { title: string; lines: string[]; fanTable: boolean }[] = [];
     let cur: { title: string; lines: string[]; fanTable: boolean } | null = null;
@@ -135,7 +135,9 @@ function parseSections(): { title: string; lines: string[]; fanTable: boolean }[
     return out;
 }
 
-const SECTIONS = parseSections();
+/** 玩法说明按玩法拆成两组: 麻将(带番型表) / 抽牌 */
+const MAHJONG_SECTIONS = parseSections('HELP_SECTIONS_MAHJONG');
+const DRAW_SECTIONS = parseSections('HELP_SECTIONS_DRAW');
 /** 番型表的行: FAN_DEFS + 连庄那一行(与 MenuUI.buildFanRows 一致) */
 const FAN_ROWS = [
     ...FAN_DEFS.map(d => ({ name: d.name, fanText: `${d.fan} 番`, desc: d.desc })),
@@ -145,47 +147,64 @@ const FAN_ROWS = [
 // ================================================================ 1
 console.log('\n[1] 版式: 各段不重叠 + 滚动量合理 + 首段完整可见');
 {
-    check(SECTIONS.length >= 4, `内容分成 ${SECTIONS.length} 段(操作/胡牌/番型/计分/常驻信息)`);
-    check(SECTIONS.filter(s => s.fanTable).length === 1, '恰好一段渲染番型表');
-    for (const s of SECTIONS) {
-        check(s.title.length > 0 && s.lines.length > 0, `"${s.title}" 段有标题与正文`);
+    /** 复刻 _fillHelpPage 的游标 —— 内容是**局部坐标**: 0 = 内容顶边, 往下为负 */
+    function layout(sections: { title: string; lines: string[]; fanTable: boolean }[]) {
+        let y = -PAD_TOP;
+        const segs: { name: string; top: number; bottom: number }[] = [];
+        const perCol = Math.ceil(FAN_ROWS.length / 2);
+        for (const s of sections) {
+            const capTop = y;
+            const capBottom = y - CAP_H;
+            y = capBottom - CAP_GAP;
+            for (let i = 0; i < s.lines.length; i++) y -= LINE_H;
+            if (s.fanTable) {
+                y -= perCol * FAN_ROW_H;
+                check(perCol * 2 >= FAN_ROWS.length, `番型表 ${FAN_ROWS.length} 行 → 每列 ${perCol} 行放得下`);
+            }
+            segs.push({ name: s.title, top: capTop, bottom: y });
+            y -= SEC_GAP;
+        }
+        return { segs, contentH: -(y + SEC_GAP) + PAD_BOTTOM };
     }
 
-    // 复刻 _buildHelpPage 的游标 —— 内容是**局部坐标**: 0 = 内容顶边, 往下为负
-    // (滚动页的坐标系, 与设置规则页共用 _createScrollPage)
-    let y = -PAD_TOP;
-    const segs: { name: string; top: number; bottom: number }[] = [];
-    const perCol = Math.ceil(FAN_ROWS.length / 2);
-    for (const s of SECTIONS) {
-        const capTop = y;
-        const capBottom = y - CAP_H;
-        y = capBottom - CAP_GAP;
-        for (let i = 0; i < s.lines.length; i++) y -= LINE_H;
-        if (s.fanTable) {
-            y -= perCol * FAN_ROW_H;
-            check(perCol * 2 >= FAN_ROWS.length, `番型表 ${FAN_ROWS.length} 行 → 每列 ${perCol} 行放得下`);
-        }
-        segs.push({ name: s.title, top: capTop, bottom: y });
-        y -= SEC_GAP;
-    }
-    const contentH = -(y + SEC_GAP) + PAD_BOTTOM;
     const viewTop = TOP_Y - TOP_BTN_H / 2 - VIEW_TOP_GAP;
     const viewBottom = -MENU_H / 2 + 8;
     const viewH = viewTop - viewBottom;
 
-    console.log(`  内容高 ${contentH.toFixed(0)} / 视口高 ${viewH.toFixed(0)} → 可滚 ${(contentH - viewH).toFixed(0)}px`);
-    check(contentH > viewH, `内容比视口高 → 真的能滚(字号加大后的代价, 换取可读性)`);
-    check(contentH - viewH >= 80, `滚动量 ${(contentH - viewH).toFixed(0)}px ≥ 80(值得给滚动条)`);
-    check(contentH - viewH <= MENU_H * 0.6, `滚动量 ${(contentH - viewH).toFixed(0)}px 不至于长到"翻半天"`);
-    check(segs[0].top <= 0, `首段标题上沿 ${segs[0].top.toFixed(0)} ≤ 0(不被 Mask 裁掉)`);
-    check(segs[0].top > -14, `首段离视口顶很近(${segs[0].top.toFixed(0)} > -14)`);
-    const lastBottom = segs[segs.length - 1].bottom;
-    check(-lastBottom + PAD_BOTTOM <= contentH + 0.01, `内容底部留白够(末段底边 ${lastBottom.toFixed(0)} + ${PAD_BOTTOM} ≤ 内容高 ${contentH.toFixed(0)})`);
-    check(Math.abs(contentH - (-lastBottom + PAD_BOTTOM)) < 0.01, '内容高 = 末段底边 + 底部留白');
+    // ---- 两组数据各自的基本形状 ----
+    check(MAHJONG_SECTIONS.length >= 4, `麻将组分成 ${MAHJONG_SECTIONS.length} 段(操作/胡牌/番型/计分/常驻信息)`);
+    check(DRAW_SECTIONS.length >= 2, `抽牌组分成 ${DRAW_SECTIONS.length} 段(玩法/计分与牌桌)`);
+    check(MAHJONG_SECTIONS.filter(s => s.fanTable).length === 1, '麻将组恰好一段渲染番型表');
+    check(DRAW_SECTIONS.filter(s => s.fanTable).length === 0, '抽牌组不渲染番型表(番型是麻将的概念)');
+    for (const s of [...MAHJONG_SECTIONS, ...DRAW_SECTIONS]) {
+        check(s.title.length > 0 && s.lines.length > 0, `"${s.title}" 段有标题与正文`);
+        check(/^(麻将|抽牌) · /.test(s.title), `段标题标明玩法归属: "${s.title}"`);
+    }
 
-    for (let i = 0; i < segs.length - 1; i++) {
-        const gap = segs[i].bottom - segs[i + 1].top;
-        check(gap === SEC_GAP && gap > 0, `"${segs[i].name}" → "${segs[i + 1].name}" 间距 ${gap} == SEC_GAP`);
+    // ---- 麻将组: 内容比视口高(滚动换可读性), 但滚动量别长到"翻半天" ----
+    const mj = layout(MAHJONG_SECTIONS);
+    console.log(`  [麻将] 内容高 ${mj.contentH.toFixed(0)} / 视口高 ${viewH.toFixed(0)} → 可滚 ${(mj.contentH - viewH).toFixed(0)}px`);
+    check(mj.contentH > viewH, `[麻将] 内容比视口高 → 真的能滚(字号加大后的代价, 换取可读性)`);
+    check(mj.contentH - viewH >= 80, `[麻将] 滚动量 ${(mj.contentH - viewH).toFixed(0)}px ≥ 80(值得给滚动条)`);
+    check(mj.contentH - viewH <= MENU_H * 0.6, `[麻将] 滚动量 ${(mj.contentH - viewH).toFixed(0)}px 不至于长到"翻半天"`);
+    check(mj.segs[0].top <= 0, `[麻将] 首段标题上沿 ${mj.segs[0].top.toFixed(0)} ≤ 0(不被 Mask 裁掉)`);
+    check(mj.segs[0].top > -14, `[麻将] 首段离视口顶很近(${mj.segs[0].top.toFixed(0)} > -14)`);
+
+    // ---- 抽牌组: 内容少, 一屏放下(不该让玩家为几行字滚动) ----
+    const dw = layout(DRAW_SECTIONS);
+    console.log(`  [抽牌] 内容高 ${dw.contentH.toFixed(0)} / 视口高 ${viewH.toFixed(0)}`);
+    check(dw.contentH <= viewH, `[抽牌] 内容一屏放下(${dw.contentH.toFixed(0)} ≤ ${viewH.toFixed(0)}), 不用滚`);
+    check(dw.segs[0].top <= 0, `[抽牌] 首段标题上沿 ${dw.segs[0].top.toFixed(0)} ≤ 0`);
+
+    // ---- 两组共用的排版校验 ----
+    for (const [label, r] of [['麻将', mj], ['抽牌', dw]] as const) {
+        const lastBottom = r.segs[r.segs.length - 1].bottom;
+        check(-lastBottom + PAD_BOTTOM <= r.contentH + 0.01, `[${label}] 内容底部留白够`);
+        check(Math.abs(r.contentH - (-lastBottom + PAD_BOTTOM)) < 0.01, `[${label}] 内容高 = 末段底边 + 底部留白`);
+        for (let i = 0; i < r.segs.length - 1; i++) {
+            const gap = r.segs[i].bottom - r.segs[i + 1].top;
+            check(gap === SEC_GAP && gap > 0, `[${label}] "${r.segs[i].name}" → "${r.segs[i + 1].name}" 间距 ${gap} == SEC_GAP`);
+        }
     }
 
     // 字号下限: 这一页就是"给新玩家读的", 不许再缩回去
@@ -197,7 +216,7 @@ console.log('\n[1] 版式: 各段不重叠 + 滚动量合理 + 首段完整可�
 
     // 正文行的文字框: 每行都要放得下(超宽说明该拆行, 不能被 SHRINK 压小)
     let longest = 0;
-    for (const s of SECTIONS) {
+    for (const s of [...MAHJONG_SECTIONS, ...DRAW_SECTIONS]) {
         for (const line of s.lines) {
             const need = textWidth(line, LINE_FONT) + 8;
             longest = Math.max(longest, need);
@@ -363,6 +382,29 @@ console.log('\n[4] 接线: 主菜单入口 / 页面切换 / 原生补画 / 摘�
     const barX = CONTENT_W / 2 - num(menuSrc, 'SCROLL_BAR_RIGHT');
     check(barX - num(menuSrc, 'SCROLL_BAR_W') / 2 > 0, `滚动条在视口右半边(x=${barX})`);
 
+    // ---- 玩法分页(2026-10-18: 「麻将 / 抽牌」标签, 切换重建滚动内容) ----
+    check(/_helpMode: 'mahjong' \| 'draw'/.test(menu), '说明页有当前玩法字段');
+    check(/_setHelpMode\(mode: 'mahjong' \| 'draw'\)/.test(menu), '有 _setHelpMode 切换方法');
+    check(/_fillHelpContent\(\): void/.test(menu), '有 _fillHelpContent 按玩法重建滚动内容');
+    check(/this\._helpMode === 'draw' \? HELP_SECTIONS_DRAW : HELP_SECTIONS_MAHJONG/.test(menu),
+        '内容填充按玩法选数据(两组各归各)');
+    check(/bindSafeClick\(this\._helpTabDraw, \(\) => this\._setHelpMode\('draw'\)/.test(menu),
+        '「抽牌」标签接上切换');
+    check(/bindSafeClick\(this\._helpTabMahjong, \(\) => this\._setHelpMode\('mahjong'\)/.test(menu),
+        '「麻将」标签接上切换');
+    check(/restyleButton\(btn, selected \? BTN_PRIMARY : LINE_GHOST,/.test(menu),
+        '标签选中态用实心/描边区分(与主菜单模式按钮同一套语言)');
+    check(/sp\.sv\.scrollToTop\(0\)/.test(menu), '切换玩法后回到内容顶部');
+    // 标签尺寸常量 + 位置: 右缘不越界、两枚不撞车、不压居中标题
+    const tabW = num(menuSrc, 'HELP_TAB_W');
+    const tabH = num(menuSrc, 'HELP_TAB_H');
+    const tabGap = num(menuSrc, 'HELP_TAB_GAP');
+    const tabEdge = num(menuSrc, 'HELP_TAB_EDGE');
+    const tab1X = MENU_W / 2 - tabEdge - tabW / 2;
+    check(tab1X + tabW / 2 <= MENU_W / 2, `标签右缘 ${tab1X + tabW / 2} ≤ 内容右缘 ${MENU_W / 2}`);
+    check(tab1X - tabW - tabGap - tabW / 2 > 300, `标签不压居中标题(左标签左缘 ${tab1X - tabW - tabGap - tabW / 2} > 300)`);
+    check(tabH >= 28 + 16, `标签高 ${tabH} 装得下 28 号字(字号 + 上下呼吸位)`);
+
     // 主菜单: 两个次按钮并排而不是各占一行(纵向不进位)
     check(/const secBtnW = (\d+)/.test(menu) && /const secBtnGap = (\d+)/.test(menu), '次按钮尺寸有具名常量');
     const secW = Number(/const secBtnW = (\d+)/.exec(menu)![1]);
@@ -375,7 +417,24 @@ console.log('\n[4] 接线: 主菜单入口 / 页面切换 / 原生补画 / 摘�
         `按钮宽 ${secW} 放得下 4 个字`);
     check(rulesPos![1] === helpPos![1], '两个次按钮同一行');
     const rowY = Number(rulesPos![1]);
+
+    // 主菜单模式区: "麻将"(主模式) 在上, "抽牌" 在下, 两个按钮同款实心胶囊;
+    // 次按钮行(设置规则|玩法说明)排在抽牌之下
+    check(/createButtonNode\('麻将'/.test(menu), '主菜单确实有“麻将”按钮');
+    check(/createButtonNode\('抽牌'/.test(menu), '主菜单确实有“抽牌”按钮');
+    check(/const modeW = (\d+)/.test(menu) && /const modeH = (\d+)/.test(menu), '模式按钮尺寸有具名常量');
+    const modeW = Number(/const modeW = (\d+)/.exec(menu)![1]);
+    const modeH = Number(/const modeH = (\d+)/.exec(menu)![1]);
+    check(/createButtonNode\('抽牌', modeW, modeH, BTN_PRIMARY, MENU_BTN_STYLE\)/.test(menu),
+        '“抽牌”与“麻将”同款样式(实心琥珀胶囊)');
+    check(modeW >= textWidth('麻将', 36) + 16 && modeW >= textWidth('抽牌', 36) + 16,
+        `模式按钮宽 ${modeW} 放得下 2 个字`);
+    check(modeW <= MENU_W, `模式按钮宽 ${modeW} ≤ ${MENU_W}`);
     const startY = Number(/startBtn\.setPosition\(0, (-?\d+), 0\)/.exec(menu)![1]);
+    const drawY = Number(/drawBtn\.setPosition\(0, (-?\d+), 0\)/.exec(menu)![1]);
+    check(startY > drawY, `麻将(主模式)排在抽牌之上(${startY} > ${drawY})`);
+    check(startY - drawY >= modeH + 8, `麻将与抽牌不撞车(gap=${startY - drawY})`);
+    check(drawY - rowY >= modeH / 2 + 41 + 8, `抽牌与次按钮行不撞车(gap=${drawY - rowY})`);
     const sumY = Number(/summary\.setPosition\(0, (-?\d+), 0\)/.exec(menu)![1]);
     const tipY = Number(/tip\.setPosition\(0, (-?\d+), 0\)/.exec(menu)![1]);
     check(startY > rowY && rowY > sumY && sumY > tipY, `主菜单纵向顺序正确(${startY} > ${rowY} > ${sumY} > ${tipY})`);

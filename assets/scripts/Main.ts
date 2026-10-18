@@ -3,6 +3,7 @@ import { GameManager, GamePhase, MeldPromptItem, MeldPromptRequest, seatLabel, T
 import { createTileNode, createTileBackNode, createLabelNode, createButtonNode, createIconButton, repaintButtons, registerButtonPainter, setTileBgColor, applyDesignResolution, BTN_COLOR_GREY, ButtonStyle, bindSafeClick } from './ui/UIFactory';
 import { TileView, tileRadius } from './ui/TileView';
 import { MenuUI } from './ui/MenuUI';
+import { DrawModeUI } from './ui/DrawModeUI';
 import { SettlementPanel } from './ui/SettlementPanel';
 import { HintPanel } from './ui/HintPanel';
 import { SettingsPanel } from './ui/SettingsPanel';
@@ -21,8 +22,8 @@ import { SettlementData } from './core/HuScore';
 
 const { ccclass } = _decorator;
 
-/** 场景状态: 主页面 / 规则设置 / 对局中 */
-enum SceneState { HOME, RULES, PLAYING }
+/** 场景状态: 主页面 / 规则设置 / 经典对局 / 抽牌模式 */
+enum SceneState { HOME, RULES, PLAYING, DRAW }
 
 /** 吃/碰选择按钮尺寸与间距(按钮自带 3D 底框,不再套外层黑底) */
 const MELD_BTN_H = 52;
@@ -355,6 +356,14 @@ export class Main extends Component {
     private _sceneState: SceneState = SceneState.HOME;
     /** 主页面与设置页面 */
     private _menu: MenuUI | null = null;
+    /**
+     * 抽牌模式的根节点与组件
+     *
+     * 与牌桌(_gameRoot)互斥显示: 抽牌是另一套玩法(明牌阵 + 抽对子),
+     * 独立成根节点后, 经典对局那条链路(牌桌/发牌/回合)完全不受影响。
+     */
+    private _drawRoot: Node | null = null;
+    private _drawMode: DrawModeUI | null = null;
     /** 牌面图片是否已预加载完成 */
     private _tileImagesReady = false;
     /**
@@ -554,6 +563,8 @@ export class Main extends Component {
         // 先建菜单(它会作为最后一个子节点置顶),再建牌桌
         this._buildMenu();
         this._buildUI();
+        // 抽牌模式根节点: 与牌桌一样按宽度铺满缩放, 故和 _buildUI 并列创建
+        this._buildDrawMode();
         this._registerEvents();
         this._applyAdaptation();
         // 开局先进主页面,由"开始游戏"进入对局
@@ -662,13 +673,29 @@ export class Main extends Component {
         menuNode.parent = this.node;
         this._menu = menuNode.addComponent(MenuUI);
         this._menu.onStart = () => this._startGameFromMenu();
+        this._menu.onDrawMode = () => this._startDrawModeFromMenu();
     }
 
-    /** 切换场景显示: 主页面 / 规则设置 / 对局中 */
+    /** 创建抽牌模式的根节点与组件(默认隐藏, 与牌桌互斥显示) */
+    private _buildDrawMode(): void {
+        const root = new Node('DrawRoot');
+        root.parent = this.node;
+        // 与牌桌同款的大点击区(内容根统一按宽度铺满缩放, 见 _applyAdaptation)
+        root.addComponent(UITransform).setContentSize(6000, 6000);
+        root.active = false;
+        this._drawRoot = root;
+        const ui = root.addComponent(DrawModeUI);
+        ui.onExit = () => this._backToMenuFromDraw();
+        ui.onRestart = () => this._drawMode?.newRound();
+        this._drawMode = ui;
+    }
+
+    /** 切换场景显示: 主页面 / 规则设置 / 经典对局 / 抽牌模式 */
     private _showScene(state: SceneState): void {
         this._sceneState = state;
         const playing = state === SceneState.PLAYING;
-        if (playing) {
+        const drawing = state === SceneState.DRAW;
+        if (playing || drawing) {
             this._menu?.hide();
         } else if (state === SceneState.RULES) {
             this._menu?.showRules();
@@ -676,6 +703,7 @@ export class Main extends Component {
             this._menu?.showHome();
         }
         if (this._gameRoot) this._gameRoot.active = playing;
+        if (this._drawRoot) this._drawRoot.active = drawing;
         if (playing) {
             // 原生平台: 牌桌/转盘/牌墙是**一次性静态 Graphics**,只在首帧后画过一次。
             // 返回主页面会把 _gameRoot 整个隐藏,再开局时这些顶点的渲染数据已丢
@@ -685,8 +713,13 @@ export class Main extends Component {
             // 牌桌被隐藏过之后,表上的按钮只剩文字,开局时补画
             repaintButtons(this._gameRoot);
         }
-        // 节点顺序决定渲染层级: 先牌桌后菜单,菜单始终在最上层
+        if (drawing) {
+            // 同理: 抽牌模式里的按钮底框也经不起"隐藏过再显示", 进来时补画一次
+            this._drawMode?.onShow();
+        }
+        // 节点顺序决定渲染层级: 先牌桌/抽牌区,菜单始终在最上层
         this._bringToFront(this._gameRoot);
+        this._bringToFront(this._drawRoot);
         this._bringToFront(this._menu?.node ?? null);
     }
 
@@ -716,7 +749,30 @@ export class Main extends Component {
         }
     }
 
-    // ==================== 发牌动画 ====================
+    /**
+     * 主菜单"抽牌": 立刻进页面开局, 不等牌面预加载
+     *
+     * 【为什么不等】原先和经典对局一样"等 `_tileImagesReady` 才好开局", 于是点了按钮
+     * 要卡一下才换页。抽牌这边改成**先换页 + 先开局**(摆牌动画本来就有一秒),
+     * 图片若还在路上就先按矢量兜底, 加载完成后由 DrawModeUI 就地重刷一次牌面。
+     */
+    private _startDrawModeFromMenu(): void {
+        this._showScene(SceneState.DRAW);
+        playBgm();
+        this._drawMode?.newRound();
+        if (!this._tileImagesReady) {
+            preloadTileImages(() => {
+                this._tileImagesReady = true;
+                this._drawMode?.refreshFaces();
+            });
+        }
+    }
+
+    /** 抽牌模式"返回主页面": 撤销排队中的回调, 收起牌阵回主菜单 */
+    private _backToMenuFromDraw(): void {
+        this._drawMode?.abort();
+        this._showScene(SceneState.HOME);
+    }
 
     /**
      * 开局发牌(带动画)
@@ -1009,9 +1065,13 @@ export class Main extends Component {
         if (!this._gameRoot) return;
         const scale = design.width / this.CONTENT_W;
         this._gameRoot.setScale(scale, scale, 1);
+        // 抽牌模式与牌桌同一套坐标系(内容横向恒为 ±840), 用同一个缩放比
+        this._drawRoot?.setScale(scale, scale, 1);
 
         // 可见区在内容坐标系中的半高 = 设计半高 / 缩放比
-        this._applyLayout((design.height / 2) / scale);
+        const halfH = (design.height / 2) / scale;
+        this._applyLayout(halfH);
+        this._drawMode?.applyLayout(halfH);
     }
 
     /**

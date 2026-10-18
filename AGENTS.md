@@ -447,8 +447,12 @@ node temp/infovis/tools/ai-test/info-visibility-test.js
 （测试会扫 `fan:` 后面有没有数字或 `FAN_*` 常量），README 的番型表也被同一脚本逐条核对。
 连庄番数随次数变化，不进表，用导出的 `STREAK_FAN_MAX`。
 
-说明页文案在 `MenuUI.HELP_SECTIONS`（纯数据：段落 / 正文行 / 是否带番型表），
-版式只按行数往下排；`tools/preview-menu.py` **解析这份数组 + 设置页的选项组**出图 ——
+说明页文案按玩法分成两组：`MenuUI.HELP_SECTIONS_MAHJONG`（5 段，含番型表）与
+`MenuUI.HELP_SECTIONS_DRAW`（抽牌 2 段，**不渲染番型表**——番型是麻将的概念）。
+页面顶部有「麻将 / 抽牌」两个标签（选中实心 `restyleButton`、未选描边），
+切换走 `_setHelpMode` → `_fillHelpContent()` **整页重建滚动内容并回顶**；
+版式只按行数往下排。`tools/preview-menu.py` **解析这两组数组 + 设置页的选项组**出图
+（说明页分别出麻将版 `help-preview.png` 与抽牌版 `help-preview-draw.png`）——
 预览里的文字与真机一致（手抄一份到预览里必然漂移）。
 
 ```bash
@@ -564,6 +568,96 @@ node temp/career/tools/ai-test/career-persona-test.js
   排队的回调得逐个 `unschedule` 才清得干净；用"剩余秒数"跟着 `update` 走，
   `_clearTable()` 里把 `_aiBubbleHold` / `_aiBubbleFade` 归零就结束了
   （这两个字段已加进 `state-cleanup-test` 的 A 组字段表）。
+
+### 6l. 抽牌模式（DrawModeUI）：分帧建牌、两侧收牌列
+
+136 张牌每个都带 Graphics/Sprite/Label/触摸事件 —— **同一帧建完或销毁完都会卡主线程**
+（"从主菜单点抽牌先顿一会儿"、"重开顿一下才有摆牌动画"都是它）。两条铁律：
+
+- **建牌分帧**：`_buildTiles()` 每帧建 `BUILD_BATCH`(18) 张，动画延迟仍按格位索引排
+  （观感与一次性建完一致）；回合交接**不再按定值 INTRO_TOTAL**，由最后一块 chunk 按
+  "最后一张落地"排 `_beginTurn`。代次号 `_buildSeq` 保证期间再次重建/被 abort 打断时
+  旧 chunk 的排队回调作废（`unscheduleAllCallbacks` 只清得掉排队，清不掉逻辑标记）。
+- **销毁也分帧**：`_clearGrid()` 先整批淡出 `CLEAR_FADE`(0.15s) 再每帧销毁
+  `CLEAR_BATCH`(28) 张 —— 与新一局的摆牌动画交叠成自然过渡。排队中的销毁被打断时
+  残留旧牌透明度为 0，下一次 `_clearGrid` 的快照仍会兜住它们。
+
+**两个真机踩过的坑（2026-10-18）**：
+
+- **分帧回调不许用同一闭包自我递归 `scheduleOnce(step, 0)`**。引擎 Scheduler 对
+  "同一 target + 同一回调引用"会**去重**（只 `setInterval` 后 return，不建新定时器），
+  而一次性定时器(repeat=0)触发完就自我移除 —— 于是第 2 帧的排程被吞、链条死在
+  第 2 批，真机上就是"摆了两排零两个(恰好 2×18 张)卡住"。必须每帧包新箭头
+  `scheduleOnce(() => step(), 0)`（Main 的发牌链每帧新建箭头所以从来没事）。
+  断言在 `draw-mode-test.ts` 第 1 组。
+- **开局方法不能叫 `start()`** —— 那是 Cocos 组件生命周期回调名，组件首次启用时
+  引擎自动调一次，等于"进页面"无声开了两局（双倍建牌卡顿），且那一遍里的
+  `unscheduleAllCallbacks` 会误伤排队的分帧回调。对外统一叫 `newRound()`。
+
+**平板牌幅**（2026-10-18 加）：`TILE_W_MAX`(56) 是**手机 16:9 的基准宽、不是绝对上限** ——
+平板可见半高 560~630 远大于 472，按 56 建牌时 17×8 的牌阵只占屏幕中间一小块、比手机还小。
+现在按 `tileK = clamp(halfH / TILE_REF_HALF_H(472.5), 1, TILE_SCALE_MAX(1.3))` 放大牌宽
+（与麻将桌 `_applyTileScale` 同一口径）：3:2 → 66、4:3 → 73（手机仍 56，21:9 仍受纵向限）。
+倍率上限 1.3 的来历是**侧栏容量**：牌阵变宽会把"牌库 → 内容边缘"的净空从 286 压到 143，
+4:3 上刚好还能摆 3 列收牌（17×3=51 ≥ 34）；到 1.4 就只剩 2 列 × 17 行、容量卡死在 34 没余量。
+改 `TILE_SCALE_MAX` / `GRID_TOP_OFFSET` 后重跑
+`draw-mode-test.ts` 第 2 组（含"平板牌宽 ≥ 手机 1.15 倍""牌阵底边不出屏"）。
+
+**两侧收牌列**（2026-10-18 加）：抽到的牌分列牌桌两侧 —— 电脑在左(seat 1)、玩家在右
+(seat 0)，每组只记一张代表牌（`DrawGame._collected` 规则层就是单张入队），按
+**点数**（`tilePoint`：字牌 10、数牌按面值）**从大到小**排，**不区分花色** ——
+同点数的 9 萬 / 9 条 / 9 筒混排、保持抽到先后（`sort` 稳定 + 插入式同理）；
+⚠️ **不要用 `Tile.sortKey`**（那是麻将理牌键，含花色权重，排出来会按花色分组）。
+新牌从被抽走的格位飞向本方侧栏（`COLLECT_FLY`），
+插入点之后的牌平滑让位（`COLLECT_SHIFT`）。
+
+**收牌尺寸 = 牌库牌宽**（`_fitSideW`，2026-10-18 第三次反馈）：上限就是
+`round(this._tileW)`，从它往下逐个试"列数 × 行数 ≥ `SIDE_MAX`(34)"，取第一个装得下的值。
+手机 16:9 / 超宽 / 竖屏恰好等于牌库牌宽（用户原话"已经能区分了，不会分不清"）；
+平板侧栏净空只有 130~190px、装不下 34 张同尺寸的牌，退到能装下的最大值（3:2 → 52、4:3 → 42）。
+⚠️ **34 张是常态不是极端值**：500 局实测每一局都是 34:34 收满（牌库总能抽完），
+所以容量必须保，不能为了放大而放宽 `SIDE_MAX`。
+
+**面板按容量收缩**：`panelW = 2·SIDE_INNER_PAD + usedCols·sideW + 间距`，
+`panelBottom = 最底一张牌 − SIDE_INNER_PAD`（`SIDE_PANEL_BOTTOM_MIN` 兜底）。
+这样**满局时四边留白都等于 `SIDE_INNER_PAD`**（22）—— 之前标签占一行导致顶部留白是侧边的两倍。
+归属标签浮在面板**上方**（`SIDE_TAG_GAP`），不占面板内部空间。
+⚠️ 面板节点必须先于 `_sideRoots` 创建（渲染层级更低），`_repaintSideChrome()`
+在 onShow + applyLayout 补画（隐藏期 Graphics 丢）。
+几何断言在 `tools/ai-test/draw-mode-test.ts` 第 2 组；出图 `python tools/preview-draw.py`。
+
+**顶部信息区两行 + 状态胶囊**（2026-10-18 第三次反馈）：第 1 行左「返回主页面 / 重新开始」、
+右三枚信息芯片（`_layoutChips` 右对齐，`CHIP_EDGE_PAD`）；第 2 行状态胶囊
+（`STATUS_*`，圆角底 + 左侧语气圆点，`_setStatus(text, tone)` 的 tone 决定文字/圆点颜色）。
+原来三行（按钮 / 芯片 / 一行裸文字），又挤又难看；两行版式省下的高度给了收牌面板。
+文案改写得更短（「轮到你 · 点两张相同的牌」「已选 五萬 · 再点一张相同的」），
+⚠️ 改 HUD 常量后要复核：状态行让开芯片行（`HUD_STATUS_DY ≥ HUD_ROW_DY + CHIP_H/2 + STATUS_H/2`）、
+标签行让开状态胶囊（`SIDE_TOP_GAP ≥ HUD_STATUS_DY + STATUS_H/2`）。
+
+**开局"谁先抽"的宣告**（2026-10-18 加）：先手是随机的（`DrawGame` 构造函数
+`Math.random() < 0.5`），原来只在状态条闪一行小字，电脑先手时 0.75s 就开抽、玩家看不清。
+现在 `_beginTurn()` 先调 `_showAnnounce()`：居中大字胶囊（先手一方配色，
+`ANNOUNCE_FONT`(64) + `backOut` 弹出）+ `_pulseSide(seat)` 让**先手一侧的面板与归属标题
+闪两下**（用 `UIOpacity` 变暗再亮回，不碰 Graphics → 原生平台安全），停留
+`ANNOUNCE_HOLD`(1.0s) 后淡出，合计 `IN+HOLD+OUT+GAP ≈ 1.6s` 才把回合交出去；
+期间 `_locked = true` 不接受点击。⚠️ `newRound()` 与 `abort()` 都必须调
+`_hideAnnounce()`：中途退出时不给面板复位透明度，会留下一个半透明的侧栏。
+收牌列的重建/清空都接好了：新局 `newRound()` 清空、`applyLayout` 尺寸变化就地重建、
+只是可见高度变化则平移到位。**侧栏是一整块面板，不是"几条线 + 一列牌"**（2026-10-18
+二次反馈：先做过一条 2px 半透明竖线 + 小胶囊，深绿毡布上几乎看不见）：
+`_sidePanels` 从顶部信息区下方铺到屏底（`SIDE_PANEL_*`，半透明黑绿底 + 金边），
+归属标签作为**面板标题**嵌在顶部（左"电脑抽的"冷蓝 / 右"你抽的"暖金，
+`_makeSideTag(text, ai)`），首行牌从标签下方开始（`SIDE_TAG_H` + `SIDE_TAG_GAP`）。
+⚠️ 面板节点**必须先于 `_sideRoots` 创建**（渲染层级更低），否则会盖住收牌；
+`_repaintSideChrome()` 在 onShow + applyLayout 补画面板与标签（隐藏期 Graphics 丢）。
+隔离带：牌阵边缘 →`SIDE_PAD`→ 面板内缘 →`SIDE_INNER_PAD`→ 首列牌。
+出图核对：`python tools/preview-draw.py`（16:9 + 4:3 并排，常量从源码 regex 解析）。测试：
+
+```bash
+node "$TSC" --target ES2020 --module commonjs --strict false --skipLibCheck \
+     --outDir temp/d tools/ai-test/draw-mode-test.ts
+node temp/d/tools/ai-test/draw-mode-test.js
+```
 
 ### 7. 牌对象是引用，不是拷贝
 

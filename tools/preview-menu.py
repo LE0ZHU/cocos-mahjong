@@ -88,8 +88,9 @@ def joined_str(name):
     return ''.join(parts).replace('\\n', '\n')
 
 
-def parse_sections():
-    start = MENU.index('export const HELP_SECTIONS')
+def parse_sections(const_name):
+    """解析玩法说明的段落数组(玩法拆成两组后按常量名各解析一次)"""
+    start = MENU.index('export const %s' % const_name)
     end = MENU.index('\n];', start)
     out, cur = [], None
     for raw in MENU[start:end].split('\n'):
@@ -138,8 +139,11 @@ def parse_home():
         'title_y': one(r"title\.setPosition\(0, (-?\d+), 0\)"),
         'sub_y': one(r"sub\.setPosition\(0, (-?\d+), 0\)"),
         'start_y': one(r"startBtn\.setPosition\(0, (-?\d+), 0\)"),
-        'start_w': one(r"createButtonNode\('开始游戏', (\d+)"),
-        'start_h': one(r"createButtonNode\('开始游戏', \d+, (\d+)"),
+        'start_w': one(r'const modeW = (\d+)'),
+        'start_h': one(r'const modeH = (\d+)'),
+        'draw_y': one(r"drawBtn\.setPosition\(0, (-?\d+), 0\)"),
+        'draw_w': one(r'const modeW = (\d+)'),
+        'draw_h': one(r'const modeH = (\d+)'),
         'sec_w': one(r'const secBtnW = (\d+)'),
         'sec_gap': one(r'const secBtnGap = (\d+)'),
         'row_y': one(r"rulesBtn\.setPosition\(-secBtnX, (-?\d+), 0\)"),
@@ -209,7 +213,8 @@ HELP_LINE_FONT = const('HELP_LINE_FONT')
 HELP_FAN_NAME_FONT = const('HELP_FAN_NAME_FONT')
 HELP_FAN_FONT = const('HELP_FAN_FONT')
 
-SECTIONS = parse_sections()
+SECTIONS_MAHJONG = parse_sections('HELP_SECTIONS_MAHJONG')
+SECTIONS_DRAW = parse_sections('HELP_SECTIONS_DRAW')
 GROUPS = parse_groups()
 FAN_ROWS = parse_fan_defs()
 
@@ -271,8 +276,11 @@ W_PX = int(MENU_W * 1.038)
 H_PX = int(MENU_H * 1.038)
 
 
-def render_content_page(kind, out, title, scroll_px=0, screen_w=None, screen_h=None):
-    """kind: 'rules' | 'help'; 内容画在离屏图上, 再按滚动位置裁进视口"""
+def render_content_page(kind, out, title, scroll_px=0, screen_w=None, screen_h=None, sections=None):
+    """kind: 'rules' | 'help'; 内容画在离屏图上, 再按滚动位置裁进视口
+
+    kind='help' 时 sections 必传(HELP_SECTIONS_MAHJONG / HELP_SECTIONS_DRAW 之一)。
+    """
     screen_w = int(screen_w or MENU_W * 1.038)
     screen_h = int(screen_h or MENU_H * 1.038)
     s = min(screen_w / MENU_W, screen_h / MENU_H)
@@ -289,7 +297,7 @@ def render_content_page(kind, out, title, scroll_px=0, screen_w=None, screen_h=N
         content_h = -(tips_top - TIPS_H) + CONTENT_BOTTOM
     else:
         y = -HELP_PAD_TOP
-        for _t, lines, fan in SECTIONS:
+        for _t, lines, fan in sections:
             y -= HELP_CAP_H + HELP_CAP_GAP
             y -= len(lines) * HELP_LINE_H
             if fan:
@@ -353,7 +361,7 @@ def render_content_page(kind, out, title, scroll_px=0, screen_w=None, screen_h=N
                 print('  !! 说明行超出宽度: %s' % line)
     else:
         y = -HELP_PAD_TOP
-        for sec_title, lines, fan in SECTIONS:
+        for sec_title, lines, fan in sections:
             cap_y = y - HELP_CAP_H / 2
             cap_bottom = y - HELP_CAP_H
             y = cap_bottom - HELP_CAP_GAP
@@ -416,6 +424,23 @@ def render_content_page(kind, out, title, scroll_px=0, screen_w=None, screen_h=N
         T(BACK_X + 320, TOP_Y, '恢复默认', TEXT_TITLE, 28, d, 'mm')
     else:
         T(0, TOP_Y, '玩法说明', TEXT_TITLE, 42, d, 'mm')
+        # 右侧「麻将 / 抽牌」标签: 选中实心琥珀、未选描边(与源码 _buildHelpPage 同位)
+        tab_w, tab_h, tab_gap, tab_edge = 150, 60, 14, 30
+        tab1_x = MENU_W / 2 - tab_edge - tab_w / 2
+        tab2_x = tab1_x - tab_w - tab_gap
+        selected = tab2_x if sections is SECTIONS_MAHJONG else tab1_x
+        other = tab1_x if selected == tab2_x else tab2_x
+        for cx, label in ((selected, '麻将' if selected == tab2_x else '抽牌'),
+                          (other, '抽牌' if selected == tab2_x else '麻将')):
+            x0, y0 = X(cx - tab_w / 2), Y(TOP_Y + tab_h / 2)
+            x1, y1 = X(cx + tab_w / 2), Y(TOP_Y - tab_h / 2)
+            if cx == selected:
+                d.rounded_rectangle([x0, y0, x1, y1], radius=tab_h / 2 * s, fill=(230, 182, 68))
+                T(cx, TOP_Y, label, (28, 21, 12), 28, d, 'mm')
+            else:
+                d.rounded_rectangle([x0, y0, x1, y1], radius=tab_h / 2 * s, fill=(255, 255, 255, 14),
+                                    outline=GHOST + (170,), width=2)
+                T(cx, TOP_Y, label, TEXT_TITLE, 28, d, 'mm')
 
     label = ('%s  缩放=%.3f  内容 %.0f / 视口 %.0f → 可滚 %.0f  当前滚动 %.0f'
              % (title, s, content_h, view_h, max_scroll, scroll))
@@ -453,16 +478,17 @@ def render_home(out, view_w=None, view_h=None):
 
     L = parse_home()
     T(0, L['title_y'], '麻 将', TEXT_TITLE, 128)
-    T(0, L['sub_y'], '单人对局 · 三家 AI', TEXT_SUB, 30)
-    btn(0, L['start_y'], L['start_w'], L['start_h'], '开始游戏', 36, primary=True)
+    T(0, L['sub_y'], '单机对战 · 麻将 / 抽牌', TEXT_SUB, 30)
+    btn(0, L['start_y'], L['start_w'], L['start_h'], '麻将', 36, primary=True)
+    btn(0, L['draw_y'], L['draw_w'], L['draw_h'], '抽牌', 36, primary=True)
     sec_x = (L['sec_w'] + L['sec_gap']) / 2
     btn(-sec_x, L['row_y'], L['sec_w'], L['sec_h'], '设置规则', 28)
     btn(sec_x, L['row_y'], L['sec_w'], L['sec_h'], '玩法说明', 28)
     # 摘要两行
-    for li, line in enumerate(['当前规则: 吃开 · 续杠开 · 吃胡开 · 抢杠开 · 一炮多响开 · 听牌宣言开 · AI 满能力',
-                               '音频: 音效中 · 音乐开(大)(默认)']):
+    for li, line in enumerate(['麻将 · 三家 AI 对局 · 吃碰杠 + 番型计分',
+                               '抽牌 · 136 张明牌阵 · 双方轮流抽对子比点数']):
         T(0, L['sum_y'] + (24 + 8) * (0.5 - li), line, TEXT_SUB, 24)
-    T(0, L['tip_y'], '按住手牌往上拖, 松手即可出牌 · 不会打先看「玩法说明」', TEXT_MUTED, 22)
+    T(0, L['tip_y'], '麻将的规则与操作见「玩法说明」', TEXT_MUTED, 22)
     d.text((8, view_h - 24), '主菜单(次级按钮行: 设置规则 | 玩法说明)', fill=(255, 240, 190), font=font(16 * s))
     img.save(out)
     print('已输出 %s  (%dx%d)' % (out, img.size[0], img.size[1]))
@@ -473,9 +499,12 @@ def main():
     render_content_page('rules', os.path.join(ROOT, 'rules-preview.png'), '设置规则页 16:9')
     render_content_page('rules', os.path.join(ROOT, 'rules-preview-bottom.png'),
                         '设置规则页 16:9(滚到底)', 100000)
-    render_content_page('help', os.path.join(ROOT, 'help-preview.png'), '玩法说明页 16:9')
+    render_content_page('help', os.path.join(ROOT, 'help-preview.png'),
+                        '玩法说明页·麻将 16:9', sections=SECTIONS_MAHJONG)
+    render_content_page('help', os.path.join(ROOT, 'help-preview-draw.png'),
+                        '玩法说明页·抽牌 16:9', sections=SECTIONS_DRAW)
     render_content_page('help', os.path.join(ROOT, 'help-preview-portrait.png'),
-                        '玩法说明页 手机竖屏', 0, 1080, 2400)
+                        '玩法说明页·麻将 手机竖屏', 0, 1080, 2400, sections=SECTIONS_MAHJONG)
 
 
 if __name__ == '__main__':

@@ -243,6 +243,11 @@ const HELP_CAP_FONT = 34;
 const HELP_LINE_FONT = 28;
 const HELP_FAN_NAME_FONT = 30;
 const HELP_FAN_FONT = 26;
+/** 说明页顶部「麻将 / 抽牌」切换标签: 尺寸 / 间距 / 距内容右缘 */
+const HELP_TAB_W = 150;
+const HELP_TAB_H = 60;
+const HELP_TAB_GAP = 14;
+const HELP_TAB_EDGE = 30;
 
 /** 说明页文字配色(正文沿用设置页的米白; 番型名更亮, 与番数色阶呼应) */
 const HELP_TEXT_LINE = new Color(226, 222, 206, 255);
@@ -252,11 +257,14 @@ const HELP_FAN_DESC = new Color(206, 202, 186, 255);
 const HELP_CAP_LINE = new Color(214, 176, 96, 96);
 
 /**
- * 玩法说明页的内容(纯数据)
+ * 玩法说明页的内容(纯数据) —— **按玩法分成两组**
  *
- * 【为什么文案与版式分开】改文案不必碰版式; 出图预览 `tools/preview-help.py`
- * 直接解析这份数组, 于是"预览里看到的文字"与真机显示的文字永远一致(预览不会骗人)。
- * 格式约定(预览脚本按此解析, 改动请保持): 每段 `title: '...'`, 正文每行独占一行且
+ * 说明页顶部有「麻将 / 抽牌」两个标签, 切换后滚动内容整页重建:
+ * 麻将玩家不必在抽牌的说明里翻找, 反之亦然(两种玩法是两套规则, 混排只会都看不清)。
+ *
+ * 【为什么文案与版式分开】改文案不必碰版式; 复核脚本 `tools/ai-test/help-layout-test.ts`
+ * 直接从源码解析这份数组, 于是"断言里看到的文字"与真机显示的文字永远一致。
+ * 格式约定(脚本按此解析, 改动请保持): 每段 `title: '...'`, 正文每行独占一行且
  * 形如 `'...',`; 番型表那一段写 `fanTable: true` —— 表内容由 FAN_DEFS 生成, 不写死。
  */
 export interface HelpSection {
@@ -268,9 +276,9 @@ export interface HelpSection {
     fanTable?: boolean;
 }
 
-export const HELP_SECTIONS: HelpSection[] = [
+export const HELP_SECTIONS_MAHJONG: HelpSection[] = [
     {
-        title: '操作',
+        title: '麻将 · 操作',
         lines: [
             '点手牌选中, 再点一次打出; 或按住手牌往上拖到牌河, 松手即出牌(点别处取消选中)',
             '左上角齿轮: 声音设置 / 重新开始 / 返回主页面 —— 随时可调, 不用退回主菜单',
@@ -278,21 +286,21 @@ export const HELP_SECTIONS: HelpSection[] = [
         ],
     },
     {
-        title: '怎么算胡',
+        title: '麻将 · 怎么算胡',
         lines: [
             '4 组面子(顺子或刻子) + 1 对将牌, 凑满 14 张即和牌; 吃/碰/杠亮出的副露各算 1 组面子',
             '自摸 = 自己摸到和牌张; 吃胡 = 胡别人打出的牌(可在「设置规则」里关掉); 一炮多响时多家同时胡',
         ],
     },
     {
-        title: '番型与番数',
+        title: '麻将 · 番型与番数',
         lines: [
             '牌型番只取最高的那一种; 花色番与状态番可以叠加(例: 平胡 + 门清 + 自摸 = 2 番)',
         ],
         fanTable: true,
     },
     {
-        title: '计分',
+        title: '麻将 · 计分',
         lines: [
             '底分 1 分, 每 1 番翻一倍, 8 番封顶(= 256 分)',
             '自摸: 三家各付一份(你拿 3 份); 点炮: 放炮的人付; 一炮多响时他付给每个赢家',
@@ -300,12 +308,31 @@ export const HELP_SECTIONS: HelpSection[] = [
         ],
     },
     {
-        title: '牌桌上的常驻信息',
+        title: '麻将 · 牌桌上的常驻信息',
         lines: [
             '手牌右侧: 听牌后常驻「听 3/6萬 · 余 4 张」("余"是外面还剩几张), 不用点提示',
             '左上角: 四家累计比分, 连打多局时不用等结算; 右上角的牌墙小图是剩余张数',
             '三家 AI 有名字(上家老陈 / 左家小雨 / 右家阿虎), 碰杠时会冒一句台词; 胡牌那句在结算面板里',
             '主菜单底部与结算面板底部: 生涯战绩(总局数 / 胡牌次数 / 最高番 / 最长连庄), 跨会话保留',
+        ],
+    },
+];
+
+export const HELP_SECTIONS_DRAW: HelpSection[] = [
+    {
+        title: '抽牌 · 玩法',
+        lines: [
+            '主菜单点「抽牌」进入: 136 张牌全部明牌摆成方阵(长边 8 张、宽 17 张)',
+            '你与电脑轮流抽: 每次点两张相同的牌, 且两张都要能"抽出来" —— 上下左右某个方向到边界一路无牌挡着',
+            '开局摆牌 / 每次抽牌都有动画; 左上角随时可以重新开始或返回主页面',
+        ],
+    },
+    {
+        title: '抽牌 · 计分与牌桌',
+        lines: [
+            '字牌一律算 10 点, 数牌按点数; 一组只算一张(如两张九萬这一组算 9 点)',
+            '牌抽完(或双方都抽不动了)比总分, 高者胜; 两家分数在牌桌顶上一眼可见',
+            '抽到的一组牌分列牌桌两侧: 电脑在左、你在右, 按点数从大到小排开, 一对只摆一张, 谁领先一目了然',
         ],
     },
 ];
@@ -384,8 +411,10 @@ function paintVerticalGradient(g: Graphics, top: Color, bottom: Color, halfHeigh
  */
 @ccclass('MenuUI')
 export class MenuUI extends Component {
-    /** 点击"开始游戏" */
+    /** 点击"开始游戏"(经典对局) */
     onStart: (() => void) | null = null;
+    /** 点击"抽牌模式"(136 张明牌阵, 双方轮流抽对子比点数) */
+    onDrawMode: (() => void) | null = null;
 
     private _root: Node | null = null;
     private _homeNode: Node | null = null;
@@ -411,13 +440,16 @@ export class MenuUI extends Component {
     /** 说明页章节标题下的分隔线(挂在滚动内容里, 跟着一起滚) */
     private _helpSeps: Graphics | null = null;
     private _helpDividerYs: number[] = [];
+    /** 说明页当前显示的玩法(顶部标签切换, 滚动内容整页重建) */
+    private _helpMode: 'mahjong' | 'draw' = 'mahjong';
+    private _helpTabMahjong: Node | null = null;
+    private _helpTabDraw: Node | null = null;
     /** 两页的阅读底板(整页压暗; 原生平台"显示时补画") */
     private _pageDims: Graphics[] = [];
     /** 两页的滚动视口(用于重画滚动条) */
     private _scrollPages: ScrollPage[] = [];
     private _rulesScroll: ScrollPage | null = null;
     private _helpScroll: ScrollPage | null = null;
-    private _summaryLabel: Label | null = null;
     /** 主页面底部的生涯战绩行(跨会话累积, 由 showHome 每次刷新) */
     private _careerLabel: Label | null = null;
     private _optionButtons: Map<string, Node[]> = new Map();
@@ -652,10 +684,11 @@ export class MenuUI extends Component {
      * 自上而下:
      *   大标题 "麻 将"        y = 200
      *   副标题                y = 90
-     *   主按钮 "开始游戏"      y = -60
-     *   次按钮 "设置规则 | 玩法说明"  y = -168(并排, 各 330 宽)
-     *   规则摘要(两行)        y = -266
-     *   操作提示              y = -322
+     *   主模式 "麻将"          y = -60(实心胶囊)
+     *   副模式 "抽牌"          y = -172(实心胶囊, 与主模式同款)
+     *   次按钮 "设置规则 | 玩法说明"  y = -278(并排, 各 330 宽)
+     *   规则摘要(两行)        y = -370
+     *   操作提示              y = -420
      */
     private _buildHome(): void {
         const page = new Node('MenuHome');
@@ -668,12 +701,17 @@ export class MenuUI extends Component {
         title.setPosition(0, 200, 0);
         emphasizeLabel(title, 20);
 
-        const sub = createLabelNode('单人对局 · 三家 AI', 30, TEXT_SUB, 1200);
+        const sub = createLabelNode('单机对战 · 麻将 / 抽牌', 30, TEXT_SUB, 1200);
         sub.parent = page;
         sub.setPosition(0, 90, 0);
 
-        // 主按钮: 琥珀金实心胶囊 + 深墨字
-        const startBtn = createButtonNode('开始游戏', 420, 100, BTN_PRIMARY, MENU_BTN_STYLE);
+        // 模式入口(上下两行): "麻将"(主模式, 三家 AI 经典对局) 在上,
+        // "抽牌"(明牌阵抽对子) 在下。两个按钮**同款实心琥珀胶囊**(与原来的
+        // "开始游戏"一模一样), 主/次只靠上下顺序区分 —— 不再用"实心/描边"两套样式。
+        const modeW = 420;
+        const modeH = 100;
+
+        const startBtn = createButtonNode('麻将', modeW, modeH, BTN_PRIMARY, MENU_BTN_STYLE);
         startBtn.parent = page;
         startBtn.setPosition(0, -60, 0);
         bindSafeClick(startBtn, () => this.onStart?.(), this);
@@ -684,39 +722,59 @@ export class MenuUI extends Component {
             startLabel.fontSize = 36;
         }
 
+        // 抽牌: 136 张牌全部明牌成阵, 双方轮流抽"两张相同的牌"比总点数
+        const drawBtn = createButtonNode('抽牌', modeW, modeH, BTN_PRIMARY, MENU_BTN_STYLE);
+        drawBtn.parent = page;
+        drawBtn.setPosition(0, -172, 0);
+        bindSafeClick(drawBtn, () => this.onDrawMode?.(), this);
+        const drawLabel = buttonLabel(drawBtn);
+        if (drawLabel) {
+            drawLabel.color = TEXT_INK;
+            drawLabel.isBold = true;
+            drawLabel.fontSize = 36;
+        }
+
         // 次按钮行: 两个描边胶囊并排 —— 「设置规则」与「玩法说明」同属"开局前的准备",
-        // 各占一半宽度、共用原来那一行, 纵向不多占空间(新玩家第一眼就能看到说明入口)。
+        // 各占一半宽度、共用一行(新玩家第一眼就能看到说明入口)。
         const secBtnW = 330;
         const secBtnGap = 30;
         const secBtnX = (secBtnW + secBtnGap) / 2;
 
         const rulesBtn = createButtonNode('设置规则', secBtnW, 82, LINE_GHOST, MENU_GHOST_STYLE);
         rulesBtn.parent = page;
-        rulesBtn.setPosition(-secBtnX, -168, 0);
+        rulesBtn.setPosition(-secBtnX, -278, 0);
         bindSafeClick(rulesBtn, () => this.showRules(), this);
 
         // 玩法说明: 番型表 / 计分口径 / 操作说明(新玩家上手全靠它)
         const helpBtn = createButtonNode('玩法说明', secBtnW, 82, LINE_GHOST, MENU_GHOST_STYLE);
         helpBtn.parent = page;
-        helpBtn.setPosition(secBtnX, -168, 0);
+        helpBtn.setPosition(secBtnX, -278, 0);
         bindSafeClick(helpBtn, () => this.showHelp(), this);
 
-        // 规则摘要: 固定两行(玩法一行 + 音频一行)。
+        // 模式简介: 原来这里是"当前规则摘要"(吃/续杠/吃胡…), 那是**麻将专属**的开关清单,
+        // 现在主菜单有两个模式, 把整行换成"两种玩法各是什么"更好选 —— 规则开关的详情
+        // 已经在「设置规则」页里逐项列出, 不必在这里再抄一遍。
         // 文本域高度必须显式给够 —— 两行塞进单行高度里会被 SHRINK 压小一圈(硬约束 4)
         const summary = createLabelNode('', 24, TEXT_SUB, 1400, 24 * 3);
         summary.parent = page;
-        summary.setPosition(0, -266, 0);
-        this._summaryLabel = summary.getComponent(Label);
+        summary.setPosition(0, -370, 0);
+        const sumLabel = summary.getComponent(Label);
+        if (sumLabel) {
+            sumLabel.string = '麻将 · 三家 AI 对局 · 吃碰杠 + 番型计分\n'
+                + '抽牌 · 136 张明牌阵 · 双方轮流抽对子比点数';
+        }
 
-        const tip = createLabelNode('按住手牌往上拖, 松手即可出牌 · 不会打先看「玩法说明」', 22, TEXT_MUTED, 1400);
+        // 操作提示只留一句"去哪儿看规则" —— 原来那句"按住手牌往上拖"是**麻将专属**手势,
+        // 现在主菜单上还有抽牌, 再挂着它就成了"对抽牌模式的错误说明"。
+        const tip = createLabelNode('麻将的规则与操作见「玩法说明」', 22, TEXT_MUTED, 1400);
         tip.parent = page;
-        tip.setPosition(0, -322, 0);
+        tip.setPosition(0, -420, 0);
 
         // 生涯战绩: 跨会话累积(总局数 / 胡牌次数 / 最高番 / 最长连庄), 存在本地。
         // 放在操作提示下面那一行: 它是"回头看"的信息, 不该挤占按钮那一带。
         const career = createLabelNode('', 24, TEXT_MUTED, 1400);
         career.parent = page;
-        career.setPosition(0, -380, 0);
+        career.setPosition(0, -470, 0);
         this._careerLabel = career.getComponent(Label);
     }
 
@@ -876,12 +934,17 @@ export class MenuUI extends Component {
     // ==================== 玩法说明页 ====================
 
     /**
-     * 玩法说明页: 操作 / 怎么算胡 / 番型表 / 计分 / 常驻信息
+     * 玩法说明页: 操作 / 怎么算胡 / 番型表 / 计分 / 常驻信息 —— 按玩法分两组
      *
      * 【2026-10-16 晚改版】用户反馈"文字和背景密密麻麻" → 字号按"读"的标准给足
      * (正文 28 / 番型表 26~30), 内容因此比视口高, 于是真正启用滚动 + 右侧指示条,
      * 并加一层整页阅读底板(与设置规则页同一套)。结构:
-     *   阅读底板 → 顶部一行(返回 + 标题, 不滚动) → 滚动视口(5 段正文 + 番型表)
+     *   阅读底板 → 顶部一行(返回 + 标题 + 玩法标签, 不滚动) → 滚动视口(正文 + 番型表)
+     *
+     * 【2026-10-18 改版】麻将与抽牌是两套规则, 混在一页里谁都要翻找 —— 顶部加
+     * 「麻将 / 抽牌」两个标签(选中实心、未选描边), 切换时滚动内容整页重建。
+     * 本方法只建**骨架**(不随玩法变的部分); 正文/番型表由 `_fillHelpContent()`
+     * 按当前玩法填进滚动内容。
      */
     private _buildHelpPage(): void {
         const page = new Node('MenuHelp');
@@ -890,7 +953,7 @@ export class MenuUI extends Component {
 
         this._addPageDim(page);
 
-        // 顶部一行: 左上角返回(与设置页同一位置) + 居中标题。
+        // 顶部一行: 左上角返回(与设置页同一位置) + 居中标题 + 右侧玩法标签。
         // 设置页刻意没有标题(它是一堆开关), 而这一页是"要读的一篇内容", 标题用来定位。
         const backBtn = createButtonNode('返回', 200, RULES_TOP_BTN_H, LINE_GHOST, MENU_GHOST_STYLE);
         backBtn.parent = page;
@@ -902,23 +965,66 @@ export class MenuUI extends Component {
         title.setPosition(0, RULES_TOP_Y, 0);
         emphasizeLabel(title, 6);
 
+        // 玩法标签: 选中实心琥珀胶囊、未选描边胶囊(与主菜单模式按钮同一套语言)。
+        // ⚠️ 创建时两个都用占位样式, 紧接着必须按当前模式落定选中态 ——
+        // 之前两个都给 BTN_PRIMARY, 首次进入"麻将/抽牌"同时高亮(选中态没人画)。
+        const tabY = RULES_TOP_Y;
+        const tab1X = MENU_CONTENT_W / 2 - HELP_TAB_EDGE - HELP_TAB_W / 2;
+        const tab2X = tab1X - HELP_TAB_W - HELP_TAB_GAP;
+        this._helpTabDraw = createButtonNode('抽牌', HELP_TAB_W, HELP_TAB_H, LINE_GHOST, MENU_GHOST_STYLE);
+        this._helpTabDraw.parent = page;
+        this._helpTabDraw.setPosition(tab1X, tabY, 0);
+        bindSafeClick(this._helpTabDraw, () => this._setHelpMode('draw'), this);
+        this._helpTabMahjong = createButtonNode('麻将', HELP_TAB_W, HELP_TAB_H, LINE_GHOST, MENU_GHOST_STYLE);
+        this._helpTabMahjong.parent = page;
+        this._helpTabMahjong.setPosition(tab2X, tabY, 0);
+        bindSafeClick(this._helpTabMahjong, () => this._setHelpMode('mahjong'), this);
+        this._styleHelpTabs();
+
         const sp = this._createScrollPage('HelpScrollView', page);
         this._helpScroll = sp;
+
+        this._fillHelpContent();
+    }
+
+    /** 按当前玩法落定两个标签的选中态(首次构建与切换共用, 幂等) */
+    private _styleHelpTabs(): void {
+        const on = (btn: Node | null, selected: boolean): void => {
+            if (!btn) return;
+            restyleButton(btn, selected ? BTN_PRIMARY : LINE_GHOST,
+                selected ? MENU_BTN_STYLE : MENU_GHOST_STYLE);
+            const l = buttonLabel(btn);
+            if (l) l.color = selected ? TEXT_INK : TEXT_TITLE;
+        };
+        on(this._helpTabMahjong, this._helpMode === 'mahjong');
+        on(this._helpTabDraw, this._helpMode === 'draw');
+    }
+
+    /**
+     * 按当前玩法(`_helpMode`)重建滚动内容: 清掉旧内容 → 顺排正文/番型表 →
+     * 落定内容高度 → 补画分隔线。切换标签与首次构建都走这里(幂等)。
+     */
+    private _fillHelpContent(): void {
+        const sp = this._helpScroll;
+        if (!sp) return;
         const host = sp.content;
+        for (const child of host.children.slice()) child.destroy();
 
         // 章节标题下的分隔线: 一个 Graphics 承担全部段落, 位置跟着游标走;
         // 挂在滚动内容里(跟着一起滚)。原生平台 onLoad 期间画的图形不上屏 →
-        // 记下位置, 显示时由 _paintHelpDividers 补画(与 repaintButtons 同一套理由)
+        // 显示时由 _paintHelpDividers 补画(与 repaintButtons 同一套理由)
         const seps = new Node('HelpDividers');
         seps.parent = host;
         seps.addComponent(UITransform).setContentSize(1, 1);
         this._helpSeps = seps.addComponent(Graphics);
         this._helpDividerYs = [];
 
+        const sections = this._helpMode === 'draw' ? HELP_SECTIONS_DRAW : HELP_SECTIONS_MAHJONG;
+
         // 正文自上而下顺排: 游标 y 恒为"上一段的底边", 每段先取中心再连同高度下移
         // (硬约束 3: 写成 y + H/2 会让下一段正好压在上一段上)
         let y = -HELP_PAD_TOP;   // 内容局部坐标: 0 = 内容顶边
-        for (const sec of HELP_SECTIONS) {
+        for (const sec of sections) {
             const capY = y - HELP_CAP_H / 2;
             const capBottom = y - HELP_CAP_H;
             y = capBottom - HELP_CAP_GAP;
@@ -935,6 +1041,17 @@ export class MenuUI extends Component {
         // 内容高度 = 末段底边 + 底部留白(比视口高才可拖, 视口由 ScrollView 管)
         this._commitScrollContent(sp, -(y + HELP_SEC_GAP) + HELP_PAD_BOTTOM);
         this._paintHelpDividers();
+        sp.sv.scrollToTop(0);   // 换玩法回到顶部, 别停在上一玩法滚到的位置
+    }
+
+    /**
+     * 切换玩法标签: 换选中态样式(选中实心/未选描边) + 重建滚动内容
+     */
+    private _setHelpMode(mode: 'mahjong' | 'draw'): void {
+        if (this._helpMode === mode) return;
+        this._helpMode = mode;
+        this._styleHelpTabs();
+        this._fillHelpContent();
     }
 
     /** 补画说明页章节标题下的分隔线(幂等: 先 clear 再画, 原生平台多次调用也安全) */
@@ -1196,7 +1313,12 @@ export class MenuUI extends Component {
         this._optionPickers.set(cfg.key, cfg.onPick);
     }
 
-    /** 按当前规则刷新设置页选中态与主页面摘要 */
+    /**
+     * 按当前规则刷新设置页的选择态
+     *
+     * 主菜单那行摘要是"两种玩法各是什么"(静态文案), 不再随规则变化 ——
+     * 规则/音量的当前档位只在设置页里点亮。
+     */
     private _refreshRuleState(): void {
         const r = GAME_RULES.rules;
         this._applyChoice('allowChi', r.allowChi ? 1 : 0);
@@ -1208,22 +1330,6 @@ export class MenuUI extends Component {
         this._applyChoice('sfxVolume', nearestVolumeLevel(r.sfxVolume));
         this._applyChoice('bgmEnabled', r.bgmEnabled ? 1 : 0);
         this._applyChoice('bgmVolume', nearestVolumeLevel(r.bgmVolume));
-
-        if (this._summaryLabel) {
-            const onOff = (v: boolean): string => (v ? '开' : '关');
-            const volName = (v: number): string => {
-                const hit = VOLUME_LEVELS.find(o => Math.abs(o.value - nearestVolumeLevel(v)) < 1e-6);
-                return hit ? hit.label : '中';
-            };
-            this._summaryLabel.string =
-                `当前规则: 吃${onOff(r.allowChi)} · 续杠${onOff(r.allowAddKan)}`
-                + ` · 吃胡${onOff(r.allowChiHu)} · 抢杠${onOff(r.allowRobKan)}`
-                + ` · 一炮多响${onOff(r.allowMultiRon)} · 听牌宣言${onOff(r.allowRiichi)}`
-                + ' · AI 满能力'
-                + `\n音频: 音效${volName(r.sfxVolume)} · 音乐${onOff(r.bgmEnabled)}`
-                + (r.bgmEnabled ? `(${volName(r.bgmVolume)})` : '')
-                + (GAME_RULES.isDefault ? '(默认)' : '');
-        }
     }
 
     /** 把某组选项中与当前值一致的那一项点亮 */
