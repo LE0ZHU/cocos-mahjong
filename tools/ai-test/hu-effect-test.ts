@@ -76,11 +76,13 @@ console.log('\n[A] 节奏: 只剩"和牌归位"一拍(压暗/大字/摘要三拍
     check(Math.abs(tDone - (tLand + ringLife + num(fx, 'T_BEAT'))) < 1e-6,
         `交棒 = 落位 ${tLand} + 金环 ${ringLife} + 留一眼 ${num(fx, 'T_BEAT')}`);
     // ---- 端到端: 面板在点胡起 ≈3.3s 就位(删三拍前 5.65s, 再删闪光前 3.5s) ----
-    check(Math.abs(tDone - 1.65) < 1e-6, `特效时长 ${tDone}s(翻面缓冲 ${reveal}s 之前先单独播)`);
-    check(Math.abs(reveal + tDone + 0.5 - 3.3) < 1e-6,
+    check(Math.abs(tDone - 1.8) < 1e-6, `特效时长 ${tDone}s(翻面缓冲 ${reveal}s 之前先单独播)`);
+    check(Math.abs(reveal + tDone + 0.5 - 3.45) < 1e-6,
         `点胡 → 面板就位 ${(reveal + tDone + 0.5).toFixed(2)}s`);
-    check(Math.abs(reveal + tDone - 2.8) < 1e-6,
+    check(Math.abs(reveal + tDone - 2.95) < 1e-6,
         `交棒在点胡起 ${(reveal + tDone).toFixed(2)}s`);
+    check(Math.abs(tLand - (num(fx, 'T_HL') + num(fx, 'T_FLY_DUR'))) < 1e-6,
+        `落位 ${tLand} = 起点高亮 ${num(fx, 'T_HL')} + 飞行 ${num(fx, 'T_FLY_DUR')}`);
     // ---- 支线: 收着演只剩"金环更暗更细"; 流局没有任何东西可播, 立刻交棒 ----
     check(Math.abs(num(fx, 'DRAW_T_DONE') - 0.15) < 1e-6,
         `流局 ${num(fx, 'DRAW_T_DONE')}s 就交棒(没有关键牌, 陪着等是纯枯等)`);
@@ -101,6 +103,56 @@ console.log('\n[A2] 闪光已删除(用户反馈"黄色的一块闪一下很突�
     // 副露(吃/碰/杠)的闪光留在 Main 里 —— 那里是"这里刚吃/碰/杠了"的落点强调, 用户没提
     check(/flashBurst\(container, group\.position\.x/.test(main),
         'Main 里副露的那处 flashBurst 保留(用户只嫌胡牌落位突兀)');
+}
+
+console.log('\n[H] 和牌归位: 点炮那张牌先留在弃牌河, 高亮后飞进赢家手牌');
+{
+    // ---- 规则层: 结算那一帧照旧把牌收进手牌(番型要靠它算), 但留一个"待归位"标记给 UI ----
+    check(/ronFlight: RonFlight \| null = null;/.test(gm), 'GameManager 有 ronFlight 待归位标记');
+    check(/this\.ronFlight = \{ tile, payerSeat, winnerSeats: \[...winnerSeats\], robKan \};/.test(gm),
+        '_settleRon 记下待归位(和牌 / 点炮者 / 赢家 / 是否抢杠)');
+    check(/consumeRonFlight\(\): void \{\s*\n\s*this\.ronFlight = null;/.test(gm),
+        'consumeRonFlight(): 归位动画播完后收掉标记');
+    const startBody = gm.slice(gm.indexOf('startGame('), gm.indexOf('startGame(') + 2500);
+    check(/this\.ronFlight = null;/.test(startBody),
+        'startGame 清掉上一局的待归位标记(特效可能被中途 abort)');
+
+    // ---- UI: 牌河补回那张牌, 赢家手牌给它留一个空槽 ----
+    check(/private _riverTilesFor\(seat: number, base: Tile\[\]\)/.test(main)
+        && /return base\.concat\(\[p\.tile\]\);/.test(main),
+        '牌河渲染把点炮那张补回河里(它还没飞走)');
+    check(/if \(p && !p\.robKan && p\.payerSeat === seat\)/.test(main),
+        '抢杠的牌在被抢者手里 —— 不补回牌河');
+    check(/private _pendingRonTile\(seat: number\)/.test(main) && /_markPendingWin\(node\)/.test(main),
+        '赢家手牌给待归位牌留空槽(节点隐形, 槽位照算)');
+    check(/if \(tile === hideTile\) this\._markPendingWin\(node\);/.test(main),
+        '自家手牌里那张先隐形');
+    check(/if \(tile === hideTile\) this\._markPendingWin\(node\);\s*\n\s*else if \(reveal\) this\._popRevealed/.test(main),
+        '三家手牌里那张先隐形(且不走翻面弹入)');
+    check(/this\._pendingRiverNode = container\.children\[container\.children\.length - 1\] \?\? null;/.test(main),
+        '记下河里补回的那张(落位后销毁)');
+    check(/private _dropOrHoldRiver\(/.test(main)
+        && /if \(tiles === base\) \{\s*\n\s*this\._animateRiverDrop/.test(main),
+        '补回渲染时不再飞一次、不再播一次出牌语音(它本来就在河里)');
+    check(/node\.setScale\(0, 0, 1\);/.test(main),
+        '隐形牌缩到 0(光 opacity=0 仍会接收触摸)');
+
+    // ---- 落位: 手牌空槽填上 + 河里那张收走 ----
+    check(/onLanded: \(\) => this\._onRonTileLanded\(\),/.test(main), 'Main 接上落位回调');
+    check(/gm\.consumeRonFlight\(\);/.test(main), '落位时收掉待归位标记(后续按真实状态渲染)');
+    check(/if \(river && river\.isValid\) river\.destroy\(\);/.test(main), '落位时销毁河里那张');
+    check(/this\._pendingWinNodes = \[\];\s*\n\s*this\._pendingRiverNode = null;/.test(main),
+        '_clearTable 一并清掉(特效被中止时不留虚位)');
+
+    // ---- 特效: 起点高亮 → 飞行 → 落位回调 ----
+    check(/const T_HL = 0\.3;/.test(fx), '起点高亮 0.3s(金框先亮一下再飞)');
+    check(/\.delay\(T_HL\)/.test(fx), '飞牌排在起点高亮之后');
+    check(/to\(0\.12, \{ opacity: 235 \}\)/.test(fx), '起点金框先淡入到 235(高亮)再作残影淡出');
+    check(/onLanded\?: \(winner: WinnerResult\) => void;/.test(fx), 'HuFxHooks 有 onLanded');
+    check(/this\._hooks\?\.onLanded\?\.\(winner\);/.test(fx), '落位那一帧回调 UI(填手牌槽 / 收河牌)');
+    // 落位目标 = 赢家手牌里那个**真实槽位**(隐形但槽位照记), 不是估算出来的位置
+    check(/const local = this\._handSlots\.get\(seat\)\?\.get\(tile\.id\);/.test(main),
+        '落位坐标取 _handSlots 里的真实手牌槽位(空槽也照记), 不是估出来的位置');
 }
 
 console.log('\n[B] 三拍已删除: 没有压暗 / 大字 / 摘要 / 震动');
@@ -144,8 +196,8 @@ console.log('\n[D] 不引用牌桌节点 + 和牌归位飞行');
 
     // 第 0 拍: 和牌副本飞回落位(2026-10-18 二次迭代: 宣告那一帧不再"凭空消失/凭空出现")
     check(Math.abs(num(fx, 'T_FLY_DUR') - 0.7) < 1e-6, `飞行时长 ${num(fx, 'T_FLY_DUR')}s`);
-    check(Math.abs(num(fx, 'T_LAND') - num(fx, 'T_FLY_DUR')) < 1e-6,
-        'play 一开始就起飞(亮桌面, 不等压暗)');
+    check(Math.abs(num(fx, 'T_LAND') - num(fx, 'T_FLY_DUR') - num(fx, 'T_HL')) < 1e-6,
+        '落位 = 起点高亮 + 飞行(高亮那一拍先让来路被看见, 不是 play 就起飞)');
     // 交棒等**金环**收束 + 留一眼才开始(闪光已删, 金环就是唯一的归位强调)
     check(num(fx, 'T_DONE') >= num(fx, 'T_LAND') + num(fx, 'RING_LIFE') - 1e-6,
         `交棒等金环收束(${num(fx, 'T_DONE')} ≥ 落位 ${num(fx, 'T_LAND')} + 金环 ${num(fx, 'RING_LIFE')})`);
@@ -158,7 +210,8 @@ console.log('\n[D] 不引用牌桌节点 + 和牌归位飞行');
     check(/FlyBorder/.test(fly) && /roundRect\(-bw \/ 2, -bh \/ 2, bw, bh, 14\)/.test(fly),
         '飞行副本自带金边框(用户认领这段动画的视觉锚点)');
     check(/setScale\(1\.25, 1\.25, 1\)/.test(fly), '起点比落位大 1.25 倍(更显眼)');
-    check(/FlyGhost/.test(fly) && /opacity = 170/.test(fly), '牌河末格留渐渐消失的残影(交代来路)');
+    check(/FlyGhost/.test(fly) && /to\(0\.12, \{ opacity: 235 \}\)/.test(fly),
+        '起点先高亮金框(0.12s 淡入到 235), 起飞后才作残影淡出');
     check(/createTileNode\(w, h, false\)/.test(fly) && /addComponent\(TileView\)/.test(fly) && /setData\(tile, -1\)/.test(fly),
         '副本是真牌面(同一套工厂 + TileView), 不是色块');
     check(/origin\.angle \?\? origin\.container\.angle/.test(fly) && /dest\.angle \?\? dest\.container\.angle/.test(fly),

@@ -96,6 +96,23 @@ export interface MeldPromptRequest {
  * 剩余张数 = Σ(4 − 可见张数) 是"实际张数", 不是有效进张种类数 ——
  * 玩家按这个数判断"还等不等得到", 给错口径比不给更糟。
  */
+/**
+ * 吃胡/抢杠的"待归位"和牌(2026-10-19)
+ *
+ * 见 `GameManager.ronFlight`: 规则层已把它从牌河移进赢家手牌, 但视觉上
+ * 这张牌应该先从弃牌河高亮、再飞过去 —— 这段过渡由 UI 播, 播完才收标记。
+ */
+export interface RonFlight {
+    /** 和的牌(四家共享同一个 Tile 对象: 一炮多响时多家都把它收进手牌) */
+    tile: Tile;
+    /** 付分方座位: 点炮=出牌者, 抢杠=被抢的补杠者 */
+    payerSeat: number;
+    /** 赢家座位(吃胡/抢杠的, 不含自摸) */
+    winnerSeats: number[];
+    /** 抢杠: 牌在被抢者**手里**, 不在弃牌河 —— 牌河不补回 */
+    robKan: boolean;
+}
+
 export interface TenpaiInfo {
     /** 当前听的所有牌型(每型一张; HuChecker.isTenpai 口径) */
     waiting: Tile[];
@@ -292,6 +309,16 @@ export class GameManager extends Component {
      */
     onSettle: ((data: SettlementData) => void) | null = null;
     /**
+     * 吃胡/抢杠的"待归位"和牌(2026-10-19)
+     *
+     * 规则层照旧在结算那一帧就把牌从点炮者牌河移走、收进赢家手牌(番型要靠它算),
+     * 但**视觉上**这张牌此刻应该还躺在弃牌河里 —— UI 渲染时按这个标记:
+     *  - 点炮者牌河: 把这张牌补回去显示(它还没飞走);
+     *  - 赢家手牌: 给它留一个空槽(牌节点先隐形), 等特效把牌飞过来再填。
+     * 特效落位后 UI 调 `consumeRonFlight()` 收掉标记, 之后就按真实状态渲染。
+     */
+    ronFlight: RonFlight | null = null;
+    /**
      * AI 说了一句话(碰 / 杠): UI 在对应座位上冒一个短气泡
      *
      * 只给"不改变流程"的副露 —— 胡牌与点炮的台词随 `onSettle` 一起给
@@ -378,6 +405,8 @@ export class GameManager extends Component {
         this._canDiscard = false;
         this._lastDiscard = null;
         this._playerDrawnTile = null;
+        // 上一局的"待归位"标记: 特效可能被中途 abort, 这里兜底清掉
+        this.ronFlight = null;
         // 上一局若停在"等待副露选择",一并清掉,避免新局被卡住
         this.cancelPendingMeld();
         this._firePhaseChanged();
@@ -806,6 +835,9 @@ export class GameManager extends Component {
      */
     private _settleRon(payerSeat: number, tile: Tile, winnerSeats: number[], robKan: boolean): void {
         if (this._phase === GamePhase.GAME_OVER) return;
+        // 记下"待归位": 下面立刻要把牌从牌河移进手牌(番型需要), 但 UI 得先按
+        // "牌还在来路(弃牌河/被抢者手里)"渲染 —— 等归位动画播完再 consumeRonFlight()
+        this.ronFlight = { tile, payerSeat, winnerSeats: [...winnerSeats], robKan };
         // 点炮: 这张牌从出牌者弃牌河移走; 抢杠: 本来就在补杠者手里, 从手牌移走
         if (robKan) {
             this._getPlayer(payerSeat)?.removeTileRef(tile);
@@ -850,6 +882,16 @@ export class GameManager extends Component {
 
         if (entries.length === 0) return;
         this._finishWithHu(entries, payerSeat);
+    }
+
+    /**
+     * 收掉"待归位"标记(UI 播完"和牌从来路飞进手牌"之后调用)
+     *
+     * 规则层的牌河/手牌**早就**是最终状态了, 这里只是告诉 UI: 不用再假装
+     * 那张牌还在弃牌河里 —— 之后的任何重渲染(转屏/重开)都按真实状态来。
+     */
+    consumeRonFlight(): void {
+        this.ronFlight = null;
     }
 
     /**

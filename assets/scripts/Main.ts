@@ -328,6 +328,15 @@ export class Main extends Component {
     private _settlement: SettlementPanel | null = null;
     /** 胡牌特效(结算面板弹出前的 2.2s 三拍: 定格 → 爆发 → 揭晓) */
     private _huFx: HuEffect | null = null;
+    /**
+     * 吃胡/抢杠的"待归位"和牌在**赢家手牌**里那个隐形节点(2026-10-19)
+     *
+     * 规则层已经把牌收进手牌了, 但视觉上它此刻还在弃牌河里 —— 手牌给它留一个空槽
+     * (照常算位置、照常进 `_handSlots`, 只是不显示), 等特效把牌飞过来再显形。
+     */
+    private _pendingWinNodes: Node[] = [];
+    /** 待归位牌在**弃牌河**里那个补回显示的节点(落位后销毁: 牌被拿走了) */
+    private _pendingRiverNode: Node | null = null;
     /** "听牌"宣言按钮(听牌时才出现) */
     private _riichiBtn: Node | null = null;
     /** 四家的"听"标记(已宣告听牌时亮出) */
@@ -1034,6 +1043,9 @@ export class Main extends Component {
         // 胡牌特效若还在播(重开/返回主页面打断了它): 中止并复位压暗层,
         // 否则会留下半黑屏盖住新局的牌桌(与 _hideAnnounce 同一个坑)
         this._huFx?.abort();
+        // 待归位的隐形牌/补回的河牌: 特效被中止后它们不该再挂着(新一局会整体重建)
+        this._pendingWinNodes = [];
+        this._pendingRiverNode = null;
         for (const m of this._tenpaiMarkers) if (m) m.active = false;
         if (this._riichiBtn) this._riichiBtn.active = false;
         // 新一局/返回主页面: 倒计时与提示一并收起(下一局需要时会重新起/重新要)
@@ -2085,6 +2097,64 @@ export class Main extends Component {
     }
 
     /**
+     * 待归位的和牌(2026-10-19): 赢家手牌里这张牌先隐形, 等特效飞过来再填槽
+     * @param seat 座位;返回 null 表示该座位没有待归位的牌(自摸/不是赢家)
+     */
+    private _pendingRonTile(seat: number): Tile | null {
+        const p = this.game?.ronFlight;
+        if (!p || p.winnerSeats.indexOf(seat) < 0) return null;
+        return p.tile;
+    }
+
+    /**
+     * 弃牌河要渲染的牌列表: 点炮那张牌**还没飞走**, 补回河里显示它
+     * (抢杠的牌在被抢者手里, 不在河里 —— 不补)
+     */
+    private _riverTilesFor(seat: number, base: Tile[]): Tile[] {
+        const p = this.game?.ronFlight;
+        if (p && !p.robKan && p.payerSeat === seat) return base.concat([p.tile]);
+        return base;
+    }
+
+    /**
+     * 记下隐形牌节点(槽位照算, 只是不显示);顺手丢掉已被重渲销毁的旧引用
+     *
+     * scale 也归零: 光靠 opacity=0 节点仍在接收触摸(UITransform 还在),
+     * 牌局已结束但那张"虚位"理论上还能被点;缩到 0 就没有触摸面积了。
+     */
+    private _markPendingWin(node: Node): void {
+        this._pendingWinNodes = this._pendingWinNodes.filter(n => n && n.isValid);
+        ensureOpacity(node).opacity = 0;
+        node.setScale(0, 0, 1);
+        this._pendingWinNodes.push(node);
+    }
+
+    /**
+     * 和牌归位落位(特效回调): 那张牌从"来路"飞进了赢家手牌 ——
+     * 手牌里的隐形牌显形, 弃牌河里那张真正消失, 之后按真实状态渲染。
+     *
+     * 为什么不在落位后整体重渲: 手牌一重渲就是整排 `_popRevealed` 弹一次,
+     * 会把刚落位的那一下顶掉;这里只动那两个节点, 其余牌一动不动。
+     */
+    private _onRonTileLanded(): void {
+        const gm = this.game;
+        if (!gm?.ronFlight) return;
+        gm.consumeRonFlight();
+        for (const n of this._pendingWinNodes) {
+            if (!n || !n.isValid) continue;
+            const op = ensureOpacity(n);
+            op.opacity = 0;
+            n.setScale(1.18, 1.18, 1);
+            tween(op).to(0.18, { opacity: 255 }).start();
+            tween(n).to(0.26, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
+        }
+        this._pendingWinNodes = [];
+        const river = this._pendingRiverNode;
+        this._pendingRiverNode = null;
+        if (river && river.isValid) river.destroy();
+    }
+
+    /**
      * 创建吃/碰/杠选择容器(默认隐藏):
      * 别家打出的牌自己能吃/碰时弹出,内容为 各副露按钮 + "过"(继续摸牌)。
      * 容器本身不画任何底板,直接由按钮浮在牌桌上方。
@@ -2651,6 +2721,7 @@ export class Main extends Component {
         // 用"等长空洞"而不是 fill(null): Node[] 里塞 null 会让"元素为空"和
         // "节点已销毁"两种状态混在一起, 排查时很难看出是哪一种
         this._handNodes = new Array<Node>(count);
+        const hideTile = this._pendingRonTile(0);
         for (let i = 0; i < normalCount; i++) {
             const tile = player.hand[i];
             const x = startX + i * step;
@@ -2659,6 +2730,8 @@ export class Main extends Component {
             if (prev) glideTo(node, prev);
             nextSlots.set(tile.id, new Vec3(x, 0, 0));
             this._handNodes[i] = node;
+            // 吃胡的那张牌此刻还在弃牌河里: 手牌给它留空槽(位置照算, 只是不显示)
+            if (tile === hideTile) this._markPendingWin(node);
         }
         if (hasDrawn) {
             const drawnX = startX + normalCount * step + sep;
@@ -2670,6 +2743,7 @@ export class Main extends Component {
             else slideIn(node, new Vec3(78, 0, 0));
             nextSlots.set(tile.id, new Vec3(drawnX, 0, 0));
             this._handNodes[count - 1] = node;
+            if (tile === hideTile) this._markPendingWin(node);
         }
         this._storeHandSlots(0, nextSlots);
         // 手牌是整体重建的, 之前贴的提示标记随旧节点一起没了 —— 按记录的下标补回来。
@@ -2720,11 +2794,18 @@ export class Main extends Component {
 
         // 自家弃牌河向上堆(朝着桌心方向),每排最多 RIVER_COLS 张,避免与下方副露/手牌重叠
         // 平面牌面(与三家 AI 的弃牌河一致,不再显示顶侧厚度)
-        this._renderRiver(this._discardContainer, player.discards, this.RIVER_COLS, 1, true, 0);
+        const tiles = this._riverTilesFor(0, player.discards);
+        this._renderRiver(this._discardContainer, tiles, this.RIVER_COLS, 1, true, 0);
         // 拖牌出牌时从松手的位置起飞,点击出牌则从手牌槽位起飞
         const from = this._dropFromWorld;
         this._dropFromWorld = null;
-        this._animateRiverDrop(0, this._discardContainer, player.discards, this.TILE_W, from);
+        if (tiles === player.discards) {
+            this._animateRiverDrop(0, this._discardContainer, player.discards, this.TILE_W, from);
+        } else {
+            // 补回显示的那张 = 点炮待归位的和牌: 它早就躺在河里了, 不再飞一次/不再播报
+            this._pendingRiverNode =
+                this._discardContainer.children[this._discardContainer.children.length - 1] ?? null;
+        }
     }
 
     /**
@@ -2779,6 +2860,7 @@ export class Main extends Component {
         // 上一帧的手牌槽位: 摸牌/出牌后手牌整体重排,靠它让牌背"滑"到新位置
         const prevSlots = this._handSlots.get(seat);
         const nextSlots = new Map<number, Vec3>();
+        const hideTile = this._pendingRonTile(seat);
 
         if (idx === 0) {
             // 上家: 顶部,牌竖向,横向排列,缩小(高度按手牌比例)
@@ -2795,7 +2877,9 @@ export class Main extends Component {
                 node.setPosition(x, 0, 0);
                 this._glideAITile(tile, node, prevSlots);
                 nextSlots.set(tile.id, new Vec3(x, 0, 0));
-                if (reveal) this._popRevealed(node, i);
+                // 吃胡的那张牌此刻还在来路(弃牌河/被抢者手里): 手牌留空槽, 等飞过来再填
+                if (tile === hideTile) this._markPendingWin(node);
+                else if (reveal) this._popRevealed(node, i);
             }
         } else {
             // 左/右家: 牌背与弃牌河/副露保持同一朝向(随桌面侧边倾斜横躺),
@@ -2815,7 +2899,9 @@ export class Main extends Component {
                 node.setPosition(x, 0, 0);
                 this._glideAITile(tile, node, prevSlots);
                 nextSlots.set(tile.id, new Vec3(x, 0, 0));
-                if (reveal) this._popRevealed(node, i);
+                // 吃胡的那张牌此刻还在来路(弃牌河/被抢者手里): 手牌留空槽, 等飞过来再填
+                if (tile === hideTile) this._markPendingWin(node);
+                else if (reveal) this._popRevealed(node, i);
             }
         }
         this._storeHandSlots(seat, nextSlots);
@@ -2856,6 +2942,21 @@ export class Main extends Component {
         return node;
     }
 
+    /**
+     * 牌河刷新后的收尾: 正常情况下新牌要"飞进来 + 播报";
+     * 但补回显示的那张(点炮待归位)本来就在河里, 不能再飞一次、也不能再播一次报
+     * —— 只把它记下来, 等归位动画落位时销毁。
+     */
+    private _dropOrHoldRiver(
+        container: Node, tiles: Tile[], base: Tile[], seat: number, handTileW: number,
+    ): void {
+        if (tiles === base) {
+            this._animateRiverDrop(seat, container, base, handTileW);
+            return;
+        }
+        this._pendingRiverNode = container.children[container.children.length - 1] ?? null;
+    }
+
     private _refreshAIDiscard(idx: number): void {
         const container = this._aiDiscardContainers[idx];
         if (!container) return;
@@ -2866,16 +2967,18 @@ export class Main extends Component {
 
         if (idx === 0) {
             // 上家: 顶部,每排 RIVER_COLS 张,向下堆(朝着桌心方向),避免与上方手牌/副露重叠
-            this._renderRiver(container, ai.discards, this.RIVER_COLS, -1, true, 0);
-            this._animateRiverDrop(1, container, ai.discards, this.TOP_TILE_W);
+            const tiles = this._riverTilesFor(1, ai.discards);
+            this._renderRiver(container, tiles, this.RIVER_COLS, -1, true, 0);
+            this._dropOrHoldRiver(container, tiles, ai.discards, 1, this.TOP_TILE_W);
         } else {
             // 左/右家: 容器已旋转 ±90°,牌用横向多行排列(旋转后即沿侧边纵向)
             // 行增长方向必须"朝桌外": 两家容器旋转方向相反(左 +80.4°/右 -80.4°),
             // 但容器局部 +y 在左家指向世界 -x、在右家指向世界 +x,两边都是"朝桌外",
             // 所以两家都取 +1。原来左家取 -1(朝桌心),牌一多(第 3 行起)就会压到本家的弃牌河上。
             const dir = 1;
-            this._renderRiver(container, ai.discards, this.SIDE_RIVER_COLS, dir, true, 0);
-            this._animateRiverDrop(idx + 1, container, ai.discards, this.SIDE_TILE_W);
+            const tiles = this._riverTilesFor(idx + 1, ai.discards);
+            this._renderRiver(container, tiles, this.SIDE_RIVER_COLS, dir, true, 0);
+            this._dropOrHoldRiver(container, tiles, ai.discards, idx + 1, this.SIDE_TILE_W);
         }
     }
 
@@ -3165,6 +3268,8 @@ export class Main extends Component {
                 this._huFx.play(data, {
                     anchorOf: (seat, tile) => this._huFxAnchorOf(seat, tile),
                     originOf: (winner) => this._huFxOriginOf(winner),
+                    // 牌飞到赢家手牌的那一帧: 手牌空槽填上、弃牌河那张收走
+                    onLanded: () => this._onRonTileLanded(),
                 }, () => this._settlement?.show(data));
             } else {
                 // 特效层没建起来(理论上到不了): 退回旧行为, 面板直接弹

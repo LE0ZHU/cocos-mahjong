@@ -41,6 +41,8 @@ C_GOLD = color('C_GOLD')
 T_LAND = num('T_LAND')
 RING_LIFE = num('RING_LIFE')
 T_BEAT = num('T_BEAT')
+T_HL = num('T_HL')
+T_FLY_DUR = num('T_FLY_DUR')
 MAIN_SRC = open(os.path.join(ROOT, 'assets/scripts/Main.ts'), encoding='utf-8').read()
 REVEAL_TAIL = float(re.search(r'HU_FX_REVEAL_TAIL = ([\d.]+)', MAIN_SRC).group(1))
 T_DONE = num('T_DONE')
@@ -50,11 +52,13 @@ def text_width(text, font):
     return sum(font if ord(ch) >= 0x2e80 else font * 0.5 for ch in text)
 
 
-def frame(flight=None, ghost=True, subdued=False):
+def frame(flight=None, ghost=True, subdued=False, start_ring=False):
     """画一帧亮桌面: 毡布 + 象征性牌河/手牌 + (可选的)飞行副本 / 落位金环
 
-    flight: 飞行进度 0~1; ghost: 沿途残影。
+    flight: 飞行进度 0~1; ghost: 沿途残影; start_ring: 起点(弃牌河那一格)的高亮金框。
     **没有闪光**: 2026-10-18 用户反馈那块实心金色矩形太突兀 —— 强调只留描边金环。
+    2026-10-19: 和牌不再"直接塞进赢家手牌" —— 它先留在弃牌河里(start_ring 那一帧),
+    高亮后才飞向赢家手牌的空槽。
     """
     w, h = 1180, 700
     scale = w / CONTENT_W
@@ -69,19 +73,25 @@ def frame(flight=None, ghost=True, subdued=False):
         d.rounded_rectangle([x - 24, 26, x + 24, 104], radius=6, fill=(244, 240, 232, 235))
 
     # 和牌归位: 副本从牌河末格飞向手牌落位(沿途转正 + 越飞越大)
+    start = (w * 0.5 + 330 * scale, h * 0.30)
+    end = (w / 2 + 150 * scale, h - 150)
+    ew, eh = 62 * scale, 82 * scale
+    lw = max(2, int((4 if subdued else 6) * scale))
+    gold = (C_GOLD[0], C_GOLD[1], C_GOLD[2], 235)
+    # 起点高亮: 和牌此刻还躺在弃牌河那一格, 先给它套上金框
+    if start_ring:
+        sx, sy = start
+        sw, sh = 52 * scale, 69 * scale
+        d.rounded_rectangle([sx - sw / 2 - 7, sy - sh / 2 - 7, sx + sw / 2 + 7, sy + sh / 2 + 7],
+                            radius=10 * scale, outline=gold, width=lw)
     if flight is not None:
-        start = (w * 0.5 + 330 * scale, h * 0.30)
-        end = (w / 2 + 150 * scale, h - 150)
-
         def lerp(t):
             return (start[0] + (end[0] - start[0]) * t, start[1] + (end[1] - start[1]) * t)
 
         ex, ey = end
-        ew, eh = 62 * scale, 82 * scale
         # 落位金环(描边, 由大收到牌面大小再淡出 RING_LIFE) + 飞行副本的金边框
-        lw = max(2, int((4 if subdued else 6) * scale))
         d.rounded_rectangle([ex - ew / 2 - 7, ey - eh / 2 - 7, ex + ew / 2 + 7, ey + eh / 2 + 7],
-                            radius=10 * scale, outline=(C_GOLD[0], C_GOLD[1], C_GOLD[2], 235), width=lw)
+                            radius=10 * scale, outline=gold, width=lw)
         for t, alpha in ((flight - 0.22, 60), (flight - 0.11, 120), (flight, 255)):
             if t < 0 or (not ghost and alpha < 255):
                 continue
@@ -105,11 +115,15 @@ def frame(flight=None, ghost=True, subdued=False):
 
 
 def main():
-    # 时间从**点胡**起算: 翻面 ~%.2fs | 起飞 %.2f | 落位 %.2f(金环 %.2f + 留一眼 %.2f) | 交棒 %.2f → 面板 ≈%.2fs 就位
+    # 时间从**点胡**起算: 翻面 ~%.2fs | 起点高亮 %.2f | 飞行 %.2f | 落位金环 %.2f + 留一眼 %.2f | 交棒 → 面板
     cases = [
-        ('%.2f~%.2fs 副本飞行中(亮桌面, 全程不压暗 —— 压暗那拍已删除)' % (REVEAL_TAIL, REVEAL_TAIL + T_LAND),
+        ('%.2fs 起点高亮: 和牌还躺在弃牌河那一格(金框), 赢家手牌留着空槽 —— 它不"直接塞进手里"'
+         % REVEAL_TAIL,
+         dict(start_ring=True)),
+        ('%.2f~%.2fs 副本飞行中(亮桌面, 全程不压暗 —— 压暗那拍已删除)'
+         % (REVEAL_TAIL + T_HL, REVEAL_TAIL + T_LAND),
          dict(flight=0.45)),
-        ('%.2fs 落位: 描边金环 %.2fs(闪光已删) + 留一眼 %.2fs → %.2fs 交棒结算面板(遮罩与结论都由面板负责)'
+        ('%.2fs 落位: 填进赢家手牌那个空槽 + 描边金环 %.2fs(闪光已删) + 留一眼 %.2fs → %.2fs 交棒结算面板'
          % (REVEAL_TAIL + T_LAND, RING_LIFE, T_BEAT, REVEAL_TAIL + T_DONE),
          dict(flight=1.0, ghost=False)),
     ]

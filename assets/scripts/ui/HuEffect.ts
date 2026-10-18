@@ -14,8 +14,14 @@ const { ccclass } = _decorator;
 // **没有闪光**(2026-10-18 用户反馈"黄色的一块闪一下显得很突兀"): 强调只用**金环**
 // (描边, 不填色) —— 同为强调手段, 那块实心金色矩形会盖住牌面, 描边不会。
 // play() 在三家翻面播完之后才被 Main 调进来(HU_FX_REVEAL_TAIL = 1.15s 之前只播翻面)。
-const T_FLY_DUR = 0.7;      // 第 1 拍: 副本起飞(play 一开始就飞, 亮桌面上看得清)
-const T_LAND = 0.7;         // 落位 → 定格金环
+/**
+ * 起点高亮(2026-10-19): 和牌先在**来路**(弃牌河那一格)被金色边框**亮一下**, 再起飞。
+ * 用户要的就是"吃胡的那张牌在弃牌河里被高亮, 再过渡到赢家手牌" ——
+ * 没有这一拍, 看上去仍然是"牌凭空出现在手里"。
+ */
+const T_HL = 0.3;
+const T_FLY_DUR = 0.7;      // 第 1 拍: 副本起飞(亮桌面上看得清)
+const T_LAND = 1.0;         // 落位 = 高亮 0.3 + 飞行 0.7 → 定格金环
 /**
  * 金环寿命 0.45s: 落位后轻微由大收到牌面大小, 再淡出 —— "就是这张"。
  * (2026-10-18 闪光删掉后, 金环是唯一的强调手段, 从 0.3s 放宽到 0.45s;
@@ -23,10 +29,10 @@ const T_LAND = 0.7;         // 落位 → 定格金环
  */
 const RING_LIFE = 0.45;
 /** 金环收束 → 交棒之间留的一眼(看清是哪张牌后才让面板上来) */
-const T_BEAT = 0.5;
-const T_TILE = 0.7;         // 自摸(无飞行)的金环时刻(与吃胡落位同一时刻)
-/** 交棒: 面板开始上滑 —— 落位 0.7 + 金环 0.45 + 留一眼 0.5(点胡起 ≈3.3s 就位) */
-const T_DONE = 1.65;
+const T_BEAT = 0.35;
+const T_TILE = 1.0;         // 自摸(无飞行)的金环时刻(与吃胡落位同一时刻)
+/** 交棒: 面板开始上滑 —— 高亮 0.3 + 飞行 0.7 + 金环 0.45 + 留一眼 0.35(点胡起 ≈3.45s 就位) */
+const T_DONE = 1.8;
 // 流局没有任何"归位"可播(没人胡, 没有关键牌), 陪着等就是纯枯等 —— 立刻交棒
 const DRAW_T_DONE = 0.15;
 
@@ -55,6 +61,13 @@ export interface HuFxHooks {
      * 吃胡 = 牌河被取走的那一格; 抢杠 = 补杠者的副露区。返回 null = 不做飞行。
      */
     originOf(winner: WinnerResult): HuFxAnchor | null;
+    /**
+     * 和牌落位到赢家手牌的那一帧(2026-10-19)
+     *
+     * UI 在这一刻才把那张牌"从弃牌河收进手牌": 手牌里预留的空槽填上、
+     * 弃牌河补回显示的那张销毁。一炮多响会对每个赢家各调一次(UI 侧要幂等)。
+     */
+    onLanded?: (winner: WinnerResult) => void;
 }
 
 /**
@@ -128,9 +141,9 @@ export class HuEffect extends Component {
                     : null;
                 if (origin) {
                     this._flyCopy(origin, dest, w.winTile!, subdued);
-                    this.scheduleOnce(() => this._showRing(dest, subdued), T_LAND);
+                    this.scheduleOnce(() => this._land(dest, w, subdued), T_LAND);
                 } else {
-                    this.scheduleOnce(() => this._showRing(dest, subdued), T_TILE);
+                    this.scheduleOnce(() => this._land(dest, w, subdued), T_TILE);
                 }
             }
         }
@@ -158,6 +171,15 @@ export class HuEffect extends Component {
         const cb = this._onDone;
         this._onDone = null;
         cb?.();
+    }
+
+    /**
+     * 落位: 金环定格 + 通知 UI“这张牌已经到赢家手里了”
+     * (UI 在这一刻才把手牌空槽填上、把弃牌河那张收走 —— 见 HuFxHooks.onLanded)
+     */
+    private _land(anchor: HuFxAnchor, winner: WinnerResult, subdued: boolean): void {
+        this._showRing(anchor, subdued);
+        this._hooks?.onLanded?.(winner);
     }
 
     /** 幂等建层 + 补画(原生平台"隐藏期画的 Graphics 上不了屏") */
@@ -251,6 +273,7 @@ export class HuEffect extends Component {
         const op = ensureOpacity(copy);
         op.opacity = 255;
         tween(copy)
+            .delay(T_HL)   // 先把来路那一格亮一下再起飞 —— 否则就是“凭空出现”
             .to(T_FLY_DUR, { position: new Vec3(end.x, end.y, 0) }, { easing: 'quadOut' })
             .call(() => {
                 // 角度/缩放那条补间可能还在跑, 先停再销毁(对已销毁节点补间会刷警告)
@@ -260,6 +283,7 @@ export class HuEffect extends Component {
             .start();
         // 缩放/转正略早于落位收束(与 flyToSlot 同一套手感: 85% 处到位, 留一点缓冲)
         tween(copy)
+            .delay(T_HL)
             .to(T_FLY_DUR * 0.85, {
                 scale: v3(1, 1, 1),
                 angle: dest.angle ?? dest.container.angle,
@@ -276,9 +300,18 @@ export class HuEffect extends Component {
         gg.roundRect(-bw / 2, -bh / 2, bw, bh, 14);
         gg.stroke();
         ghost.angle = copy.angle;
+        // 起点高亮: 金框先淡入(0.12s)并在高亮拍里亮着, 起飞(T_HL)之后才作为残影淡出
         const gop = ensureOpacity(ghost);
-        gop.opacity = 170;
-        tween(gop).to(0.5, { opacity: 0 }).start();
-        tween(ghost).to(0.5, { scale: v3(0.8, 0.8, 1) }).call(() => ghost.destroy()).start();
+        gop.opacity = 0;
+        ghost.setScale(1.14, 1.14, 1);
+        tween(gop).to(0.12, { opacity: 235 })
+            .delay(Math.max(0, T_HL - 0.12))
+            .to(0.5, { opacity: 0 })
+            .start();
+        tween(ghost).to(0.12, { scale: v3(1, 1, 1) }, { easing: 'quadOut' })
+            .delay(Math.max(0, T_HL - 0.12))
+            .to(0.5, { scale: v3(0.8, 0.8, 1) })
+            .call(() => ghost.destroy())
+            .start();
     }
 }
