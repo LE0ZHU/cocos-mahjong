@@ -7,6 +7,8 @@ import {
 import { TileView, tileRadius } from './TileView';
 import { Tile } from '../core/Tile';
 import { FanItem, SeatResult, SettlementData, WinnerResult } from '../core/HuScore';
+import { HuChecker } from '../core/HuChecker';
+import { HintAdvisor } from '../game/HintAdvisor';
 import { careerText } from '../game/CareerStats';
 import { CAREER } from '../game/CareerStore';
 
@@ -78,6 +80,13 @@ const DELTA_FONT = 32;
 const DELTA_Y = 16;
 const TOTAL_FONT = 20;
 const TOTAL_Y = -17;
+/**
+ * 流局时右侧改显示"听什么"(此时"本局得失"恒为 0, 没有信息量)
+ *
+ * 宽度给 200: 左边界到 460, 而手牌 + 满副露最多右展到 ~446, 刚好不撞。
+ */
+const WAIT_FONT = 20;
+const WAIT_W = 200;
 /** 本局 AI 台词(挂在"四家手牌"那一行的最右侧) */
 const SPEECH_FONT = 24;
 const SPEECH_TEXT = new Color(255, 226, 158, 255);
@@ -378,12 +387,15 @@ export class SettlementPanel extends Component {
         }
 
         // 四家手牌
+        // 流局时右侧那格"本局得失"必然全是 0, 换成"听什么" —— 流局后玩家最想知道
+        // 的恰恰是"我到底听没听、他们听什么", 而这时四家手牌本来就已经亮出来了。
+        const showWaiting = data.kind === 'draw';
         for (let i = 0; i < data.seats.length; i++) {
             const seat = data.seats[i];
             const winTile = seat.isWinner
                 ? (data.winners.find(w => w.seat === seat.seat)?.winTile ?? null)
                 : null;
-            this._buildSeatRow(card, seat, winTile, L.rowsTopY - i * (L.rowH + ROW_GAP));
+            this._buildSeatRow(card, seat, winTile, L.rowsTopY - i * (L.rowH + ROW_GAP), showWaiting);
         }
 
         // 生涯战绩(跨会话累积): 打完一局正是想看一眼"总共打到哪了"的时候
@@ -546,8 +558,35 @@ export class SettlementPanel extends Component {
         return node;
     }
 
-    /** 一家的一行: 座位名 + 手牌 + 副露 + 得失分 */
-    private _buildSeatRow(card: Node, seat: SeatResult, winTile: Tile | null, y: number): void {
+    /**
+     * 听牌文案, 超出右侧那格宽度时截断
+     *
+     * 【为什么必须截断】`createLabelNode` 用的是 `Label.Overflow.SHRINK` ——
+     * 文本超宽不会有任何报错, 而是**把字号压小**直到塞进去。国士无双 / 七对这类
+     * 多面听能列出十几个牌型, 直接丢给 Label 就会压成一行蚂蚁字(硬约束 4 的老坑)。
+     * 这里按"少列几个 + 等"收, 宁可少说也不能看不清。
+     */
+    private _fitWaitingText(waiting: Tile[]): string {
+        let text = HintAdvisor.waitingText(waiting);
+        if (textWidth(`听 ${text}`, WAIT_FONT) <= WAIT_W) return text;
+        for (let n = waiting.length - 1; n >= 1; n--) {
+            text = `${HintAdvisor.waitingText(waiting.slice(0, n))} 等`;
+            if (textWidth(`听 ${text}`, WAIT_FONT) <= WAIT_W) return text;
+        }
+        return text;
+    }
+
+    /** 一家的一行: 座位名 + 手牌 + 副露 + 得失分(流局时换成听牌情况) */
+    private _buildSeatRow(
+        card: Node,
+        seat: SeatResult,
+        winTile: Tile | null,
+        y: number,
+        showWaiting: boolean,
+    ): void {
+        // 流局才去枚举听牌: 胡牌局里赢家手牌是 14 张, 再补一张枚举会算出错误结果
+        const waiting = showWaiting ? HuChecker.isTenpai(seat.hand, seat.melds) : [];
+        const tenpai = showWaiting ? waiting.length > 0 : seat.declaredTenpai;
         const rowH = this._layout.rowH;
         const row = new Node(`Row_${seat.seat}`);
         row.parent = card;
@@ -568,20 +607,20 @@ export class SettlementPanel extends Component {
         }
         row.setPosition(0, y, 0);
 
-        // 座位名(已宣告听牌的加"听"标记)
+        // 座位名(听牌加"听"标记: 流局看实际是否听牌, 其余局看是否宣告过)
         const nameBg = new Node('NameBg');
         nameBg.parent = row;
         nameBg.addComponent(UITransform).setContentSize(NAME_W, 38);
         const ng = nameBg.addComponent(Graphics);
-        ng.fillColor = seat.declaredTenpai ? new Color(186, 124, 40, 235) : new Color(0, 0, 0, 110);
+        ng.fillColor = tenpai ? new Color(186, 124, 40, 235) : new Color(0, 0, 0, 110);
         ng.roundRect(-NAME_W / 2, -19, NAME_W, 38, 9);
         ng.fill();
-        ng.strokeColor = seat.declaredTenpai ? new Color(250, 214, 140, 255) : new Color(255, 255, 255, 26);
+        ng.strokeColor = tenpai ? new Color(250, 214, 140, 255) : new Color(255, 255, 255, 26);
         ng.lineWidth = 1.5;
         ng.roundRect(-NAME_W / 2, -19, NAME_W, 38, 9);
         ng.stroke();
         nameBg.setPosition(NAME_CX, 0, 0);
-        this._label(row, `${seat.name}${seat.declaredTenpai ? ' 听' : ''}`, NAME_FONT,
+        this._label(row, `${seat.name}${tenpai ? ' 听' : ''}`, NAME_FONT,
             seat.isWinner ? TEXT_TITLE : TEXT_ROW, NAME_W - 8, 0, NAME_CX);
 
         // 手牌(和的那张金边高亮)
@@ -599,10 +638,17 @@ export class SettlementPanel extends Component {
             }
         }
 
-        // 右侧: 本次得失(大, 偏上) + 累计(小, 偏下), 两者纵向错开不重叠
-        const deltaText = seat.delta > 0 ? `+${seat.delta}` : `${seat.delta}`;
-        this._label(row, deltaText, DELTA_FONT, seat.delta > 0 ? GAIN : (seat.delta < 0 ? LOSS : TEXT_MUTED),
-            200, DELTA_Y, SCORE_CX);
+        // 右侧: 得失分(大, 偏上) + 累计(小, 偏下), 两者纵向错开不重叠
+        // 流局时上格换成"听 X" —— 这一局的得失恒为 0, 让位给真正有信息量的东西
+        if (showWaiting) {
+            const has = waiting.length > 0;
+            this._label(row, has ? `听 ${this._fitWaitingText(waiting)}` : '未听', WAIT_FONT,
+                has ? GAIN : TEXT_MUTED, WAIT_W, DELTA_Y, SCORE_CX);
+        } else {
+            const deltaText = seat.delta > 0 ? `+${seat.delta}` : `${seat.delta}`;
+            this._label(row, deltaText, DELTA_FONT, seat.delta > 0 ? GAIN : (seat.delta < 0 ? LOSS : TEXT_MUTED),
+                200, DELTA_Y, SCORE_CX);
+        }
         this._label(row, `累计 ${seat.total >= 0 ? '+' : ''}${seat.total}`, TOTAL_FONT, TEXT_MUTED,
             200, TOTAL_Y, SCORE_CX);
     }

@@ -63,6 +63,9 @@ export class TileView extends Component {
     private _mark: Node | null = null;         // 刚摸到的牌高亮标注
     private _hintMark: Node | null = null;     // AI 建议打出的牌高亮标注
     private _hinted = false;                   // 是否处于"AI 建议打出"状态(影响静止位置)
+    private _dangerMark: Node | null = null;   // 危险牌角标(打出去可能点炮)
+    /** 当前危险档位(0=无 / 1=留意 / 2=危险); 隐藏过再显示时要按它补画 */
+    private _dangerLevel = 0;
     private _onClick: ((index: number) => void) | null = null;
     /** 拖牌出牌回调: 返回 true 表示确实打出去了(手牌会被整体重建) */
     private _onDiscard: ((index: number) => boolean) | null = null;
@@ -103,6 +106,9 @@ export class TileView extends Component {
     onEnable(): void {
         this._ensureRefs();
         if (this._tile) this._applyDisplay();
+        // 原生平台上"隐藏过再显示"的 Graphics 顶点是回不来的(不只 onLoad) ——
+        // 手牌整体重建 + 结算面板重建都会走到这里, 必须按记录的水平补画一次
+        this._paintDanger();
     }
 
     /**
@@ -226,6 +232,48 @@ export class TileView extends Component {
         // 提示态也要把牌抬起来(比选中抬得略低, 见 HINTED_LIFT)
         Tween.stopAllByTarget(this.node);
         this._applyRestPos();
+    }
+
+    /**
+     * 标记"打出去有被点炮的风险"(0=不标 / 1=留意 / 2=危险)
+     *
+     * 【为什么是角标, 不是第三个整圈框】牌上已经有两套"整圈"语言了:
+     * 金色柔光框 = 刚摸到, 青蓝双框 = 建议打出。而"建议打出的那张"经常同时就是
+     * 危险牌 —— 再叠一个整圈必然撞在一起、分不清是哪条信息。所以危险改用
+     * **右上角的实心圆点**: 位置固定、不占牌面中心、与两种框都能共存。
+     *
+     * 【为什么要深色外圈 + 白色高光】牌面是浅色, 但右上角可能正压着红色图案
+     * (红中 / 一筒 / 九筒), 纯红色块会糊成一片。深色外圈保证任何底色上都看得见。
+     *
+     * 档位阈值不在这里判(见 `HintAdvisor.dangerLevel`): 角标与提示文案必须同一条线。
+     */
+    setDanger(level: number): void {
+        const lv: number = level >= 2 ? 2 : (level >= 1 ? 1 : 0);
+        this._dangerLevel = lv;
+        if (lv > 0 && !this._dangerMark) {
+            const t = this.node.getComponent(UITransform);
+            const mark = new Node('DangerMark');
+            mark.parent = this.node;
+            mark.addComponent(UITransform)
+                .setContentSize(t ? t.width : 64, t ? t.height : 87);
+            this._dangerMark = mark;
+        }
+        // 先切 active 再画: 画在隐藏节点上的 Graphics 在原生平台会被丢掉
+        if (this._dangerMark) this._dangerMark.active = lv > 0;
+        this._paintDanger();
+    }
+
+    /** 按当前档位重画危险角标(节点未创建 / 档位为 0 时直接跳过) */
+    private _paintDanger(): void {
+        const mark = this._dangerMark;
+        if (!mark || this._dangerLevel <= 0 || !mark.active) return;
+        const t = this.node.getComponent(UITransform);
+        const w = t ? t.width : 64;
+        const h = t ? t.height : 87;
+        const g = mark.getComponent(Graphics) ?? mark.addComponent(Graphics);
+        // 角标永远画在最上层: 牌面 / 刚摸到金框 / 提示框 都在它下面
+        mark.setSiblingIndex(this.node.children.length - 1);
+        drawDangerDot(g, w, h, this._dangerLevel);
     }
 
     /** 按花色应用显示: 优先使用真实牌面图片,缺失时回退矢量绘制 */
@@ -557,6 +605,36 @@ function drawHintMark(g: Graphics, w: number, h: number): void {
     g.lineWidth = 3;
     g.roundRect(-w / 2 - 1, -h / 2 - 1, w + 2, h + 2, r + 1);
     g.stroke();
+}
+
+/**
+ * 绘制危险牌角标: 右上角一颗实心圆点(1=黄 / 2=红), 外圈深色 + 中心高光
+ *
+ * 圆心与半径都按**短边**取比例, 于是手牌(91×122)、副露牌(52×70)与结算面板的
+ * 小牌(36×48)上是同一个观感 —— 不必为每种尺寸各调一套数字。
+ * 位置贴右上角内缩 17%, 避开牌面中心的图案/数字。
+ */
+function drawDangerDot(g: Graphics, w: number, h: number, level: number): void {
+    g.clear();
+    const short = Math.min(w, h);
+    const inset = short * 0.17;
+    const cx = w / 2 - inset;
+    const cy = h / 2 - inset;
+    const r = level >= 2 ? short * 0.105 : short * 0.075;
+    // 外圈深色描边: 牌面浅色, 但右上角可能压着红色图案(红中/一筒/九筒), 纯色块会糊
+    g.fillColor = new Color(26, 24, 20, 155);
+    g.circle(cx, cy, r + Math.max(1.6, short * 0.026));
+    g.fill();
+    // 主体
+    // 留意档刻意偏黄而不是偏橙: 手牌上只有 91px 宽, 橙红两色在牌面的米白底上
+    // 远看几乎是一个颜色, 只有"黄 vs 红"才一眼分得开档位
+    g.fillColor = level >= 2 ? new Color(226, 75, 74, 255) : new Color(250, 194, 62, 255);
+    g.circle(cx, cy, r);
+    g.fill();
+    // 左上偏一点的白高光, 让圆点看起来是"珠子"而不是贴上去的色块
+    g.fillColor = new Color(255, 255, 255, 205);
+    g.circle(cx - r * 0.3, cy + r * 0.3, r * 0.33);
+    g.fill();
 }
 
 /**

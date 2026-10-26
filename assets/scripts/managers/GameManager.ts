@@ -1558,6 +1558,37 @@ export class GameManager extends Component {
     }
 
     /**
+     * 玩家手牌每张牌的"被点炮危险度"(0~100), 下标与 `player.hand` 一一对应
+     *
+     * 【为什么要给玩家】`AIDefense` 从 2026-10 起就在给三家 AI 算危险度(现物 0 /
+     * 单筋 18 / 断幺中张 78 …), 但玩家一张都看不到 —— 同一张牌, AI 知道它危险、
+     * 玩家不知道, 这是纯粹的能力不对等, 不是"难度"。麻将的"读牌"本来就是公开信息
+     * 推理, 把推理结果摆出来不等于透视手牌。
+     *
+     * 【什么时候返回空数组】只在"玩家真的要打出一张牌"时给:
+     *  - 别家回合 / 发牌期: 标了也没用, 只是满屏红点
+     *  - 正在选吃碰杠: 那时要决定的是"要不要亮牌", 不是"打哪张"
+     * 返回空数组 = UI 不标任何角标, 调用方不用再判断状态。
+     *
+     * 口径与 `HintAdvisor.discard` 的 `HintOption.danger` 完全相同(都走
+     * `AIBrain.dangerMap`), 否则会出现"提示说安全、角标却是红的"。
+     */
+    getHandDanger(): number[] {
+        if (this._phase !== GamePhase.PLAYER_TURN) return [];
+        if (!this._canDiscard || this._awaitingPlayerMeld) return [];
+        const ctx = this._buildAdviceContext();
+        if (!ctx || ctx.hand.length === 0) return [];
+
+        const map = AIBrain.dangerMap(ctx);
+        const out: number[] = [];
+        for (let i = 0; i < ctx.hand.length; i++) {
+            const t = ctx.hand[i];
+            out.push(map[tileIndexOf(t.suit, t.rank)]);
+        }
+        return out;
+    }
+
+    /**
      * 玩家请求一次提示(由 UI 的"提示"按钮调用)
      *
      * 会按当前处境自动选形态: 能胡就提示胡, 在选副露就提示吃/碰/杠,

@@ -61,6 +61,19 @@ const HINT_ALT_COUNT = 2;
 const DANGER_WARN = 45;
 const DANGER_BAD = 65;
 
+/**
+ * 危险度 → 档位(0=不标 / 1=留意 / 2=危险)
+ *
+ * 【为什么单独导出】手牌上的危险角标(`TileView.setDanger`)与提示文案的措辞
+ * 必须同一条线: 角标亮红、提示却写"偏危险"会让人怀疑哪个是真的。
+ * 阈值只此一处, 两个 UI 都调它。
+ */
+export function dangerLevel(danger: number): 0 | 1 | 2 {
+    if (danger >= DANGER_BAD) return 2;
+    if (danger >= DANGER_WARN) return 1;
+    return 0;
+}
+
 export class HintAdvisor {
     /**
      * 出牌提示: 该打哪张

@@ -8,7 +8,7 @@ import { SettlementPanel } from './ui/SettlementPanel';
 import { HuEffect, HuFxAnchor } from './ui/HuEffect';
 import { HintPanel } from './ui/HintPanel';
 import { SettingsPanel } from './ui/SettingsPanel';
-import { Hint, HintAdvisor } from './game/HintAdvisor';
+import { Hint, HintAdvisor, dangerLevel } from './game/HintAdvisor';
 import { GAME_RULES } from './game/GameRules';
 import { preloadTileImages } from './ui/TileImage';
 import { preloadSounds, playTileVoice, playMeldVoice, playPassVoice, playBgm, playButtonClick, syncAudioSettings } from './audio/Sound';
@@ -2823,6 +2823,9 @@ export class Main extends Component {
         const player = gm?.player;
         if (!player) return;
 
+        // 每张牌对"别家"的危险度(与提示同源); 不在玩家出牌阶段时它是空数组 = 不标
+        const danger = gm?.getHandDanger() ?? [];
+
         // 发牌动画期间只显示前 limit 张,且不按"刚摸到的牌"处理(那时还没到玩家回合)
         const dealing = limit !== undefined && this._dealing;
         const fullCount = player.hand.length;
@@ -2851,7 +2854,7 @@ export class Main extends Component {
         for (let i = 0; i < normalCount; i++) {
             const tile = player.hand[i];
             const x = startX + i * step;
-            const node = this._createHandTile(tile, i, x, false);
+            const node = this._createHandTile(tile, i, x, false, danger[i] ?? 0);
             const prev = prevSlots?.get(tile.id);
             if (prev) glideTo(node, prev);
             nextSlots.set(tile.id, new Vec3(x, 0, 0));
@@ -2867,7 +2870,7 @@ export class Main extends Component {
                 && !!gm?.tsumoFlight && gm.tsumoFlight.seat === 0 && gm.tsumoFlight.tile === tile;
             const x0 = pending ? winX - winSep : winX;
             // 待归位期间保留"刚摸到"的金色标注: 金标 → 特效金框点亮 → 归位, 中间不断档
-            const node = this._createHandTile(tile, count - 1, x0, hasDrawn || pending);
+            const node = this._createHandTile(tile, count - 1, x0, hasDrawn || pending, danger[count - 1] ?? 0);
             const prev = prevSlots?.get(tile.id);
             if (prev) glideTo(node, prev);
             // 刚摸到的牌(还没胡): 上一帧不在手牌里就从右侧滑入
@@ -2890,8 +2893,8 @@ export class Main extends Component {
         this._refreshInfo();
     }
 
-    /** 创建一张手牌节点;drawn=是否为刚摸到的牌(加金色标注) */
-    private _createHandTile(tile: Tile, index: number, x: number, drawn: boolean): Node {
+    /** 创建一张手牌节点;drawn=是否为刚摸到的牌(加金色标注), danger=被点炮危险度 0~100 */
+    private _createHandTile(tile: Tile, index: number, x: number, drawn: boolean, danger = 0): Node {
         // 平面牌面(不再画顶侧厚度),与三家 AI 的牌看起来一样
         const tileNode = createTileNode(this.TILE_W, this.TILE_H, false);
         tileNode.parent = this._handContainer;
@@ -2904,6 +2907,8 @@ export class Main extends Component {
         // 拖出手牌区松手 → 直接出牌(返回 true 表示确实打出去了)
         view.setOnDiscard((idx) => this._onTileDropDiscard(idx));
         view.setDrawn(drawn);
+        // 阈值判断交给 HintAdvisor.dangerLevel: 角标与提示文案的"危险"必须是同一条线
+        view.setDanger(dangerLevel(danger));
         return tileNode;
     }
 
